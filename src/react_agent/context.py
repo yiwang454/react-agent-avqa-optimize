@@ -1,46 +1,63 @@
-"""Define the configurable parameters for the agent."""
+"""Runtime context and planner client helpers for AVQA ReAct."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, fields
-from typing import Annotated
+from dataclasses import dataclass, field
 
-from . import prompts
+from react_agent import prompts
+from react_agent.deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 
 
 @dataclass(kw_only=True)
-class Context:
-    """The context for the agent."""
+class RuntimeContext:
+    """Runtime configuration for DeepSeek planner and ReAct budget."""
 
-    system_prompt: str = field(
-        default=prompts.SYSTEM_PROMPT,
-        metadata={
-            "description": "The system prompt to use for the agent's interactions. "
-            "This prompt sets the context and behavior for the agent."
-        },
+    system_prompt: str = field(default=prompts.SYSTEM_PROMPT)
+    # Backward compatibility with template configuration/tests.
+    model: str | None = field(default=None)
+    planner_model: str = field(
+        default_factory=lambda: os.environ.get("PLANNER_MODEL", "DeepSeek-V3.2-A37B-tziwang-3")
     )
-
-    model: Annotated[str, {"__template_metadata__": {"kind": "llm"}}] = field(
-        default="anthropic/claude-sonnet-4-5-20250929",
-        metadata={
-            "description": "The name of the language model to use for the agent's main interactions. "
-            "Should be in the form: provider/model-name."
-        },
+    planner_api_key: str = field(
+        default_factory=lambda: os.environ.get("PLANNER_API_KEY", "EMPTY")
     )
-
-    max_search_results: int = field(
-        default=10,
-        metadata={
-            "description": "The maximum number of search results to return for each search query."
-        },
+    planner_wsid: str = field(
+        default_factory=lambda: os.environ.get("PLANNER_WSID", "12317")
+    )
+    planner_ss_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "PLANNER_BASE_URL",
+            "http://stream-server-online-openapi.turbotke.production.polaris:81/openapi/chat/completions",
+        )
+    )
+    max_turns: int = field(
+        default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4"))
     )
 
     def __post_init__(self) -> None:
-        """Fetch env vars for attributes that were not passed as args."""
-        for f in fields(self):
-            if not f.init:
-                continue
+        """Bridge legacy `MODEL`/`model` onto `planner_model`."""
+        if self.model:
+            self.planner_model = self.model
+            return
 
-            if getattr(self, f.name) == f.default:
-                setattr(self, f.name, os.environ.get(f.name.upper(), f.default))
+        legacy_model = os.environ.get("MODEL")
+        if legacy_model and os.environ.get("PLANNER_MODEL") is None:
+            self.planner_model = legacy_model
+            self.model = legacy_model
+
+
+def get_planner_llm(context: RuntimeContext | None = None) -> DeepSeekPlannerClient:
+    """Build planner client using direct DeepSeek HTTP API calls."""
+    cfg = context or RuntimeContext()
+    planner_cfg = DeepSeekPlannerConfig(
+        ss_url=os.environ.get("DEEPSEEK_SS_URL", cfg.planner_ss_url),
+        wsid=os.environ.get("DEEPSEEK_WSID", cfg.planner_wsid),
+        token=os.environ.get("DEEPSEEK_TOKEN", cfg.planner_api_key),
+        model=os.environ.get("DEEPSEEK_MODEL", cfg.planner_model),
+    )
+    return DeepSeekPlannerClient(planner_cfg)
+
+
+# Backward compatibility for template imports/tests.
+Context = RuntimeContext
