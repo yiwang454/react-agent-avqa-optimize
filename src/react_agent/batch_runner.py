@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,17 +16,46 @@ from react_agent import graph
 from react_agent.context import Context
 
 
+# DEFAULT_DEBUG_ID_LIST = [
+#     "dvgrOXBj-1334",
+#     # "ROEyKoiF-311",
+#     # "xArSBiiu-361",
+#     "rzAqzwvL-2720",
+#     # "SohqvGtQ-2530",
+#     # "lNQdrmMn-1410",
+#     # "LhCOTGxu-185",
+#     # "eapYeyoW-1809",
+# ]
 DEFAULT_DEBUG_ID_LIST = [
-    "dvgrOXBj-1334",
-    "ROEyKoiF-311",
-    "xArSBiiu-361",
-    "rzAqzwvL-2720",
-    "SohqvGtQ-2530",
-    "lNQdrmMn-1410",
-    "LhCOTGxu-185",
-    "eapYeyoW-1809",
+    "03aJ_RcnBko-1",
+    "03aJ_RcnBko-2",
+    "03aJ_RcnBko-3",
+    "03zeVlBWhdY-1",
+    "04ChQ0fqzxQ-1",
+    "04xLK7R5wNA-1",
+    "05xCYOyY1bg-1",
+    "068rdc75mHM-1",
+    "8EexlONNnEE-1",
+    "8TNPeimqOO0-1",
+    "8I2nIXrbFpo-1",
+    "8IZvEF4Ui10-2",
+    "SZRxEbvKih0-1",
+    "DK6bKtXUE1c-1",
+    "GDbG4rvL1YA-1",
+    "KIg4rprmO9Y-1",
+    "HGv87QeBYnc-1",
+    "vBrspDt3ib0-1",
+    "EQ-67udZEeg-2",
+    "AnWKOvjFl8k-1",
+    "_t2geYpykFo-2",
+    "TF9I1GxNdJQ-3",
+    "QxrYJf48s-4-2",
+    "4sBpUHylq9s-1",
+    "1F6g2NS_vGY-1",
+    "fqRSLvhdUII-1",
+    "10lWpHyN0Ok-1",
+    "8TNPeimqOO0-3",
 ]
-
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
@@ -75,6 +106,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Concurrent graph calls.",
+    )
+    parser.add_argument(
+        "--perception-model",
+        type=str,
+        choices=["gemini", "qwen"],
+        default=os.environ.get("PERCEPTION_MODEL", "gemini").strip().lower(),
+        help="Perception backend for tools: gemini or qwen.",
     )
     return parser.parse_args()
 
@@ -132,10 +170,16 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path) -> dict[str,
     question = supervision.get("text") or custom.get("question") or ""
     options = custom.get("options") or custom.get("Choice") or []
     video_path = custom.get("video_path") or source_video
+    audio_path = custom.get("audio_path")
     if not question or not options or not video_path:
         raise ValueError(
             f"Missing required AVQA fields in cut_id={cut.get('id')}: "
             f"question={bool(question)}, options={bool(options)}, video_path={bool(video_path)}"
+        )
+    if os.environ.get("PERCEPTION_MODEL", "gemini").strip().lower() == "qwen" and not audio_path:
+        raise ValueError(
+            f"Missing required AVQA audio field in cut_id={cut.get('id')}: "
+            "audio_path is required when PERCEPTION_MODEL=qwen"
         )
 
     question_id = str(cut.get("id") or "")
@@ -149,6 +193,7 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path) -> dict[str,
         "question": question,
         "options": options,
         "video_path": video_path,
+        "audio_path": audio_path,
         "video_id": custom.get("video_id"),
         "video_description": audio_caption,
     }
@@ -279,17 +324,20 @@ async def run_one(
     context: Context,
     recursion_limit: int,
     audio_caption_dir: Path,
-) -> tuple[dict[str, Any], str, list[AnyMessage]]:
+) -> tuple[dict[str, Any], str, list[AnyMessage], dict[str, Any], str | None]:
     """Run one cut through graph and return text answer."""
     payload = build_input_state(cut, audio_caption_dir)
-    result = await graph.ainvoke(
-        payload,
-        context=context,
-        config={"recursion_limit": recursion_limit},
-    )
-    messages = result.get("messages") or []
-    response_text = str(messages[-1].content) if messages else ""
-    return cut, response_text, messages
+    try:
+        result = await graph.ainvoke(
+            payload,
+            context=context,
+            config={"recursion_limit": recursion_limit},
+        )
+        messages = result.get("messages") or []
+        response_text = str(messages[-1].content) if messages else ""
+        return cut, response_text, messages, payload, None
+    except Exception as exc:
+        return cut, "", [], payload, str(exc)
 
 
 async def run_batch(
@@ -298,11 +346,13 @@ async def run_batch(
     recursion_limit: int,
     concurrency: int,
     audio_caption_dir: Path,
-) -> list[tuple[dict[str, Any], str, list[AnyMessage]]]:
+) -> list[tuple[dict[str, Any], str, list[AnyMessage], dict[str, Any], str | None]]:
     """Run cuts with optional concurrency."""
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def _guarded(cut: dict[str, Any]) -> tuple[dict[str, Any], str, list[AnyMessage]]:
+    async def _guarded(
+        cut: dict[str, Any]
+    ) -> tuple[dict[str, Any], str, list[AnyMessage], dict[str, Any], str | None]:
         async with semaphore:
             return await run_one(cut, context, recursion_limit, audio_caption_dir)
 
@@ -332,9 +382,48 @@ def write_results_jsonl(rows: list[dict[str, Any]], output_jsonl: Path) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def log_run_config(args: argparse.Namespace, selected_cuts: list[dict[str, Any]]) -> None:
+    """Print key runtime and model hyperparameters for verification."""
+    planner_keys = [
+        "PLANNER_TEMPERATURE",
+        "PLANNER_TOP_P",
+        "PLANNER_TOP_K",
+        "PLANNER_REPETITION_PENALTY",
+        "PLANNER_TIMEOUT",
+        "PLANNER_MAX_RETRIES",
+    ]
+    qwen_keys = [
+        "QWEN_BASE_URL",
+        "QWEN_MODEL",
+        "QWEN_TIMEOUT",
+    ]
+    gemini_keys = [
+        "GEMINI_BASE_URL",
+        "GEMINI_MODEL",
+        "GEMINI_TIMEOUT",
+    ]
+    print("[run-config] ----------")
+    print(f"[run-config] input_jsonl={args.input_jsonl}")
+    print(f"[run-config] output_jsonl={args.output_jsonl}")
+    print(f"[run-config] audio_caption_dir={args.audio_caption_dir}")
+    print(f"[run-config] debug={args.debug}")
+    print(f"[run-config] selected_cuts={len(selected_cuts)}")
+    if selected_cuts:
+        print(f"[run-config] first_cut_id={selected_cuts[0].get('id')}")
+    print(f"[run-config] perception_model={args.perception_model}")
+    print(f"[run-config] max_turns={args.max_turns}")
+    print(f"[run-config] recursion_limit={args.recursion_limit}")
+    print(f"[run-config] concurrency={args.concurrency}")
+    print(f"[run-config] planner_model={os.environ.get('DEEPSEEK_MODEL') or os.environ.get('PLANNER_MODEL')}")
+    for key in planner_keys + qwen_keys + gemini_keys:
+        print(f"[run-config] {key}={os.environ.get(key)}")
+    print("[run-config] ----------")
+
+
 async def amain() -> None:
     """Async entrypoint."""
     args = parse_args()
+    os.environ["PERCEPTION_MODEL"] = args.perception_model
     cuts = read_jsonl(args.input_jsonl)
     selected_cuts = cuts
     if args.debug:
@@ -342,6 +431,8 @@ async def amain() -> None:
 
     print(f"Loaded cuts: {len(cuts)}")
     print(f"Selected cuts: {len(selected_cuts)}")
+    print(f"Perception model: {args.perception_model}")
+    log_run_config(args, selected_cuts)
 
     context = Context(max_turns=args.max_turns)
     raw_results = await run_batch(
@@ -353,9 +444,35 @@ async def amain() -> None:
     )
 
     rows: list[dict[str, Any]] = []
-    for cut, response_text, messages in raw_results:
+    for cut, response_text, messages, payload, error in raw_results:
         row = build_result_row(cut, response_text)
-        row["question_data"]["turn_trace"] = build_turn_trace(messages)
+        if error is None:
+            row["question_data"]["turn_trace"] = build_turn_trace(messages)
+        else:
+            row["question_data"]["turn_trace"] = [
+                {
+                    "turn_id": 1,
+                    "planner_raw": None,
+                    "planner_action": "error",
+                    "tool_name": None,
+                    "tool_args": {
+                        "video_path": payload.get("video_path"),
+                        "audio_path": payload.get("audio_path"),
+                    },
+                    "tool_observation": None,
+                    "tool_error": error,
+                    "final_answer": None,
+                }
+            ]
+            row["question_data"]["response"] = f"[ERROR] {error}"
+            print(
+                "Cut failed:",
+                {
+                    "cut_id": cut.get("id"),
+                    "video_path": payload.get("video_path"),
+                    "audio_path": payload.get("audio_path"),
+                },
+            )
         maybe_dump_question_data(args.output_dir, row)
         rows.append(row)
 
@@ -365,7 +482,12 @@ async def amain() -> None:
 
 def main() -> None:
     """Sync wrapper."""
-    asyncio.run(amain())
+    start = time.perf_counter()
+    try:
+        asyncio.run(amain())
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f"Total elapsed time: {elapsed:.2f}s")
 
 
 if __name__ == "__main__":

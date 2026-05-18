@@ -22,6 +22,7 @@ class InputState(TypedDict):
     question: str
     options: list[str]
     video_path: str
+    audio_path: str | None
     video_id: str | None
     video_description: str | None
 
@@ -41,6 +42,7 @@ class AgentState(TypedDict, total=False):
     question: str
     options: list[str]
     video_path: str
+    audio_path: str | None
     video_id: str | None
     video_description: str | None
 

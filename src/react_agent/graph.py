@@ -22,12 +22,12 @@ PLANNER_ACTION_SCHEMA = """
 Return exactly one JSON object.
 
 If you need more perceptual evidence, output:
-{"action":"tool","tool_name":"ask_qwen_perception","arguments":{"video_path":"...","perceptual_question":"...","start_time":null,"end_time":null}}
+{"action":"tool","tool_name":"ask_qwen_perception","arguments":{"perceptual_question":"..."}}
 or
-{"action":"tool","tool_name":"temporal_ground_video","arguments":{"video_path":"...","target_question":"..."}}
+{"action":"tool","tool_name":"temporal_ground_video","arguments":{"perceptual_question":"..."}}
 
 If evidence is sufficient, output:
-{"action":"final","answer":"<single option label + concise rationale>"}
+{"action":"final","answer":"concise rationale + <answer>single option label</answer>"}
 
 Never output markdown fences. JSON only.
 """.strip()
@@ -76,7 +76,11 @@ def _strip_fences(text: str) -> str:
     return value.strip()
 
 
-def _planner_to_ai_message(raw: str, default_video_path: str) -> AIMessage:
+def _planner_to_ai_message(
+    raw: str,
+    default_video_path: str,
+    default_audio_path: str | None,
+) -> AIMessage:
     """Parse planner JSON output into an AI message with optional tool call."""
     try:
         payload = json.loads(_strip_fences(raw))
@@ -95,9 +99,13 @@ def _planner_to_ai_message(raw: str, default_video_path: str) -> AIMessage:
     }
     if action == "tool":
         tool_name = payload["tool_name"]
-        arguments = payload.get("arguments") or {}
-        if "video_path" not in arguments:
-            arguments["video_path"] = default_video_path
+        raw_arguments = payload.get("arguments") or {}
+        perceptual_question = raw_arguments.get("perceptual_question") or raw_arguments.get("target_question")
+        arguments = {
+            "video_path": default_video_path,
+            "audio_path": default_audio_path,
+            "perceptual_question": perceptual_question,
+        }
         return AIMessage(
             content=f"Calling tool: {tool_name}",
             additional_kwargs=trace_meta,
@@ -133,7 +141,11 @@ async def call_model(
     system_prompt = f"{runtime.context.system_prompt}\n\n{PLANNER_ACTION_SCHEMA}"
 
     raw = await asyncio.to_thread(planner.call, system_prompt, user_prompt)
-    response = _planner_to_ai_message(raw, state["video_path"])
+    response = _planner_to_ai_message(
+        raw,
+        state["video_path"],
+        state.get("audio_path"),
+    )
 
     if state.get("is_last_step") and response.tool_calls:
         return {
