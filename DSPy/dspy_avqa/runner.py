@@ -154,6 +154,43 @@ def extract_error_info(exc: Exception) -> dict[str, Any]:
 
     return info
 
+
+def cut_id(cut: dict[str, Any]) -> str:
+    """Return the per-question sample id used for cache files and output rows."""
+    value = cut.get("id")
+    return str(value) if value is not None else ""
+
+
+def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, Any]) -> dict[str, Any] | None:
+    """Load one completed per-sample JSON cache and wrap it as a result row."""
+    sample_id = cut_id(cut)
+    if output_dir is None or not sample_id:
+        return None
+
+    path = output_dir / f"{sample_id}.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            question_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Cached DSPy sample at {path} is unreadable, regenerating: {exc}")
+        return None
+
+    if not isinstance(question_data, dict) or not str(question_data.get("response") or "").strip():
+        print(f"Cached DSPy sample at {path} missing response, regenerating.")
+        return None
+
+    row = build_result_row(cut, str(question_data.get("response") or ""))
+    row["question_data"] = question_data
+    return row
+
+
+def load_cached_row(cut: dict[str, Any], output_dir: Path | None) -> dict[str, Any] | None:
+    """Load a cached row for one cut from its per-sample JSON file."""
+    return load_cached_row_from_question_json(output_dir, cut)
+
+
 def run_one(
     program: AVQADSPyReActProgram,
     cut: dict[str, Any],
@@ -223,8 +260,19 @@ def run_batch() -> None:
             f"batch_size={os.environ.get('GEMINI_BATCH_SIZE', '')}"
         )
 
-    rows: list[dict[str, Any]] = []
+    rows_by_sample_id: dict[str, dict[str, Any]] = {}
+    remaining: list[dict[str, Any]] = []
     for cut in selected:
+        cached_row = load_cached_row(cut, args.output_dir)
+        if cached_row is None:
+            remaining.append(cut)
+            continue
+        rows_by_sample_id[cut_id(cut)] = cached_row
+
+    print(f"Cached samples: {len(selected) - len(remaining)}")
+    print(f"Remaining samples: {len(remaining)}")
+
+    for cut in remaining:
         cut_item, response_text, turn_trace, payload, error, error_info = run_one(
             program=program,
             cut=cut,
@@ -256,8 +304,9 @@ def run_batch() -> None:
                 }
             ]
         maybe_dump_question_data(args.output_dir, row)
-        rows.append(row)
+        rows_by_sample_id[cut_id(cut_item)] = row
 
+    rows = [rows_by_sample_id[cut_id(cut)] for cut in selected if cut_id(cut) in rows_by_sample_id]
     write_results_jsonl(rows, args.output_jsonl)
     print(f"Wrote {len(rows)} rows to {args.output_jsonl}")
 
