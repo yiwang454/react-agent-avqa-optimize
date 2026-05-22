@@ -23,7 +23,6 @@ from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config
 from .signatures import apply_prompt_config_to_signatures
 
-
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="Batch run DSPy AVQA ReAct over cut JSONL.")
@@ -44,7 +43,7 @@ def parse_args() -> argparse.Namespace:
         "--perception-config-yaml",
         type=Path,
         default=None,
-        help="Optional YAML file with Gemini perception runtime/sampling parameters.",
+        help="Optional YAML file with perception backend runtime/sampling parameters.",
     )
     parser.add_argument(
         "--prompt-yaml",
@@ -69,13 +68,10 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
-
 def _env_bool(value: Any) -> str:
     if isinstance(value, str):
         return "false" if value.strip().lower() in {"0", "false", "no", "off"} else "true"
     return "true" if bool(value) else "false"
-
 
 def _set_env_from_mapping(mapping: dict[str, Any], key_map: dict[str, str]) -> None:
     for source_key, env_key in key_map.items():
@@ -83,9 +79,8 @@ def _set_env_from_mapping(mapping: dict[str, Any], key_map: dict[str, str]) -> N
         if value is not None:
             os.environ[env_key] = str(value)
 
-
 def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
-    """Load Gemini perception parameters from a baseline-style YAML config."""
+    """Load perception backend parameters from a baseline-style YAML config."""
     if path is None:
         return {}
     with path.open("r", encoding="utf-8") as f:
@@ -94,14 +89,22 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
         raise ValueError(f"Perception config must be a YAML mapping: {path}")
 
     task = config.get("task") or {}
+    model = config.get("model") or {}
     sampling = config.get("sampling_params") or {}
     if not isinstance(task, dict):
         raise ValueError(f"Perception config task section must be a mapping: {path}")
+    if not isinstance(model, dict):
+        raise ValueError(f"Perception config model section must be a mapping: {path}")
     if not isinstance(sampling, dict):
         raise ValueError(f"Perception config sampling_params section must be a mapping: {path}")
 
     if task.get("video_only") is not None:
-        os.environ["GEMINI_VIDEO_ONLY"] = _env_bool(task["video_only"])
+        video_only = _env_bool(task["video_only"])
+        os.environ["GEMINI_VIDEO_ONLY"] = video_only
+        os.environ["QWEN_VIDEO_ONLY"] = video_only
+    if task.get("enable_thinking") is not None:
+        os.environ["QWEN_ENABLE_THINKING"] = _env_bool(task["enable_thinking"])
+
     _set_env_from_mapping(
         task,
         {
@@ -112,8 +115,29 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "retry_delay_s": "GEMINI_RETRY_DELAY_S",
         },
     )
+    _set_env_from_mapping(
+        task,
+        {
+            "batch_size": "QWEN_BATCH_SIZE",
+            "timeout": "QWEN_TIMEOUT",
+            "max_retries": "QWEN_MAX_RETRIES",
+            "qwen_delay_s": "QWEN_DELAY_S",
+        },
+    )
     if task.get("print_first_prompt") is not None:
         os.environ["GEMINI_PRINT_FIRST_PROMPT"] = _env_bool(task["print_first_prompt"])
+
+    _set_env_from_mapping(
+        model,
+        {
+            "gemini_model": "GEMINI_MODEL",
+            "gemini_base_url": "GEMINI_BASE_URL",
+            "gemini_api_key": "GEMINI_API_KEY",
+            "qwen_model": "QWEN_MODEL",
+            "qwen_base_url": "QWEN_BASE_URL",
+            "qwen_api_key": "QWEN_API_KEY",
+        },
+    )
 
     _set_env_from_mapping(
         sampling,
@@ -124,8 +148,18 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "max_tokens": "GEMINI_MAX_TOKENS",
         },
     )
+    _set_env_from_mapping(
+        sampling,
+        {
+            "temperature": "QWEN_TEMPERATURE",
+            "top_p": "QWEN_TOP_P",
+            "top_k": "QWEN_TOP_K",
+            "max_tokens": "QWEN_MAX_TOKENS",
+            "fps": "QWEN_FPS",
+            "max_frames": "QWEN_MAX_FRAMES",
+        },
+    )
     return config
-
 
 def extract_error_info(exc: Exception) -> dict[str, Any]:
     """Extract structured details from DSPy adapter/planner exceptions."""
@@ -154,12 +188,10 @@ def extract_error_info(exc: Exception) -> dict[str, Any]:
 
     return info
 
-
 def cut_id(cut: dict[str, Any]) -> str:
     """Return the per-question sample id used for cache files and output rows."""
     value = cut.get("id")
     return str(value) if value is not None else ""
-
 
 def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, Any]) -> dict[str, Any] | None:
     """Load one completed per-sample JSON cache and wrap it as a result row."""
@@ -185,11 +217,9 @@ def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, A
     row["question_data"] = question_data
     return row
 
-
 def load_cached_row(cut: dict[str, Any], output_dir: Path | None) -> dict[str, Any] | None:
     """Load a cached row for one cut from its per-sample JSON file."""
     return load_cached_row_from_question_json(output_dir, cut)
-
 
 def run_one(
     program: AVQADSPyReActProgram,
@@ -219,7 +249,6 @@ def run_one(
         if planner_calls:
             error_info["planner_calls"] = planner_calls
         return cut, "", [], payload, str(exc), error_info
-
 
 def run_batch() -> None:
     """Entrypoint for batch execution."""
@@ -258,6 +287,24 @@ def run_batch() -> None:
             f"max_tokens={os.environ.get('GEMINI_MAX_TOKENS', '')}, "
             f"print_first_prompt={os.environ.get('GEMINI_PRINT_FIRST_PROMPT', '')}, "
             f"batch_size={os.environ.get('GEMINI_BATCH_SIZE', '')}"
+        )
+
+    if args.perception_model == "qwen":
+        print(
+            "Qwen config: "
+            f"model={os.environ.get('QWEN_MODEL', '')}, "
+            f"base_url={os.environ.get('QWEN_BASE_URL', '')}, "
+            f"video_only={os.environ.get('QWEN_VIDEO_ONLY', '')}, "
+            f"enable_thinking={os.environ.get('QWEN_ENABLE_THINKING', '')}, "
+            f"timeout={os.environ.get('QWEN_TIMEOUT', '')}, "
+            f"max_retries={os.environ.get('QWEN_MAX_RETRIES', '')}, "
+            f"delay_s={os.environ.get('QWEN_DELAY_S', '')}, "
+            f"temperature={os.environ.get('QWEN_TEMPERATURE', '')}, "
+            f"top_p={os.environ.get('QWEN_TOP_P', '')}, "
+            f"top_k={os.environ.get('QWEN_TOP_K', '')}, "
+            f"max_tokens={os.environ.get('QWEN_MAX_TOKENS', '')}, "
+            f"fps={os.environ.get('QWEN_FPS', '')}, "
+            f"max_frames={os.environ.get('QWEN_MAX_FRAMES', '')}"
         )
 
     rows_by_sample_id: dict[str, dict[str, Any]] = {}
