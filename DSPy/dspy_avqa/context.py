@@ -3,25 +3,17 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import dspy
 
 from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 from .deepseek_dspy_lm import DeepSeekDSPyLM
+from .prompt_config import prompt_config, prompt_value
 
-SYSTEM_PROMPT = """
-You are the planning/reasoning model in an audio-visual question answering ReAct system.
-
-You CANNOT watch the video directly.
-You can only reason over:
-1. the user question and options,
-2. coarse video/audio description,
-3. observations returned by perceptual tools.
-
-Your job is to decide what perceptual evidence is missing, ask targeted questions via tools,
-and provide a final option when evidence is sufficient.
-""".strip()
+SUPPORTED_TOOL_NAMES = ("ask_perception", "temporal_ground_video")
+_SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
 
 
 def pick_env(*keys: str, default: str) -> str:
@@ -33,11 +25,59 @@ def pick_env(*keys: str, default: str) -> str:
     return default
 
 
+def _split_tool_names(value: str | Iterable[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.replace(";", ",").split(",")
+    else:
+        raw_items = [str(item) for item in value]
+    return [item.strip() for item in raw_items if item.strip()]
+
+
+def _prompt_config_allowed_tools() -> list[str]:
+    tools_config = prompt_config().get("tools") or {}
+    if not isinstance(tools_config, dict):
+        raise ValueError("Prompt config tools section must be a mapping")
+    raw_allowed = tools_config.get("allowed") or tools_config.get("allowed_tools")
+    return _split_tool_names(raw_allowed)
+
+
+def resolve_allowed_tools(value: str | Iterable[str] | None = None) -> tuple[str, ...]:
+    """Resolve enabled planner tools from CLI/env, then prompt YAML, then defaults."""
+    raw_tools = _split_tool_names(value)
+    if not raw_tools:
+        raw_tools = _split_tool_names(
+            os.environ.get("DSPY_AVQA_ALLOWED_TOOLS") or os.environ.get("DSPY_ALLOWED_TOOLS")
+        )
+    if not raw_tools:
+        raw_tools = _prompt_config_allowed_tools()
+    if not raw_tools:
+        raw_tools = list(SUPPORTED_TOOL_NAMES)
+
+    normalized: list[str] = []
+    for tool_name in raw_tools:
+        normalized_name = tool_name.strip().lower()
+        if normalized_name in {"ask_qwen_perception", "ask_gemini_perception"}:
+            normalized_name = "ask_perception"
+        if normalized_name not in _SUPPORTED_TOOL_SET:
+            raise ValueError(
+                f"Unsupported DSPy AVQA tool {tool_name!r}; "
+                f"expected one of {list(SUPPORTED_TOOL_NAMES)}"
+            )
+        if normalized_name not in normalized:
+            normalized.append(normalized_name)
+
+    if not normalized:
+        raise ValueError("At least one DSPy AVQA tool must be enabled")
+    return tuple(normalized)
+
+
 @dataclass(kw_only=True)
 class AVQARuntimeContext:
     """Runtime context aligned with original react_agent configuration."""
 
-    system_prompt: str = field(default=SYSTEM_PROMPT)
+    system_prompt: str = field(default_factory=lambda: prompt_value("planner", "system_prompt").strip())
     planner_model: str = field(
         default_factory=lambda: pick_env(
             "DEEPSEEK_MODEL",
@@ -106,6 +146,7 @@ class AVQARuntimeContext:
         default_factory=lambda: int(os.environ.get("PLANNER_DECOUPLED", "1"))
     )
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
+    allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
 
 
 def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:

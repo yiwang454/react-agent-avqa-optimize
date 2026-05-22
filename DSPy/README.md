@@ -94,3 +94,6 @@ uv run --no-sync python DSPy/avqa_dspy_impl.py \
   --debug
 ```
 
+## Caveat:
+
+小 caveat：如果不是走 run_batch()，而是在别的 Python 代码里直接 new AVQARuntimeContext() / AVQADSPyReActProgram()，想用自定义 YAML，需要先调用 load_prompt_config(custom_path)，再创建 context/program；否则会用默认 v0。

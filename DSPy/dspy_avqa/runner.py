@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from .deepseek_dspy_lm import consume_planner_call_trace
-from .context import AVQARuntimeContext
+from .context import AVQARuntimeContext, resolve_allowed_tools
 from .data import (
     build_input_state,
     build_result_row,
@@ -20,6 +20,8 @@ from .data import (
     write_results_jsonl,
 )
 from .program import AVQADSPyReActProgram, normalize_option_letter
+from .prompt_config import active_prompt_yaml_path, load_prompt_config
+from .signatures import apply_prompt_config_to_signatures
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +45,21 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional YAML file with Gemini perception runtime/sampling parameters.",
+    )
+    parser.add_argument(
+        "--prompt-yaml",
+        type=Path,
+        default=None,
+        help="Optional YAML file with DSPy AVQA planner/perception/signature prompts.",
+    )
+    parser.add_argument(
+        "--allowed-tools",
+        default=os.environ.get("DSPY_AVQA_ALLOWED_TOOLS") or os.environ.get("DSPY_ALLOWED_TOOLS"),
+        help=(
+            "Comma-separated DSPy AVQA tools to expose to the planner. "
+            "Defaults to DSPY_AVQA_ALLOWED_TOOLS/DSPY_ALLOWED_TOOLS, "
+            "then prompt YAML tools.allowed, then all tools."
+        ),
     )
     parser.add_argument(
         "--perception-model",
@@ -172,10 +189,13 @@ def run_batch() -> None:
     args = parse_args()
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     load_perception_config_yaml(args.perception_config_yaml)
+    load_prompt_config(args.prompt_yaml)
+    apply_prompt_config_to_signatures()
+    allowed_tools = resolve_allowed_tools(args.allowed_tools)
     cuts = read_jsonl(args.input_jsonl)
     selected = cuts[: args.debug_limit] if args.debug else cuts
 
-    context = AVQARuntimeContext(max_turns=args.max_turns)
+    context = AVQARuntimeContext(max_turns=args.max_turns, allowed_tools=allowed_tools)
     program = AVQADSPyReActProgram(context=context)
 
     print(f"Loaded cuts: {len(cuts)}")
@@ -184,6 +204,8 @@ def run_batch() -> None:
     print(f"Selected cuts: {len(selected)}")
     print(f"Planner model: {context.planner_model}")
     print(f"Perception model: {args.perception_model}")
+    print(f"Prompt yaml: {active_prompt_yaml_path()}")
+    print(f"Allowed tools: {','.join(context.allowed_tools)}")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
     if args.perception_model == "gemini":

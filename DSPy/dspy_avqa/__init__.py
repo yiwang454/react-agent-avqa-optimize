@@ -15,7 +15,9 @@ from .data import (
 )
 from .optimize import avqa_metric, make_trainset, optimize_with_copro, optimize_with_simba
 from .program import AVQADSPyReActProgram, normalize_option_letter
+from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_value
 from .runner import parse_args, run_batch, run_one
+from .signatures import apply_prompt_config_to_signatures
 from .tools import (
     ask_gemini_perception,
     ask_perception,
@@ -43,6 +45,11 @@ __all__ = [
     "write_results_jsonl",
     "AVQADSPyReActProgram",
     "normalize_option_letter",
+    "load_prompt_config",
+    "active_prompt_yaml_path",
+    "prompt_config",
+    "prompt_value",
+    "apply_prompt_config_to_signatures",
     "ask_qwen_perception",
     "ask_gemini_perception",
     "ask_perception",

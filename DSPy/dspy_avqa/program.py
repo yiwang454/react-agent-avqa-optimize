@@ -9,26 +9,12 @@ from typing import Any
 import dspy
 
 from .deepseek_dspy_lm import clear_planner_call_trace, consume_planner_call_trace
-from .context import AVQARuntimeContext, configure_deepseek_lm
+from .context import AVQARuntimeContext, configure_deepseek_lm, resolve_allowed_tools
+from .prompt_config import prompt_value, render_prompt
 from .signatures import PlanNextAction
 from .tools import ask_perception, consume_last_perception_metadata, selected_perception_model, temporal_ground_video
 
 
-PLANNER_ACTION_SCHEMA = """
-Return exactly one JSON object.
-
-If you need more perceptual evidence, output:
-{"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
-or
-{"action":"tool","tool_name":"temporal_ground_video","arguments":{"perceptual_question":"..."}}
-
-If evidence is sufficient, output:
-{"action":"final","answer":"concise rationale + <answer>single option label</answer>"}
-
-Never output markdown fences. JSON only.
-""".strip()
-
-DEFAULT_PERCEPTUAL_QUESTION = "What key visible and audible events help answer the question?"
 OPTION_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MAX_OBSERVATION_CHARS = 2400
 
@@ -148,7 +134,7 @@ def _compact_text(text: Any, limit: int = MAX_OBSERVATION_CHARS) -> str:
     value = str(text or "").strip()
     if len(value) <= limit:
         return value
-    return value[:limit].rstrip() + "\n[truncated]"
+    return value[:limit].rstrip() + "\n" + prompt_value("planner", "truncated_marker").strip()
 
 
 def _build_task_text(
@@ -161,43 +147,51 @@ def _build_task_text(
     video_description: str | None,
 ) -> str:
     """Build the compact planner task used inside DSPy."""
-    return f"""
-{system_prompt}
-
-{PLANNER_ACTION_SCHEMA}
-
-Video ID: {video_id or 'unknown'}
-Video path: {video_path}
-Coarse video/audio description: {video_description or 'unknown'}
-
-Question: {question}
-Options:
-{_format_options(options_json)}
-""".strip()
+    return render_prompt(
+        "planner",
+        "task_prompt_template",
+        system_prompt=system_prompt,
+        planner_action_schema=prompt_value("planner", "action_schema").strip(),
+        video_id=video_id or "unknown",
+        video_path=video_path,
+        video_description=video_description or "unknown",
+        question=question,
+        formatted_options=_format_options(options_json),
+    )
 
 
 def _conversation_state(turn_trace: list[dict[str, Any]]) -> str:
     """Serialize prior planner/tool turns like the LangGraph implementation."""
     if not turn_trace:
-        return "<empty>"
+        return prompt_value("planner", "conversation_empty").strip()
 
     lines: list[str] = []
     for turn in turn_trace:
         raw = str(turn.get("planner_raw") or "").strip()
         if raw:
-            lines.append(f"[assistant]\n{_compact_text(raw, 1200)}")
+            lines.append(
+                render_prompt(
+                    "planner",
+                    "assistant_turn_template",
+                    assistant_text=_compact_text(raw, 1200),
+                )
+            )
 
         observation = turn.get("tool_observation")
         if observation:
             tool_name = turn.get("tool_name") or "unknown"
             question = (turn.get("tool_args") or {}).get("perceptual_question") or ""
             lines.append(
-                f"[tool:{tool_name}]\n"
-                f"question: {_compact_text(question, 400)}\n"
-                f"observation: {_compact_text(observation)}"
+                render_prompt(
+                    "planner",
+                    "tool_turn_template",
+                    tool_name=tool_name,
+                    question=_compact_text(question, 400),
+                    observation=_compact_text(observation),
+                )
             )
 
-    return "\n\n".join(lines) if lines else "<empty>"
+    return "\n\n".join(lines) if lines else prompt_value("planner", "conversation_empty").strip()
 
 
 def _latest_response_text(planner_calls: list[dict[str, Any]]) -> str:
@@ -230,14 +224,23 @@ def _exception_info(exc: Exception) -> dict[str, Any]:
     return info
 
 
-def _normalize_tool_name(raw_tool_name: str) -> str:
-    """Map old and new planner tool names onto the DSPy tool functions."""
+def _canonical_tool_name(raw_tool_name: str) -> str:
     value = raw_tool_name.strip().lower()
     if value == "temporal_ground_video":
         return "temporal_ground_video"
     if value in {"ask_qwen_perception", "ask_gemini_perception", "ask_perception"}:
         return "ask_perception"
     return "ask_perception"
+
+
+def _normalize_tool_name(raw_tool_name: str, allowed_tools: tuple[str, ...]) -> str:
+    """Map planner tool names onto enabled DSPy tool functions."""
+    value = _canonical_tool_name(raw_tool_name)
+    if value in allowed_tools:
+        return value
+    if "ask_perception" in allowed_tools:
+        return "ask_perception"
+    return allowed_tools[0]
 
 
 def _perceptual_question(payload: dict[str, Any]) -> str:
@@ -254,15 +257,21 @@ def _perceptual_question(payload: dict[str, Any]) -> str:
         value = str(candidate or "").strip()
         if value:
             return value
-    return DEFAULT_PERCEPTUAL_QUESTION
+    return prompt_value("perception", "default_perceptual_question").strip()
 
 
 class AVQADSPyReActProgram(dspy.Module):
     """DSPy AVQA ReAct program with a compact planner-tool loop."""
 
-    def __init__(self, context: AVQARuntimeContext | None = None):
+    def __init__(
+        self,
+        context: AVQARuntimeContext | None = None,
+        allowed_tools: str | list[str] | tuple[str, ...] | None = None,
+    ):
         super().__init__()
         self.context = context or AVQARuntimeContext()
+        if allowed_tools is not None:
+            self.context.allowed_tools = resolve_allowed_tools(allowed_tools)
         configure_deepseek_lm(self.context)
         self.action_planner = dspy.Predict(PlanNextAction)
 
@@ -381,7 +390,7 @@ class AVQADSPyReActProgram(dspy.Module):
                 )
 
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
-            tool_name = _normalize_tool_name(raw_tool_name)
+            tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
             perceptual_question = _perceptual_question(payload)
             perception_backend = selected_perception_model()
             tool_observation = self._call_tool(
@@ -417,7 +426,7 @@ class AVQADSPyReActProgram(dspy.Module):
 
         fallback_state = (
             f"{_conversation_state(turn_trace)}\n\n"
-            "[system]\nMax turns reached. Return a final answer now."
+            + prompt_value("planner", "final_fallback_instruction").strip()
         )
         raw_action, planner_calls, planner_error = self._plan_next_action(
             task=task,

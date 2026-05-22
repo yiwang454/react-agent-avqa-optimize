@@ -11,9 +11,9 @@ from typing import Any
 import requests
 
 from .gemini_api import call_gemini_messages
+from .prompt_config import prompt_value, render_prompt
 
 
-SYSTEM_PROMPT = "You are a perceptual audio-visual assistant."
 SUPPORTED_PERCEPTION_MODELS = {"qwen", "gemini"}
 _LAST_PERCEPTION_METADATA: dict[str, Any] = {}
 
@@ -111,7 +111,7 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
 
     payload: dict[str, Any] = {
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": prompt_value("perception", "system_prompt").strip()},
             {
                 "role": "user",
                 "content": [
@@ -158,7 +158,7 @@ def call_gemini_perception(video_path: str, audio_path: str | None, prompt: str)
     contents = [{"role": "user", "parts": parts}]
     result = call_gemini_messages(
         contents,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=prompt_value("perception", "system_prompt").strip(),
         timeout=int(os.environ.get("GEMINI_TIMEOUT", "180")),
         max_retries=int(os.environ.get("GEMINI_MAX_RETRIES", "3")),
         retry_delay_s=float(os.environ.get("GEMINI_RETRY_DELAY_S", "5")),
@@ -200,18 +200,12 @@ def build_perception_prompt(
     if start_time is not None and end_time is not None:
         clip_note = f"Focus only on {start_time:.2f}s to {end_time:.2f}s."
 
-    return f"""
-Answer ONLY from what is observable in the provided video/audio.
-Do not guess beyond evidence.
-{clip_note}
-Perceptual question: {perceptual_question}
-
-Return JSON with keys:
-- answer
-- evidence
-- uncertainty
-- used_time_range
-""".strip()
+    return render_prompt(
+        "perception",
+        "evidence_prompt_template",
+        clip_note=clip_note,
+        perceptual_question=perceptual_question,
+    )
 
 
 def ask_qwen_perception(
@@ -256,14 +250,9 @@ def temporal_ground_video(
     audio_path: str | None = None,
 ) -> str:
     """Tool: find relevant temporal spans for a perceptual question."""
-    prompt = f"""
-Given the question, decide whether temporal grounding is helpful.
-If not helpful, return <no_grounding>.
-If helpful, return one or more relevant spans in seconds.
-
-Question: {perceptual_question}
-Output format:
-<grounding>[{{"start": 0.0, "end": 3.2}}]</grounding>
-Then provide one-sentence justification.
-""".strip()
+    prompt = render_prompt(
+        "perception",
+        "temporal_grounding_prompt_template",
+        perceptual_question=perceptual_question,
+    )
     return call_perception(video_path=video_path, audio_path=audio_path, prompt=prompt)
