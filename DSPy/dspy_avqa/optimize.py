@@ -162,6 +162,18 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--audio-caption-dir", type=Path, required=True)
     parser.add_argument("--output-program", type=Path, required=True)
     parser.add_argument("--metadata-json", type=Path, default=None)
+    parser.add_argument(
+        "--signature-search-json",
+        type=Path,
+        default=None,
+        help="Optional JSON file recording optimizer candidate signatures.",
+    )
+    parser.add_argument(
+        "--trajectory-jsonl",
+        type=Path,
+        default=None,
+        help="Optional JSONL file recording final optimized program trajectories on the selected trainset.",
+    )
     parser.add_argument("--max-turns", type=int, default=int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--debug", action="store_true", help="Use only the first debug-limit samples.")
@@ -230,6 +242,112 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _field_summary(field: Any) -> dict[str, Any]:
+    extra = getattr(field, "json_schema_extra", None) or {}
+    return {
+        "prefix": extra.get("prefix"),
+        "description": extra.get("desc") or getattr(field, "description", None),
+    }
+
+
+def _signature_summary(signature: Any) -> dict[str, Any]:
+    fields = getattr(signature, "fields", None) or getattr(signature, "model_fields", None) or {}
+    return {
+        "instructions": getattr(signature, "instructions", None),
+        "fields": {name: _field_summary(field) for name, field in fields.items()},
+    }
+
+
+def _program_signature_summary(program: dspy.Module) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    try:
+        named_predictors = list(program.named_predictors())
+    except Exception:
+        named_predictors = []
+    if named_predictors:
+        iterator = named_predictors
+    else:
+        iterator = [(f"predictor_{idx}", predictor) for idx, predictor in enumerate(program.predictors())]
+    for name, predictor in iterator:
+        signature = getattr(predictor, "signature", None)
+        summaries.append({
+            "name": name,
+            "signature": _signature_summary(signature) if signature is not None else None,
+        })
+    return summaries
+
+
+def write_signature_search_json(program: dspy.Module, output_path: Path) -> None:
+    """Write optimized and candidate signatures kept by the optimizer."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for idx, candidate in enumerate(getattr(program, "candidate_programs", []) or []):
+        candidate_program = candidate.get("program") if isinstance(candidate, dict) else None
+        rows.append({
+            "candidate_index": idx,
+            "score": candidate.get("score") if isinstance(candidate, dict) else None,
+            "depth": candidate.get("depth") if isinstance(candidate, dict) else None,
+            "instruction": candidate.get("instruction") if isinstance(candidate, dict) else None,
+            "prefix": candidate.get("prefix") if isinstance(candidate, dict) else None,
+            "signatures": _program_signature_summary(candidate_program) if candidate_program is not None else [],
+        })
+
+    payload = {
+        "total_evaluate_calls": getattr(program, "total_calls", None),
+        "best_program_signatures": _program_signature_summary(program),
+        "candidate_programs": rows,
+    }
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(_json_safe(payload), f, ensure_ascii=False, indent=2, default=str)
+
+
+def _example_summary(example: dspy.Example) -> dict[str, Any]:
+    return {
+        "question": getattr(example, "question", None),
+        "options_json": getattr(example, "options_json", None),
+        "video_id": getattr(example, "video_id", None),
+        "video_path": getattr(example, "video_path", None),
+        "audio_path": getattr(example, "audio_path", None),
+        "answer": getattr(example, "answer", None),
+    }
+
+
+def write_final_trajectories_jsonl(program: dspy.Module, trainset: list[dspy.Example], output_path: Path) -> None:
+    """Run the final optimized program on trainset and write per-example trajectories."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        for idx, example in enumerate(trainset):
+            row: dict[str, Any] = {
+                "example_index": idx,
+                "example": _example_summary(example),
+                "gold_answer": normalize_option_letter(str(getattr(example, "answer", ""))),
+            }
+            try:
+                pred = program(**example.inputs())
+                pred_answer = normalize_option_letter(str(getattr(pred, "answer", "")))
+                row.update({
+                    "pred_answer": pred_answer,
+                    "score": avqa_metric(example, pred),
+                    "reasoning_summary": getattr(pred, "reasoning_summary", None),
+                    "turn_trace": getattr(pred, "turn_trace", []),
+                    "accumulated_evidence": getattr(pred, "accumulated_evidence", None),
+                    "error": None,
+                })
+            except Exception as exc:
+                row.update({
+                    "pred_answer": "",
+                    "score": 0.0,
+                    "reasoning_summary": None,
+                    "turn_trace": [],
+                    "accumulated_evidence": None,
+                    "error": {
+                        "error_type": exc.__class__.__name__,
+                        "message": str(exc),
+                    },
+                })
+            f.write(json.dumps(_json_safe(row), ensure_ascii=False, default=str) + "\n")
 
 
 def run_optimization() -> None:
@@ -316,8 +434,17 @@ def run_optimization() -> None:
         )
 
     _save_program(compiled, args.output_program)
-    elapsed = time.perf_counter() - started
     print(f"Saved optimized program to {args.output_program}")
+
+    if args.signature_search_json is not None:
+        write_signature_search_json(compiled, args.signature_search_json)
+        print(f"Saved signature search to {args.signature_search_json}")
+
+    if args.trajectory_jsonl is not None:
+        write_final_trajectories_jsonl(compiled, trainset, args.trajectory_jsonl)
+        print(f"Saved final trainset trajectories to {args.trajectory_jsonl}")
+
+    elapsed = time.perf_counter() - started
     print(f"Total elapsed time: {elapsed:.2f}s")
 
     metadata_path = args.metadata_json
@@ -328,6 +455,8 @@ def run_optimization() -> None:
             "input_jsonl": str(args.input_jsonl),
             "audio_caption_dir": str(args.audio_caption_dir),
             "output_program": str(args.output_program),
+            "signature_search_json": str(args.signature_search_json) if args.signature_search_json else None,
+            "trajectory_jsonl": str(args.trajectory_jsonl) if args.trajectory_jsonl else None,
             "loaded_cuts": len(cuts),
             "selected_cuts": len(selected),
             "train_examples": len(trainset),
