@@ -221,6 +221,17 @@ def _save_program(program: dspy.Module, output_program: Path) -> None:
     save_method(str(output_program))
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert metadata values into JSON-serializable objects."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def run_optimization() -> None:
     """Entrypoint for DSPy AVQA optimization."""
     args = parse_optimize_args()
@@ -323,7 +334,7 @@ def run_optimization() -> None:
             "skipped_examples": skipped,
             "planner_model": context.planner_model,
             "perception_model": args.perception_model,
-            "prompt_yaml": active_prompt_yaml_path(),
+            "prompt_yaml": str(active_prompt_yaml_path()),
             "allowed_tools": list(context.allowed_tools),
             "max_turns": context.max_turns,
             "copro": {
@@ -344,5 +355,5 @@ def run_optimization() -> None:
             "elapsed_seconds": elapsed,
         }
         with metadata_path.open("w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+            json.dump(_json_safe(metadata), f, ensure_ascii=False, indent=2, default=str)
         print(f"Saved metadata to {metadata_path}")
