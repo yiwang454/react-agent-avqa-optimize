@@ -13,7 +13,15 @@ from .data import (
     read_jsonl,
     write_results_jsonl,
 )
-from .optimize import avqa_metric, make_trainset, optimize_with_copro, optimize_with_simba
+from .optimize import (
+    avqa_metric,
+    make_trainset,
+    make_trainset_from_cuts,
+    optimize_with_copro,
+    optimize_with_simba,
+    parse_optimize_args,
+    run_optimization,
+)
 from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_value
 from .runner import parse_args, run_batch, run_one
@@ -63,7 +71,10 @@ __all__ = [
     "run_batch",
     "avqa_metric",
     "make_trainset",
+    "make_trainset_from_cuts",
     "optimize_with_copro",
     "optimize_with_simba",
+    "parse_optimize_args",
+    "run_optimization",
 ]
 
