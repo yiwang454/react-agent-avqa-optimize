@@ -149,6 +149,36 @@ class AVQARuntimeContext:
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
 
 
+class SerialNOpenAICompatibleLM(dspy.LM):
+    """DSPy LM that emulates n>1 for endpoints that only accept n=1."""
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        n = int(kwargs.get("n") or 1)
+        if n <= 1:
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+        single_kwargs = dict(kwargs)
+        single_kwargs["n"] = 1
+        responses = [
+            dspy.LM.forward(self, prompt=prompt, messages=messages, **single_kwargs)
+            for _ in range(n)
+        ]
+        first = responses[0]
+        choices = []
+        for response in responses:
+            try:
+                response_choices = response.choices
+            except AttributeError:
+                response_choices = response["choices"]
+            choices.extend(list(response_choices))
+
+        try:
+            first.choices = choices
+        except Exception:
+            first["choices"] = choices
+        return first
+
+
 def _native_litellm_model_name(model: str) -> str:
     """Route bare model names through LiteLLM's OpenAI-compatible provider."""
     value = model.strip()
@@ -160,7 +190,7 @@ def _native_litellm_model_name(model: str) -> str:
 def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
     """Configure DSPy native LM for an OpenAI-compatible DeepSeek endpoint."""
     api_key = None if context.planner_api_key.upper() == "EMPTY" else context.planner_api_key
-    lm = dspy.LM(
+    lm = SerialNOpenAICompatibleLM(
         _native_litellm_model_name(context.planner_model),
         model_type="chat",
         api_key=api_key,
