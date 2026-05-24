@@ -149,8 +149,35 @@ class AVQARuntimeContext:
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
 
 
-def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
-    """Configure DSPy to use direct DeepSeek HTTP as planner backend."""
+def _native_litellm_model_name(model: str) -> str:
+    """Route bare model names through LiteLLM's OpenAI-compatible provider."""
+    value = model.strip()
+    if "/" in value:
+        return value
+    return f"openai/{value}"
+
+
+def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
+    """Configure DSPy native LM for an OpenAI-compatible DeepSeek endpoint."""
+    api_key = None if context.planner_api_key.upper() == "EMPTY" else context.planner_api_key
+    lm = dspy.LM(
+        _native_litellm_model_name(context.planner_model),
+        model_type="chat",
+        api_key=api_key,
+        api_base=context.planner_api_base,
+        temperature=context.planner_temperature,
+        top_p=context.planner_top_p,
+        max_tokens=context.planner_max_tokens,
+        timeout=context.planner_timeout,
+        num_retries=context.planner_max_retries,
+        cache=False,
+    )
+    dspy.configure(lm=lm)
+    return lm
+
+
+def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
+    """Configure the legacy direct DeepSeek HTTP planner backend."""
     planner_cfg = DeepSeekPlannerConfig(
         ss_url=context.planner_api_base,
         wsid=context.planner_wsid,
@@ -180,4 +207,23 @@ def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
     )
     dspy.configure(lm=lm)
     return lm
+
+
+def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
+    """Configure DSPy's planner LM.
+
+    The default uses DSPy's native LiteLLM-backed LM against the DeepSeek
+    OpenAI-compatible endpoint so optimizers such as COPRO can request multiple
+    completions with `n`. Set DSPY_PLANNER_LM_BACKEND=custom to use the legacy
+    one-completion DeepSeekDSPyLM wrapper.
+    """
+    backend = os.environ.get("DSPY_PLANNER_LM_BACKEND", "native_litellm").strip().lower()
+    if backend in {"custom", "deepseek_custom", "legacy"}:
+        return _configure_custom_deepseek_lm(context)
+    if backend not in {"native", "native_litellm", "litellm", "openai_compatible"}:
+        raise ValueError(
+            "Unsupported DSPY_PLANNER_LM_BACKEND "
+            f"{backend!r}; expected native_litellm or custom"
+        )
+    return _configure_native_litellm(context)
 
