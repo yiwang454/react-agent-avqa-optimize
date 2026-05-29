@@ -25,6 +25,11 @@ def consume_planner_call_trace() -> list[dict[str, Any]]:
     return calls
 
 
+def append_planner_call_trace(call_record: dict[str, Any]) -> None:
+    """Append one planner call record for trajectory/debug output."""
+    _PLANNER_CALL_TRACE.append(call_record)
+
+
 def _copy_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     copied: list[dict[str, Any]] = []
     for message in messages:
@@ -128,9 +133,9 @@ class DeepSeekDSPyLM(dspy.BaseLM):
             )
         except Exception as exc:
             call_record["error"] = str(exc)
-            _PLANNER_CALL_TRACE.append(call_record)
+            append_planner_call_trace(call_record)
             raise
 
         call_record["response_text"] = response_text
-        _PLANNER_CALL_TRACE.append(call_record)
+        append_planner_call_trace(call_record)
         return _CompletionResponse(text=response_text, model=self.model)

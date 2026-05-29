@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 import dspy
 
 from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
-from .deepseek_dspy_lm import DeepSeekDSPyLM
+from .deepseek_dspy_lm import DeepSeekDSPyLM, append_planner_call_trace
 from .prompt_config import prompt_config, prompt_value
 
 SUPPORTED_TOOL_NAMES = ("ask_perception", "temporal_ground_video")
@@ -149,28 +150,114 @@ class AVQARuntimeContext:
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
 
 
+def _obj_get(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _copy_lm_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    copied: list[dict[str, Any]] = []
+    for message in messages:
+        copied.append({
+            "role": message.get("role"),
+            "content": message.get("content"),
+        })
+    return copied
+
+
+def _response_choices(response: Any) -> list[Any]:
+    choices = _obj_get(response, "choices", [])
+    return list(choices or [])
+
+
+def _message_from_choice(choice: Any) -> Any:
+    return _obj_get(choice, "message", {})
+
+
+def _message_content(message: Any) -> str:
+    return str(_obj_get(message, "content", "") or "")
+
+
+def _message_reasoning_content(message: Any) -> str:
+    return str(
+        _obj_get(message, "reasoning_content", None)
+        or _obj_get(message, "reasoning", None)
+        or ""
+    )
+
+
+def _usage_dict(response: Any) -> dict[str, Any]:
+    usage = _obj_get(response, "usage", {}) or {}
+    try:
+        return dict(usage)
+    except Exception:
+        return {}
+
+
 class SerialNOpenAICompatibleLM(dspy.LM):
-    """DSPy LM that emulates n>1 for endpoints that only accept n=1."""
+    """DSPy LM that records reasoning_content and emulates n>1 with serial n=1 calls."""
+
+    def _record_response(
+        self,
+        *,
+        prompt: str | None,
+        messages: list[dict[str, Any]] | None,
+        kwargs: dict[str, Any],
+        response: Any,
+    ) -> None:
+        normalized_messages = messages or [{"role": "user", "content": prompt or ""}]
+        choices: list[dict[str, Any]] = []
+        for choice in _response_choices(response):
+            message = _message_from_choice(choice)
+            choices.append({
+                "content": _message_content(message),
+                "reasoning_content": _message_reasoning_content(message),
+                "finish_reason": _obj_get(choice, "finish_reason"),
+            })
+
+        first_choice = choices[0] if choices else {}
+        call_record = {
+            "model": self.model,
+            "messages": _copy_lm_messages(normalized_messages),
+            "params": {
+                "temperature": kwargs.get("temperature", self.kwargs.get("temperature")),
+                "top_p": kwargs.get("top_p", self.kwargs.get("top_p")),
+                "max_tokens": kwargs.get("max_tokens", self.kwargs.get("max_tokens")),
+                "n": kwargs.get("n", self.kwargs.get("n", 1)),
+            },
+            "response_text": first_choice.get("content", ""),
+            "reasoning_content": first_choice.get("reasoning_content", ""),
+            "choices": choices,
+            "usage": _usage_dict(response),
+        }
+        append_planner_call_trace(call_record)
+
+    def _forward_once(self, prompt=None, messages=None, **kwargs):
+        request_kwargs = dict(kwargs)
+        if not _env_is_set("PLANNER_TEMPERATURE"):
+            request_kwargs.pop("temperature", None)
+        if not _env_is_set("PLANNER_TOP_P"):
+            request_kwargs.pop("top_p", None)
+        response = dspy.LM.forward(self, prompt=prompt, messages=messages, **request_kwargs)
+        self._record_response(prompt=prompt, messages=messages, kwargs=request_kwargs, response=response)
+        return response
 
     def forward(self, prompt=None, messages=None, **kwargs):
         n = int(kwargs.get("n") or 1)
         if n <= 1:
-            return super().forward(prompt=prompt, messages=messages, **kwargs)
+            return self._forward_once(prompt=prompt, messages=messages, **kwargs)
 
         single_kwargs = dict(kwargs)
         single_kwargs["n"] = 1
         responses = [
-            dspy.LM.forward(self, prompt=prompt, messages=messages, **single_kwargs)
+            self._forward_once(prompt=prompt, messages=messages, **single_kwargs)
             for _ in range(n)
         ]
         first = responses[0]
         choices = []
         for response in responses:
-            try:
-                response_choices = response.choices
-            except AttributeError:
-                response_choices = response["choices"]
-            choices.extend(list(response_choices))
+            choices.extend(_response_choices(response))
 
         try:
             first.choices = choices
@@ -187,21 +274,36 @@ def _native_litellm_model_name(model: str) -> str:
     return f"openai/{value}"
 
 
+def _env_is_set(key: str) -> bool:
+    value = os.environ.get(key)
+    return value is not None and value.strip() and value.strip().upper() != "EMPTY"
+
+
 def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
     """Configure DSPy native LM for an OpenAI-compatible DeepSeek endpoint."""
     api_key = None if context.planner_api_key.upper() == "EMPTY" else context.planner_api_key
+    lm_kwargs: dict[str, Any] = {
+        "model_type": "chat",
+        "api_key": api_key,
+        "api_base": context.planner_api_base,
+        "max_tokens": context.planner_max_tokens,
+        "timeout": context.planner_timeout,
+        "num_retries": context.planner_max_retries,
+        "cache": False,
+    }
+    if _env_is_set("PLANNER_TEMPERATURE"):
+        lm_kwargs["temperature"] = context.planner_temperature
+    if _env_is_set("PLANNER_TOP_P"):
+        lm_kwargs["top_p"] = context.planner_top_p
+
     lm = SerialNOpenAICompatibleLM(
         _native_litellm_model_name(context.planner_model),
-        model_type="chat",
-        api_key=api_key,
-        api_base=context.planner_api_base,
-        temperature=context.planner_temperature,
-        top_p=context.planner_top_p,
-        max_tokens=context.planner_max_tokens,
-        timeout=context.planner_timeout,
-        num_retries=context.planner_max_retries,
-        cache=False,
+        **lm_kwargs,
     )
+    if not _env_is_set("PLANNER_TEMPERATURE"):
+        lm.kwargs.pop("temperature", None)
+    if not _env_is_set("PLANNER_TOP_P"):
+        lm.kwargs.pop("top_p", None)
     dspy.configure(lm=lm)
     return lm
 
