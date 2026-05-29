@@ -243,7 +243,15 @@ def _normalize_tool_name(raw_tool_name: str, allowed_tools: tuple[str, ...]) -> 
     return allowed_tools[0]
 
 
-def _perceptual_question(payload: dict[str, Any]) -> str:
+def _render_default_perceptual_question(source_question: str | None = None) -> str:
+    """Render the fallback perceptual question only when the YAML asks for it."""
+    default_question = prompt_value("perception", "default_perceptual_question").strip()
+    if "{perceptual_question}" not in default_question:
+        return default_question
+    return default_question.replace("{perceptual_question}", str(source_question or "").strip())
+
+
+def _perceptual_question(payload: dict[str, Any], source_question: str | None = None) -> str:
     """Extract the perceptual question from the compact action payload."""
     arguments = payload.get("arguments")
     if not isinstance(arguments, dict):
@@ -257,7 +265,7 @@ def _perceptual_question(payload: dict[str, Any]) -> str:
         value = str(candidate or "").strip()
         if value:
             return value
-    return prompt_value("perception", "default_perceptual_question").strip()
+    return _render_default_perceptual_question(source_question)
 
 
 class AVQADSPyReActProgram(dspy.Module):
@@ -391,7 +399,7 @@ class AVQADSPyReActProgram(dspy.Module):
 
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
-            perceptual_question = _perceptual_question(payload)
+            perceptual_question = _perceptual_question(payload, source_question=question)
             perception_backend = selected_perception_model()
             tool_observation = self._call_tool(
                 tool_name=tool_name,
