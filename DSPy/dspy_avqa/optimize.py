@@ -161,6 +161,12 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--audio-caption-dir", type=Path, required=True)
     parser.add_argument("--output-program", type=Path, required=True)
+    parser.add_argument(
+        "--initial-program",
+        type=Path,
+        default=None,
+        help="Optional JSON file saving the unoptimized starting program.",
+    )
     parser.add_argument("--metadata-json", type=Path, default=None)
     parser.add_argument(
         "--signature-search-json",
@@ -279,8 +285,13 @@ def _program_signature_summary(program: dspy.Module) -> list[dict[str, Any]]:
     return summaries
 
 
-def write_signature_search_json(program: dspy.Module, output_path: Path) -> None:
-    """Write optimized and candidate signatures kept by the optimizer."""
+def write_signature_search_json(
+    program: dspy.Module,
+    output_path: Path,
+    *,
+    initial_program_signatures: list[dict[str, Any]] | None = None,
+) -> None:
+    """Write starting, optimized, and candidate signatures kept by the optimizer."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for idx, candidate in enumerate(getattr(program, "candidate_programs", []) or []):
@@ -296,6 +307,7 @@ def write_signature_search_json(program: dspy.Module, output_path: Path) -> None
 
     payload = {
         "total_evaluate_calls": getattr(program, "total_calls", None),
+        "initial_program_signatures": initial_program_signatures or [],
         "best_program_signatures": _program_signature_summary(program),
         "candidate_programs": rows,
     }
@@ -377,6 +389,11 @@ def run_optimization() -> None:
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
     context = AVQARuntimeContext(max_turns=args.max_turns, allowed_tools=allowed_tools)
     program = AVQADSPyReActProgram(context=context)
+    initial_program_signatures = _program_signature_summary(program)
+
+    if args.initial_program is not None:
+        _save_program(program, args.initial_program)
+        print(f"Saved initial program to {args.initial_program}")
 
     print(f"Algorithm: {args.algorithm}")
     print(f"Loaded cuts: {len(cuts)}")
@@ -437,7 +454,11 @@ def run_optimization() -> None:
     print(f"Saved optimized program to {args.output_program}")
 
     if args.signature_search_json is not None:
-        write_signature_search_json(compiled, args.signature_search_json)
+        write_signature_search_json(
+            compiled,
+            args.signature_search_json,
+            initial_program_signatures=initial_program_signatures,
+        )
         print(f"Saved signature search to {args.signature_search_json}")
 
     if args.trajectory_jsonl is not None:
@@ -455,6 +476,7 @@ def run_optimization() -> None:
             "input_jsonl": str(args.input_jsonl),
             "audio_caption_dir": str(args.audio_caption_dir),
             "output_program": str(args.output_program),
+            "initial_program": str(args.initial_program) if args.initial_program else None,
             "signature_search_json": str(args.signature_search_json) if args.signature_search_json else None,
             "trajectory_jsonl": str(args.trajectory_jsonl) if args.trajectory_jsonl else None,
             "loaded_cuts": len(cuts),

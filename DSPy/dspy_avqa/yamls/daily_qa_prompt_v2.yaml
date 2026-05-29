@@ -1,0 +1,127 @@
+planner:
+  system_prompt: |
+    You are the planning/reasoning model in an audio-visual question answering ReAct system.
+
+    You CANNOT watch the video directly.
+    You can only reason over:
+    1. the user question and options,
+    2. coarse video/audio description,
+    3. observations returned by perceptual tools.
+
+    Your job is to decide what perceptual evidence is missing, ask targeted questions via tools,
+    and provide a final option when evidence is sufficient.
+
+  action_schema: |
+    Return exactly one JSON object.
+
+    If you need more perceptual evidence, output:
+    {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+    or
+    {"action":"tool","tool_name":"temporal_ground_video","arguments":{"perceptual_question":"..."}}
+
+    If evidence is sufficient, output:
+    {"action":"final","answer":"concise rationale + <answer>single option label</answer>"}
+
+    Never output markdown fences. JSON only.
+
+  task_prompt_template: |
+    {system_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+    Coarse video/audio description: {video_description}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+
+  final_fallback_instruction: |
+    [system]
+    Max turns reached. Return a final answer now.
+
+  conversation_empty: |
+    <empty>
+
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+
+  truncated_marker: |
+    [truncated]
+
+perception:
+  system_prompt: |
+    You are a perceptual audio-visual assistant.
+
+  default_perceptual_question: |
+    What key visible and audible events help answer the question?
+
+  evidence_prompt_template: |
+    Answer ONLY from what is observable in the provided video/audio.
+    Do not guess beyond evidence.
+    {clip_note}
+    Perceptual question: {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+    - uncertainty
+    - used_time_range
+
+  temporal_grounding_prompt_template: |
+    Given the question, decide whether temporal grounding is helpful.
+    If not helpful, return <no_grounding>.
+    If helpful, return one or more relevant spans in seconds.
+
+    Question: {perceptual_question}
+    Output format:
+    <grounding>[{{"start": 0.0, "end": 3.2}}]</grounding>
+    Then provide one-sentence justification.
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, and video context.
+      conversation_state: |
+        Prior planner actions and tool observations.
+      action_json: |
+        Exactly one JSON object. Use {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}} or {"action":"tool","tool_name":"temporal_ground_video","arguments":{"perceptual_question":"..."}} or {"action":"final","answer":"<answer>A</answer>"}
+
+  DraftPerceptualQuestion:
+    instructions: |
+      Draft one discriminative perceptual question for the next tool call.
+    fields:
+      tool_name: |
+        ask_perception or temporal_ground_video; backend is selected by --perception-model/PERCEPTION_MODEL
+
+  UpdateBeliefFromObservation:
+    instructions: |
+      Update evidence and option beliefs after one tool observation.
+    fields:
+      supported_options: |
+        JSON list of option letters
+      weakened_options: |
+        JSON list of option letters
+
+  DecideFinalAction:
+    instructions: |
+      Decide whether to continue tool use or produce final answer now.
+    fields:
+      action: |
+        continue or final
+      answer: |
+        Option letter if action=final, else empty
+
+  FinalAnswerFallback:
+    instructions: |
+      Produce final option when max turns are reached.
