@@ -107,6 +107,28 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path) -> dict[str,
     }
 
 
+def json_safe(value: Any) -> Any:
+    """Convert nested SDK/model objects into JSON-serializable values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+
+    for method_name in ("model_dump", "to_dict", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                return json_safe(method())
+            except Exception:
+                pass
+
+    return str(value)
+
+
 def build_result_row(cut: dict[str, Any], response_text: str) -> dict[str, Any]:
     """Build process_cut_task-style output row."""
     supervisions = cut.get("supervisions") or []
@@ -145,7 +167,7 @@ def maybe_dump_question_data(output_dir: Path | None, row: dict[str, Any]) -> No
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{row['video_id']}.json"
     with out_path.open("w", encoding="utf-8") as f:
-        json.dump(row["question_data"], f, ensure_ascii=False, indent=2)
+        json.dump(json_safe(row["question_data"]), f, ensure_ascii=False, indent=2, default=str)
 
 
 def write_results_jsonl(rows: list[dict[str, Any]], output_jsonl: Path) -> None:
@@ -153,5 +175,5 @@ def write_results_jsonl(rows: list[dict[str, Any]], output_jsonl: Path) -> None:
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with output_jsonl.open("w", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(json_safe(row), ensure_ascii=False, default=str) + "\n")
 

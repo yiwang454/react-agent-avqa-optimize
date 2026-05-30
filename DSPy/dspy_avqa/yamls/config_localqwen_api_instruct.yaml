@@ -17,3 +17,4 @@ sampling_params:
   top_p: 1.0
   max_tokens: 4096
   fps: 2.0
+  max_frames: 128
