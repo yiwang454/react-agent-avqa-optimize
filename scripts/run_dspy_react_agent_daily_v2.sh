@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/env_files/.env_dspy_react_agent_daily_gemini2.5_v2}"
+
+if [ ! -f "${ENV_FILE}" ]; then
+  echo "Missing env file: ${ENV_FILE}" >&2
+  exit 1
+fi
+
+set -a
+source "${ENV_FILE}"
+set +a
+
+# conda activate "${ENV_PREFIX}"
+cd "${PROJECT_DIR}"
+
+# Print related settings to verify env loading without leaking secrets.
+echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:+***set***}"
+echo "DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL}"
+echo "DEEPSEEK_MODEL=${DEEPSEEK_MODEL}"
+echo "PLANNER_THINKING_MODE=${PLANNER_THINKING_MODE:-}"
+echo "PLANNER_TEMPERATURE=${PLANNER_TEMPERATURE:-}"
+echo "PLANNER_TOP_P=${PLANNER_TOP_P:-}"
+echo "GEMINI_API_KEY=${GEMINI_API_KEY:+***set***}"
+echo "GEMINI_BASE_URL=${GEMINI_BASE_URL}"
+echo "GEMINI_MODEL=${GEMINI_MODEL:-}"
+echo "QWEN_API_KEY=${QWEN_API_KEY:+***set***}"
+echo "QWEN_BASE_URL=${QWEN_BASE_URL:-}"
+echo "QWEN_MODEL=${QWEN_MODEL:-}"
+echo "QWEN_ENABLE_THINKING=${QWEN_ENABLE_THINKING:-}"
+echo "PERCEPTION_CONFIG_YAML=${PERCEPTION_CONFIG_YAML:-}"
+echo "PROMPT_YAML=${PROMPT_YAML:-}"
+echo "DSPY_AVQA_ALLOWED_TOOLS=${DSPY_AVQA_ALLOWED_TOOLS:-}"
+echo "PERCEPTION_MODEL=${PERCEPTION_MODEL}"
+echo "DEBUG=${DEBUG}"
+echo "DEBUG_LIMIT=${DEBUG_LIMIT}"
+
+echo "Running DSPy batch runner..."
+cmd=(
+  python DSPy/avqa_dspy_impl.py
+  --input-jsonl "${INPUT_JSONL}"
+  --audio-caption-dir "${AUDIO_CAPTION_DIR}"
+  --output-jsonl "${OUTPUT_JSONL}"
+  --output-dir "${OUTPUT_DIR}"
+  --max-turns "${MAX_TURNS}"
+  --concurrency "${CONCURRENCY}"
+  --perception-model "${PERCEPTION_MODEL}"
+)
+
+if [ -n "${PERCEPTION_CONFIG_YAML:-}" ]; then
+  cmd+=(--perception-config-yaml "${PERCEPTION_CONFIG_YAML}")
+fi
+
+if [ -n "${PROMPT_YAML:-}" ]; then
+  cmd+=(--prompt-yaml "${PROMPT_YAML}")
+fi
+
+if [ -n "${DSPY_AVQA_ALLOWED_TOOLS:-}" ]; then
+  cmd+=(--allowed-tools "${DSPY_AVQA_ALLOWED_TOOLS}")
+fi
+
+if [ "${DEBUG}" = "true" ]; then
+  cmd+=(--debug --debug-limit "${DEBUG_LIMIT}")
+fi
+
+cmd+=("$@")
+"${cmd[@]}"
