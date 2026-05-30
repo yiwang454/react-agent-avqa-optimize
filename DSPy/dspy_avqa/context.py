@@ -146,6 +146,9 @@ class AVQARuntimeContext:
     planner_decoupled: int = field(
         default_factory=lambda: int(os.environ.get("PLANNER_DECOUPLED", "1"))
     )
+    planner_thinking_mode: str = field(
+        default_factory=lambda: pick_env("PLANNER_THINKING_MODE", "DEEPSEEK_THINKING_MODE", default="")
+    )
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
 
@@ -225,6 +228,7 @@ class SerialNOpenAICompatibleLM(dspy.LM):
                 "top_p": kwargs.get("top_p", self.kwargs.get("top_p")),
                 "max_tokens": kwargs.get("max_tokens", self.kwargs.get("max_tokens")),
                 "n": kwargs.get("n", self.kwargs.get("n", 1)),
+                "extra_body": kwargs.get("extra_body", self.kwargs.get("extra_body")),
             },
             "response_text": first_choice.get("content", ""),
             "reasoning_content": first_choice.get("reasoning_content", ""),
@@ -266,6 +270,19 @@ class SerialNOpenAICompatibleLM(dspy.LM):
         return first
 
 
+def _planner_thinking_extra_body(mode: str) -> dict[str, Any] | None:
+    value = str(mode or "").strip().lower().replace("_", "-")
+    if not value or value in {"auto", "default", "none", "unset"}:
+        return None
+    if value in {"enabled", "enable", "thinking", "think", "on", "true", "1"}:
+        return {"thinking": {"type": "enabled"}}
+    if value in {"disabled", "disable", "non-thinking", "nonthinking", "no-thinking", "off", "false", "0"}:
+        return {"thinking": {"type": "disabled"}}
+    raise ValueError(
+        f"Unsupported PLANNER_THINKING_MODE={mode!r}; expected enabled, disabled, or auto"
+    )
+
+
 def _native_litellm_model_name(model: str) -> str:
     """Route bare model names through LiteLLM's OpenAI-compatible provider."""
     value = model.strip()
@@ -295,6 +312,9 @@ def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
         lm_kwargs["temperature"] = context.planner_temperature
     if _env_is_set("PLANNER_TOP_P"):
         lm_kwargs["top_p"] = context.planner_top_p
+    extra_body = _planner_thinking_extra_body(context.planner_thinking_mode)
+    if extra_body is not None:
+        lm_kwargs["extra_body"] = extra_body
 
     lm = SerialNOpenAICompatibleLM(
         _native_litellm_model_name(context.planner_model),
@@ -326,6 +346,7 @@ def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
         max_input_seq_len=context.planner_max_input_seq_len,
         intent_plugin_id=context.planner_intent_plugin_id,
         decoupled=context.planner_decoupled,
+        thinking_mode=context.planner_thinking_mode,
     )
     client = DeepSeekPlannerClient(planner_cfg)
     lm = DeepSeekDSPyLM(
@@ -336,6 +357,7 @@ def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
         top_p=context.planner_top_p,
         top_k=context.planner_top_k,
         repetition_penalty=context.planner_repetition_penalty,
+        thinking_mode=context.planner_thinking_mode,
     )
     dspy.configure(lm=lm)
     return lm

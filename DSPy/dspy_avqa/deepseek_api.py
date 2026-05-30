@@ -37,6 +37,7 @@ class DeepSeekPlannerConfig:
     max_input_seq_len: int = int(os.environ.get("PLANNER_MAX_INPUT_SEQ_LEN", "30000"))
     intent_plugin_id: str = os.environ.get("PLANNER_INTENT_PLUGIN_ID", "Adaptive")
     decoupled: int = int(os.environ.get("PLANNER_DECOUPLED", "1"))
+    thinking_mode: str = _pick_env("PLANNER_THINKING_MODE", "DEEPSEEK_THINKING_MODE", default="")
 
 
 def _messages_to_prompts(messages: list[dict[str, Any]]) -> tuple[str, str]:
@@ -91,6 +92,7 @@ class DeepSeekPlannerClient:
             intent_plugin_id=kwargs.get("intent_plugin_id", self.config.intent_plugin_id),
             decoupled=kwargs.get("decoupled", self.config.decoupled),
             random_seed=kwargs.get("random_seed"),
+            thinking_mode=kwargs.get("thinking_mode", self.config.thinking_mode),
         )
         if content is None:
             raise RuntimeError("DeepSeek planner request failed")

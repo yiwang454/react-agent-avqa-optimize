@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from openai import OpenAI
 
@@ -11,6 +11,20 @@ from openai import OpenAI
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+
+
+def _thinking_extra_body(thinking_mode: Optional[str]) -> dict[str, Any] | None:
+    mode = str(thinking_mode or "").strip().lower().replace("_", "-")
+    if not mode or mode in {"auto", "default", "none", "unset"}:
+        return None
+    if mode in {"enabled", "enable", "thinking", "think", "on", "true", "1"}:
+        return {"thinking": {"type": "enabled"}}
+    if mode in {"disabled", "disable", "non-thinking", "nonthinking", "no-thinking", "off", "false", "0"}:
+        return {"thinking": {"type": "disabled"}}
+    raise ValueError(
+        f"Unsupported PLANNER_THINKING_MODE={thinking_mode!r}; "
+        "expected enabled, disabled, or auto"
+    )
 
 
 def _client() -> OpenAI:
@@ -37,8 +51,8 @@ def call_deepseek(
     timeout: int = 60,
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
-    temperature: float = 0.1,
-    top_p: float = 0.6,
+    temperature: Optional[float] = 0.1,
+    top_p: Optional[float] = 0.6,
     top_k: int = 20,
     repetition_penalty: float = 1.05,
     output_seq_len: int = 4096,
@@ -46,6 +60,7 @@ def call_deepseek(
     intent_plugin_id: str = "Adaptive",
     decoupled: int = 1,
     random_seed: Optional[int] = None,
+    thinking_mode: Optional[str] = None,
 ) -> Optional[str]:
     """Call DeepSeek through the OpenAI-compatible SDK path.
 
@@ -58,15 +73,22 @@ def call_deepseek(
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            resp = _client().chat.completions.create(
-                model=model,
-                messages=_messages(system_prompt, prompt),
-                stream=False,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=output_seq_len,
-                timeout=timeout,
-            )
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": _messages(system_prompt, prompt),
+                "stream": False,
+                "max_tokens": output_seq_len,
+                "timeout": timeout,
+            }
+            if temperature is not None:
+                request_kwargs["temperature"] = temperature
+            if top_p is not None:
+                request_kwargs["top_p"] = top_p
+            extra_body = _thinking_extra_body(thinking_mode)
+            if extra_body is not None:
+                request_kwargs["extra_body"] = extra_body
+
+            resp = _client().chat.completions.create(**request_kwargs)
             content = resp.choices[0].message.content
             if content is None or not str(content).strip():
                 raise ValueError("The LM returned an empty or null response.")
@@ -95,8 +117,8 @@ def call_deepseek_batch(
     timeout: int = 60,
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
-    temperature: float = 0.1,
-    top_p: float = 0.6,
+    temperature: Optional[float] = 0.1,
+    top_p: Optional[float] = 0.6,
     top_k: int = 20,
     repetition_penalty: float = 1.05,
     output_seq_len: int = 4096,
@@ -104,6 +126,7 @@ def call_deepseek_batch(
     intent_plugin_id: str = "Adaptive",
     decoupled: int = 1,
     random_seed: Optional[int] = None,
+    thinking_mode: Optional[str] = None,
     return_raw_if_parse_fail: bool = True,
 ) -> List[str]:
     del return_raw_if_parse_fail
@@ -127,6 +150,7 @@ def call_deepseek_batch(
             intent_plugin_id=intent_plugin_id,
             decoupled=decoupled,
             random_seed=random_seed,
+            thinking_mode=thinking_mode,
         )
         if raw is None:
             return "# 调用失败"
