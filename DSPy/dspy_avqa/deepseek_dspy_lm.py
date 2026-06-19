@@ -81,6 +81,7 @@ class DeepSeekDSPyLM(dspy.BaseLM):
         top_k: int,
         repetition_penalty: float,
         thinking_mode: str | None = None,
+        deepseek_random_seed: int | None = None,
     ):
         super().__init__(
             model=model,
@@ -93,6 +94,7 @@ class DeepSeekDSPyLM(dspy.BaseLM):
         )
         self.client = client
         self.thinking_mode = thinking_mode
+        self.deepseek_random_seed = deepseek_random_seed
 
     def _normalize_messages(
         self,
@@ -122,6 +124,9 @@ class DeepSeekDSPyLM(dspy.BaseLM):
                 "top_k": merged_kwargs.get("top_k"),
                 "repetition_penalty": merged_kwargs.get("repetition_penalty"),
                 "max_tokens": merged_kwargs.get("max_tokens"),
+                "deepseek_random_seed": merged_kwargs.get(
+                    "deepseek_random_seed", self.deepseek_random_seed
+                ),
                 "thinking_mode": merged_kwargs.get("thinking_mode", self.thinking_mode),
             },
         }
@@ -133,6 +138,9 @@ class DeepSeekDSPyLM(dspy.BaseLM):
                 top_k=merged_kwargs.get("top_k"),
                 repetition_penalty=merged_kwargs.get("repetition_penalty"),
                 output_seq_len=merged_kwargs.get("max_tokens"),
+                deepseek_random_seed=merged_kwargs.get(
+                    "deepseek_random_seed", self.deepseek_random_seed
+                ),
                 thinking_mode=merged_kwargs.get("thinking_mode", self.thinking_mode),
             )
         except Exception as exc:

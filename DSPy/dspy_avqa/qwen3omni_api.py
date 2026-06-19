@@ -174,6 +174,7 @@ def call_qwen_messages(
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
     temperature: float = 0.6,
+    qwen_seed: Optional[int] = None,
     top_p: float = 0.95,
     top_k: int = 20,
     max_tokens: int = 1024,
@@ -208,6 +209,8 @@ def call_qwen_messages(
                 "timeout": timeout,
                 "extra_body": extra_body,
             }
+            if qwen_seed is not None:
+                request_kwargs["seed"] = qwen_seed
             if resolved_stream:
                 request_kwargs["stream_options"] = {"include_usage": True}
 
@@ -260,6 +263,7 @@ def call_qwen(
     max_retries: int = 3,
     retry_delay_s: float = 1.0,
     temperature: float = 0.6,
+    qwen_seed: Optional[int] = None,
     top_p: float = 0.95,
     top_k: int = 20,
     max_tokens: int = 1024,
@@ -284,6 +288,7 @@ def call_qwen(
         max_retries=max_retries,
         retry_delay_s=retry_delay_s,
         temperature=temperature,
+        qwen_seed=qwen_seed,
         top_p=top_p,
         top_k=top_k,
         max_tokens=max_tokens,
@@ -321,6 +326,7 @@ def call_qwen3omni(
     timeout: int = 180,
     retry_delay_s: float = 1.0,
     temperature: float = 0.6,
+    qwen_seed: Optional[int] = None,
     top_p: float = 0.95,
     top_k: int = 20,
     max_tokens: int = 1024,
@@ -358,6 +364,7 @@ def call_qwen3omni(
         max_retries=max_retries,
         retry_delay_s=retry_delay_s,
         temperature=temperature,
+        qwen_seed=qwen_seed,
         top_p=top_p,
         top_k=top_k,
         max_tokens=max_tokens,

@@ -26,6 +26,15 @@ def pick_env(*keys: str, default: str) -> str:
     return default
 
 
+def pick_optional_int_env(*keys: str) -> int | None:
+    """Return the first non-empty integer env value from keys."""
+    for key in keys:
+        value = os.environ.get(key)
+        if value and value.strip() and value.strip().upper() != "EMPTY":
+            return int(value)
+    return None
+
+
 def _split_tool_names(value: str | Iterable[str] | None) -> list[str]:
     if value is None:
         return []
@@ -149,6 +158,9 @@ class AVQARuntimeContext:
     planner_thinking_mode: str = field(
         default_factory=lambda: pick_env("PLANNER_THINKING_MODE", "DEEPSEEK_THINKING_MODE", default="")
     )
+    planner_deepseek_random_seed: int | None = field(
+        default_factory=lambda: pick_optional_int_env("DEEPSEEK_SEED")
+    )
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
 
@@ -227,6 +239,7 @@ class SerialNOpenAICompatibleLM(dspy.LM):
                 "temperature": kwargs.get("temperature", self.kwargs.get("temperature")),
                 "top_p": kwargs.get("top_p", self.kwargs.get("top_p")),
                 "max_tokens": kwargs.get("max_tokens", self.kwargs.get("max_tokens")),
+                "deepseek_random_seed": kwargs.get("seed", self.kwargs.get("seed")),
                 "n": kwargs.get("n", self.kwargs.get("n", 1)),
                 "extra_body": kwargs.get("extra_body", self.kwargs.get("extra_body")),
             },
@@ -312,6 +325,8 @@ def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
         lm_kwargs["temperature"] = context.planner_temperature
     if _env_is_set("PLANNER_TOP_P"):
         lm_kwargs["top_p"] = context.planner_top_p
+    if context.planner_deepseek_random_seed is not None:
+        lm_kwargs["seed"] = context.planner_deepseek_random_seed
     extra_body = _planner_thinking_extra_body(context.planner_thinking_mode)
     if extra_body is not None:
         lm_kwargs["extra_body"] = extra_body
@@ -347,6 +362,7 @@ def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
         intent_plugin_id=context.planner_intent_plugin_id,
         decoupled=context.planner_decoupled,
         thinking_mode=context.planner_thinking_mode,
+        deepseek_random_seed=context.planner_deepseek_random_seed,
     )
     client = DeepSeekPlannerClient(planner_cfg)
     lm = DeepSeekDSPyLM(
@@ -358,6 +374,7 @@ def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
         top_k=context.planner_top_k,
         repetition_penalty=context.planner_repetition_penalty,
         thinking_mode=context.planner_thinking_mode,
+        deepseek_random_seed=context.planner_deepseek_random_seed,
     )
     dspy.configure(lm=lm)
     return lm

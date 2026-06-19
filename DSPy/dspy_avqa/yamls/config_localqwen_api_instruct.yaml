@@ -9,12 +9,14 @@ task:
 
 model:
   qwen_model: qwen3-omni-instruct
-  qwen_base_url: "http://10.62.186.58:8000/v1"
+  qwen_base_url: "http://10.62.27.37:8000/v1"
   qwen_api_key: EMPTY
   
 sampling_params:
   temperature: 0.0
   top_p: 1.0
+  top_k: 0
   max_tokens: 4096
   fps: 2.0
-  # max_frames: 128
+  max_frames: 128
+  seed: 1234

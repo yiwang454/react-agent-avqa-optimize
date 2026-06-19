@@ -31,6 +31,12 @@ def _env_optional_value(name: str) -> str | None:
         return None
     return value.strip()
 
+def _env_optional_int(name: str) -> int | None:
+    value = _env_optional_value(name)
+    if value is None:
+        return None
+    return int(value)
+
 def _set_last_perception_metadata(**metadata: Any) -> None:
     global _LAST_PERCEPTION_METADATA
     _LAST_PERCEPTION_METADATA = {key: value for key, value in metadata.items() if value is not None}
@@ -115,6 +121,7 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
         max_retries=int(os.environ.get("QWEN_MAX_RETRIES", "3")),
         retry_delay_s=float(os.environ.get("QWEN_DELAY_S", "1.0")),
         temperature=float(os.environ.get("QWEN_TEMPERATURE", "0.6")),
+        qwen_seed=_env_optional_int("QWEN_SEED"),
         top_p=float(os.environ.get("QWEN_TOP_P", "0.95")),
         top_k=int(os.environ.get("QWEN_TOP_K", "20")),
         max_tokens=int(os.environ.get("QWEN_MAX_TOKENS", "1024")),
@@ -151,6 +158,7 @@ def call_gemini_perception(video_path: str, audio_path: str | None, prompt: str)
         include_thoughts=_env_flag("GEMINI_INCLUDE_THOUGHTS", "true"),
         return_thinking=_env_flag("GEMINI_RETURN_THINKING", "true"),
         temperature=float(os.environ.get("GEMINI_TEMPERATURE", "0.6")),
+        gemini_seed=_env_optional_int("GEMINI_SEED"),
         top_p=float(os.environ.get("GEMINI_TOP_P", "0.95")),
         top_k=int(os.environ.get("GEMINI_TOP_K", "20")),
         max_tokens=int(os.environ.get("GEMINI_MAX_TOKENS", "1024")),

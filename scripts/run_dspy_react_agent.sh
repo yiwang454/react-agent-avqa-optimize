@@ -44,6 +44,5 @@ export LITELLM_LOCAL_MODEL_COST_MAP=true; python DSPy/avqa_dspy_impl.py \
   --output-jsonl /mnt/ceph_rbd/data/avqa_project/worldsense/worldsense_test_cut_per_question_audio_dspy/output_test.jsonl \
   --output-dir /mnt/ceph_rbd/data/avqa_project/worldsense/worldsense_test_cut_per_question_audio_dspy \
   --max-turns 4 \
-  --concurrency 1 \
   --perception-model "${PERCEPTION_MODEL:-qwen}" \
   --debug

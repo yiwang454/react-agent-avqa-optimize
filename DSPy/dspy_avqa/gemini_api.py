@@ -144,6 +144,7 @@ def call_gemini_messages(
     include_thoughts: bool = False,
     return_thinking: bool = False,
     temperature: float = 0.6,
+    gemini_seed: Optional[int] = None,
     top_p: float = 0.95,
     top_k: int = 20,
     max_tokens: int = 1024,
@@ -165,6 +166,8 @@ def call_gemini_messages(
             "maxOutputTokens": max_tokens,
         },
     }
+    if gemini_seed is not None:
+        data["generationConfig"]["seed"] = gemini_seed
     if system_prompt:
         data["systemInstruction"] = {"parts": [{"text": system_prompt}]}
     if include_thoughts:

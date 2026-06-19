@@ -59,7 +59,7 @@ def call_deepseek(
     max_input_seq_len: int = 30000,
     intent_plugin_id: str = "Adaptive",
     decoupled: int = 1,
-    random_seed: Optional[int] = None,
+    deepseek_random_seed: Optional[int] = None,
     thinking_mode: Optional[str] = None,
 ) -> Optional[str]:
     """Call DeepSeek through the OpenAI-compatible SDK path.
@@ -68,7 +68,7 @@ def call_deepseek(
     the optimize scripts do not need to change. The official DeepSeek endpoint
     safely receives the compatible subset: temperature, top_p, and max_tokens.
     """
-    del top_k, repetition_penalty, max_input_seq_len, intent_plugin_id, decoupled, random_seed
+    del top_k, repetition_penalty, max_input_seq_len, intent_plugin_id, decoupled
 
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
@@ -84,6 +84,8 @@ def call_deepseek(
                 request_kwargs["temperature"] = temperature
             if top_p is not None:
                 request_kwargs["top_p"] = top_p
+            if deepseek_random_seed is not None:
+                request_kwargs["seed"] = deepseek_random_seed
             extra_body = _thinking_extra_body(thinking_mode)
             if extra_body is not None:
                 request_kwargs["extra_body"] = extra_body
@@ -125,7 +127,7 @@ def call_deepseek_batch(
     max_input_seq_len: int = 30000,
     intent_plugin_id: str = "Adaptive",
     decoupled: int = 1,
-    random_seed: Optional[int] = None,
+    deepseek_random_seed: Optional[int] = None,
     thinking_mode: Optional[str] = None,
     return_raw_if_parse_fail: bool = True,
 ) -> List[str]:
@@ -149,7 +151,7 @@ def call_deepseek_batch(
             max_input_seq_len=max_input_seq_len,
             intent_plugin_id=intent_plugin_id,
             decoupled=decoupled,
-            random_seed=random_seed,
+            deepseek_random_seed=deepseek_random_seed,
             thinking_mode=thinking_mode,
         )
         if raw is None:

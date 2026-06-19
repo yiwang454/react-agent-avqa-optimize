@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/env_files/.env_dspy_react_agent_daily_gemini2.5_v2}"
+ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/env_files/.env_dspy_react_agent_daily_qwen_v2}"
 
 if [ ! -f "${ENV_FILE}" ]; then
   echo "Missing env file: ${ENV_FILE}" >&2
@@ -16,16 +16,29 @@ set +a
 # conda activate "${ENV_PREFIX}"
 cd "${PROJECT_DIR}"
 
+# This experiment fixes the Qwen perception seed and DeepSeek planner seed from bash/env.
+export QWEN_SEED="${QWEN_SEED:-1234}"
+export DEEPSEEK_SEED="${DEEPSEEK_SEED:-7}"
+export PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v3.yaml}"
+
+BASE_ENV_OUTPUT_DIR=/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_qwen_v3
+export OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-${BASE_ENV_OUTPUT_DIR}_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}"
+export OUTPUT_JSONL="${OUTPUT_DIR}/output_test.jsonl"
+export QWEN_BASE_URL="http://10.62.27.37:8000/v1"
+
 # Print related settings to verify env loading without leaking secrets.
 echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:+***set***}"
 echo "DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL}"
 echo "DEEPSEEK_MODEL=${DEEPSEEK_MODEL}"
+echo "DEEPSEEK_SEED=${DEEPSEEK_SEED}"
 echo "PLANNER_THINKING_MODE=${PLANNER_THINKING_MODE:-}"
 echo "PLANNER_TEMPERATURE=${PLANNER_TEMPERATURE:-}"
 echo "PLANNER_TOP_P=${PLANNER_TOP_P:-}"
-echo "GEMINI_API_KEY=${GEMINI_API_KEY:+***set***}"
-echo "GEMINI_BASE_URL=${GEMINI_BASE_URL}"
-echo "GEMINI_MODEL=${GEMINI_MODEL:-}"
+echo "QWEN_API_KEY=${QWEN_API_KEY:+***set***}"
+echo "QWEN_BASE_URL=${QWEN_BASE_URL:-}"
+echo "QWEN_MODEL=${QWEN_MODEL:-}"
+echo "QWEN_ENABLE_THINKING=${QWEN_ENABLE_THINKING:-}"
+echo "QWEN_SEED=${QWEN_SEED}"
 echo "PERCEPTION_CONFIG_YAML=${PERCEPTION_CONFIG_YAML:-}"
 echo "PROMPT_YAML=${PROMPT_YAML:-}"
 echo "DSPY_AVQA_ALLOWED_TOOLS=${DSPY_AVQA_ALLOWED_TOOLS:-}"
@@ -38,16 +51,14 @@ echo "MAX_TURNS=${MAX_TURNS}"
 echo "DEBUG=${DEBUG}"
 echo "DEBUG_LIMIT=${DEBUG_LIMIT}"
 
-RUN_REPEATS="${RUN_REPEATS:-2}"
-# RUN_SET_TAG="${RUN_SET_TAG:-$(date +%Y%m%d_%H%M%S)}"
+RUN_REPEATS="${RUN_REPEATS:-3}"
 BASE_OUTPUT_DIR="${OUTPUT_DIR%/}"
 
 echo "RUN_REPEATS=${RUN_REPEATS}"
-# echo "RUN_SET_TAG=${RUN_SET_TAG}"
 echo "BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR}"
 
-for run_idx in $(seq 1 "${RUN_REPEATS}"); do
-  run_output_dir="${BASE_OUTPUT_DIR}/repeat_${run_idx}"
+for run_idx in $(seq 2 $RUN_REPEATS); do
+  run_output_dir="${BASE_OUTPUT_DIR}_repeat${run_idx}"
   run_output_jsonl="${run_output_dir}/output_test.jsonl"
 
   echo "Running DSPy batch runner: run ${run_idx}/${RUN_REPEATS}"

@@ -18,6 +18,14 @@ def _pick_env(*keys: str, default: str) -> str:
     return default
 
 
+def _pick_optional_int_env(*keys: str) -> int | None:
+    for key in keys:
+        value = os.environ.get(key)
+        if value and value.strip() and value.strip().upper() != "EMPTY":
+            return int(value)
+    return None
+
+
 @dataclass(kw_only=True)
 class DeepSeekPlannerConfig:
     """Configuration kept for the existing DSPy AVQA planner adapter."""
@@ -38,6 +46,7 @@ class DeepSeekPlannerConfig:
     intent_plugin_id: str = os.environ.get("PLANNER_INTENT_PLUGIN_ID", "Adaptive")
     decoupled: int = int(os.environ.get("PLANNER_DECOUPLED", "1"))
     thinking_mode: str = _pick_env("PLANNER_THINKING_MODE", "DEEPSEEK_THINKING_MODE", default="")
+    deepseek_random_seed: int | None = _pick_optional_int_env("DEEPSEEK_SEED")
 
 
 def _messages_to_prompts(messages: list[dict[str, Any]]) -> tuple[str, str]:
@@ -91,7 +100,7 @@ class DeepSeekPlannerClient:
             max_input_seq_len=kwargs.get("max_input_seq_len", self.config.max_input_seq_len),
             intent_plugin_id=kwargs.get("intent_plugin_id", self.config.intent_plugin_id),
             decoupled=kwargs.get("decoupled", self.config.decoupled),
-            random_seed=kwargs.get("random_seed"),
+            deepseek_random_seed=kwargs.get("deepseek_random_seed", self.config.deepseek_random_seed),
             thinking_mode=kwargs.get("thinking_mode", self.config.thinking_mode),
         )
         if content is None:

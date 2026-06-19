@@ -38,7 +38,6 @@ cmd=(
   --output-jsonl "${OUTPUT_JSONL}"
   --output-dir "${OUTPUT_DIR}"
   --max-turns "${MAX_TURNS}"
-  --concurrency "${CONCURRENCY}"
   --perception-model "${PERCEPTION_MODEL}"
 )
 

@@ -36,7 +36,6 @@ echo "AUDIO_CAPTION_DIR=${AUDIO_CAPTION_DIR}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "OUTPUT_JSONL=${OUTPUT_JSONL}"
 echo "MAX_TURNS=${MAX_TURNS}"
-echo "CONCURRENCY=${CONCURRENCY}"
 echo "DEBUG=${DEBUG}"
 echo "DEBUG_LIMIT=${DEBUG_LIMIT}"
 
@@ -62,7 +61,6 @@ for run_idx in $(seq 1 "${RUN_REPEATS}"); do
     --output-jsonl "${run_output_jsonl}"
     --output-dir "${run_output_dir}"
     --max-turns "${MAX_TURNS}"
-    --concurrency "${CONCURRENCY}"
     --perception-model "${PERCEPTION_MODEL}"
   )
 

@@ -1,5 +1,6 @@
 # running scripts
 scripts/env_files
+scripts/run_dspy_react_agent_daily_qwen_v2_dsthink.sh
 result_examples/
 
 # Byte-compiled / optimized / DLL files

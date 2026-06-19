@@ -38,7 +38,6 @@ def parse_args() -> argparse.Namespace:
         help="Number of leading samples to run when --debug is enabled.",
     )
     parser.add_argument("--max-turns", type=int, default=4)
-    parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument(
         "--perception-config-yaml",
         type=Path,
@@ -81,6 +80,7 @@ def _set_env_from_mapping(mapping: dict[str, Any], key_map: dict[str, str]) -> N
 
 def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
     """Load perception backend parameters from a baseline-style YAML config."""
+    qwen_base_url_override = os.environ.get("QWEN_BASE_URL")
     if path is None:
         return {}
     with path.open("r", encoding="utf-8") as f:
@@ -138,6 +138,8 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "qwen_api_key": "QWEN_API_KEY",
         },
     )
+    if qwen_base_url_override:
+        os.environ["QWEN_BASE_URL"] = qwen_base_url_override
 
     _set_env_from_mapping(
         sampling,
@@ -146,6 +148,7 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "top_p": "GEMINI_TOP_P",
             "top_k": "GEMINI_TOP_K",
             "max_tokens": "GEMINI_MAX_TOKENS",
+            "gemini_seed": "GEMINI_SEED",
         },
     )
     _set_env_from_mapping(
@@ -285,6 +288,7 @@ def run_batch() -> None:
             f"top_p={os.environ.get('GEMINI_TOP_P', '')}, "
             f"top_k={os.environ.get('GEMINI_TOP_K', '')}, "
             f"max_tokens={os.environ.get('GEMINI_MAX_TOKENS', '')}, "
+            f"seed={os.environ.get('GEMINI_SEED', '')}, "
             f"print_first_prompt={os.environ.get('GEMINI_PRINT_FIRST_PROMPT', '')}, "
             f"batch_size={os.environ.get('GEMINI_BATCH_SIZE', '')}"
         )
@@ -303,6 +307,7 @@ def run_batch() -> None:
             f"top_p={os.environ.get('QWEN_TOP_P', '')}, "
             f"top_k={os.environ.get('QWEN_TOP_K', '')}, "
             f"max_tokens={os.environ.get('QWEN_MAX_TOKENS', '')}, "
+            f"seed={os.environ.get('QWEN_SEED', '')}, "
             f"fps={os.environ.get('QWEN_FPS', '')}, "
             f"max_frames={os.environ.get('QWEN_MAX_FRAMES', '')}"
         )
