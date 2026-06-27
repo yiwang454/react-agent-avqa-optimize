@@ -26,6 +26,43 @@ def avqa_metric(example: dspy.Example, pred: dspy.Prediction, trace: Any = None)
     return 1.0 if gold == got else 0.0
 
 
+def avqa_gepa_feedback_metric(
+    example: dspy.Example,
+    pred: dspy.Prediction,
+    trace: Any = None,
+    pred_name: str | None = None,
+    pred_trace: Any = None,
+) -> dspy.Prediction:
+    """Exact-match metric with textual feedback for GEPA reflection."""
+    gold = normalize_option_letter(str(example.answer))
+    got = normalize_option_letter(str(getattr(pred, "answer", "")))
+    score = 1.0 if gold == got else 0.0
+    question = str(getattr(example, "question", "") or "").strip()
+    options_json = str(getattr(example, "options_json", "") or "").strip()
+    reasoning = str(getattr(pred, "reasoning_summary", "") or "").strip()
+    feedback_parts = [
+        f"Score: {score}. Gold answer: {gold or '<empty>'}. Predicted answer: {got or '<empty>'}.",
+    ]
+    if question:
+        feedback_parts.append(f"Question: {question}")
+    if options_json:
+        feedback_parts.append(f"Options JSON: {options_json}")
+    if reasoning:
+        feedback_parts.append(f"Predicted reasoning summary: {reasoning}")
+    if pred_name:
+        feedback_parts.append(f"Predictor under reflection: {pred_name}")
+    if score < 1.0:
+        feedback_parts.append(
+            "Revise the planner instruction so it gathers the right audio/video evidence, "
+            "uses tools only when helpful, and returns exactly one option letter."
+        )
+    else:
+        feedback_parts.append(
+            "This trajectory is correct; preserve the behavior that led to this answer."
+        )
+    return dspy.Prediction(score=score, feedback="\n".join(feedback_parts))
+
+
 def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
     """Convert raw rows to DSPy Example list."""
     trainset: list[dspy.Example] = []
@@ -154,10 +191,104 @@ def optimize_with_simba(
     return teleprompter.compile(student=program, trainset=trainset, **compile_kwargs)
 
 
+def optimize_with_miprov2(
+    program: AVQADSPyReActProgram,
+    trainset: list[dspy.Example],
+    *,
+    auto: str | None = None,
+    num_candidates: int | None = None,
+    num_trials: int | None = None,
+    max_bootstrapped_demos: int = 2,
+    max_labeled_demos: int = 2,
+    seed: int = 9,
+    init_temperature: float = 1.0,
+    num_threads: int | None = None,
+    max_errors: int | None = None,
+    minibatch: bool = True,
+    minibatch_size: int = 16,
+    minibatch_full_eval_steps: int = 5,
+    view_data_batch_size: int = 8,
+) -> dspy.Module:
+    """Compile the program with MIPROv2."""
+    from dspy.teleprompt import MIPROv2
+
+    mipro_kwargs = {
+        "auto": auto,
+        "num_candidates": num_candidates,
+        "max_bootstrapped_demos": max_bootstrapped_demos,
+        "max_labeled_demos": max_labeled_demos,
+        "seed": seed,
+        "init_temperature": init_temperature,
+        "num_threads": num_threads,
+        "max_errors": max_errors,
+    }
+    mipro_kwargs = {key: value for key, value in mipro_kwargs.items() if value is not None}
+    teleprompter = MIPROv2(metric=avqa_metric, **_filtered_kwargs(MIPROv2.__init__, mipro_kwargs))
+    compile_kwargs = {
+        "num_trials": num_trials,
+        "max_bootstrapped_demos": max_bootstrapped_demos,
+        "max_labeled_demos": max_labeled_demos,
+        "seed": seed,
+        "minibatch": minibatch,
+        "minibatch_size": minibatch_size,
+        "minibatch_full_eval_steps": minibatch_full_eval_steps,
+        "view_data_batch_size": view_data_batch_size,
+    }
+    compile_kwargs = {key: value for key, value in compile_kwargs.items() if value is not None}
+    return teleprompter.compile(
+        student=program,
+        trainset=trainset,
+        **_filtered_kwargs(teleprompter.compile, compile_kwargs),
+    )
+
+
+def optimize_with_gepa(
+    program: AVQADSPyReActProgram,
+    trainset: list[dspy.Example],
+    *,
+    auto: str | None = None,
+    max_full_evals: int | None = 6,
+    max_metric_calls: int | None = None,
+    reflection_minibatch_size: int = 3,
+    candidate_selection_strategy: str = "pareto",
+    skip_perfect_score: bool = True,
+    use_merge: bool = True,
+    max_merge_invocations: int | None = 5,
+    num_threads: int | None = None,
+    seed: int | None = 0,
+    log_dir: str | None = None,
+    track_stats: bool = False,
+) -> dspy.Module:
+    """Compile the program with GEPA."""
+    from dspy.teleprompt import GEPA
+
+    gepa_kwargs = {
+        "auto": auto,
+        "max_full_evals": max_full_evals,
+        "max_metric_calls": max_metric_calls,
+        "reflection_minibatch_size": reflection_minibatch_size,
+        "candidate_selection_strategy": candidate_selection_strategy,
+        "reflection_lm": dspy.settings.lm,
+        "skip_perfect_score": skip_perfect_score,
+        "use_merge": use_merge,
+        "max_merge_invocations": max_merge_invocations,
+        "num_threads": num_threads,
+        "seed": seed,
+        "log_dir": log_dir,
+        "track_stats": track_stats,
+    }
+    gepa_kwargs = {key: value for key, value in gepa_kwargs.items() if value is not None}
+    teleprompter = GEPA(
+        metric=avqa_gepa_feedback_metric,
+        **_filtered_kwargs(GEPA.__init__, gepa_kwargs),
+    )
+    return teleprompter.compile(student=program, trainset=trainset)
+
+
 def parse_optimize_args() -> argparse.Namespace:
     """Parse optimizer CLI arguments."""
-    parser = argparse.ArgumentParser(description="Optimize DSPy AVQA ReAct with COPRO/SIMBA.")
-    parser.add_argument("--algorithm", choices=("copro", "simba"), default="copro")
+    parser = argparse.ArgumentParser(description="Optimize DSPy AVQA ReAct with DSPy optimizers.")
+    parser.add_argument("--algorithm", choices=("copro", "simba", "miprov2", "gepa"), default="copro")
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--audio-caption-dir", type=Path, required=True)
     parser.add_argument("--output-program", type=Path, required=True)
@@ -228,6 +359,31 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--simba-seed", type=int, default=0)
     parser.add_argument("--simba-temperature-for-sampling", type=float, default=None)
     parser.add_argument("--simba-temperature-for-candidates", type=float, default=None)
+    parser.add_argument("--miprov2-auto", choices=("none", "light", "medium", "heavy"), default="none")
+    parser.add_argument("--miprov2-num-candidates", type=int, default=6)
+    parser.add_argument("--miprov2-num-trials", type=int, default=10)
+    parser.add_argument("--miprov2-max-bootstrapped-demos", type=int, default=2)
+    parser.add_argument("--miprov2-max-labeled-demos", type=int, default=2)
+    parser.add_argument("--miprov2-seed", type=int, default=9)
+    parser.add_argument("--miprov2-init-temperature", type=float, default=1.0)
+    parser.add_argument("--miprov2-num-threads", type=int, default=None)
+    parser.add_argument("--miprov2-max-errors", type=int, default=None)
+    parser.add_argument("--miprov2-no-minibatch", action="store_true")
+    parser.add_argument("--miprov2-minibatch-size", type=int, default=16)
+    parser.add_argument("--miprov2-minibatch-full-eval-steps", type=int, default=5)
+    parser.add_argument("--miprov2-view-data-batch-size", type=int, default=8)
+    parser.add_argument("--gepa-auto", choices=("none", "light", "medium", "heavy"), default="none")
+    parser.add_argument("--gepa-max-full-evals", type=int, default=6)
+    parser.add_argument("--gepa-max-metric-calls", type=int, default=None)
+    parser.add_argument("--gepa-reflection-minibatch-size", type=int, default=3)
+    parser.add_argument("--gepa-candidate-selection-strategy", choices=("pareto", "current_best"), default="pareto")
+    parser.add_argument("--gepa-dont-skip-perfect-score", action="store_true")
+    parser.add_argument("--gepa-no-merge", action="store_true")
+    parser.add_argument("--gepa-max-merge-invocations", type=int, default=5)
+    parser.add_argument("--gepa-num-threads", type=int, default=None)
+    parser.add_argument("--gepa-seed", type=int, default=0)
+    parser.add_argument("--gepa-log-dir", type=str, default=None)
+    parser.add_argument("--gepa-track-stats", action="store_true")
     return parser.parse_args()
 
 
@@ -425,7 +581,7 @@ def run_optimization() -> None:
             depth=args.copro_depth,
             init_temperature=args.copro_init_temperature,
         )
-    else:
+    elif args.algorithm == "simba":
         print(
             "SIMBA config: "
             f"bsize={args.simba_bsize}, "
@@ -448,6 +604,78 @@ def run_optimization() -> None:
             seed=args.simba_seed,
             temperature_for_sampling=args.simba_temperature_for_sampling,
             temperature_for_candidates=args.simba_temperature_for_candidates,
+        )
+    elif args.algorithm == "miprov2":
+        mipro_auto = None if args.miprov2_auto == "none" else args.miprov2_auto
+        mipro_num_candidates = None if mipro_auto is not None else args.miprov2_num_candidates
+        mipro_num_trials = None if mipro_auto is not None else args.miprov2_num_trials
+        print(
+            "MIPROv2 config: "
+            f"auto={mipro_auto}, "
+            f"num_candidates={mipro_num_candidates}, "
+            f"num_trials={mipro_num_trials}, "
+            f"max_bootstrapped_demos={args.miprov2_max_bootstrapped_demos}, "
+            f"max_labeled_demos={args.miprov2_max_labeled_demos}, "
+            f"seed={args.miprov2_seed}, "
+            f"init_temperature={args.miprov2_init_temperature}, "
+            f"num_threads={args.miprov2_num_threads}, "
+            f"minibatch={not args.miprov2_no_minibatch}, "
+            f"minibatch_size={args.miprov2_minibatch_size}, "
+            f"minibatch_full_eval_steps={args.miprov2_minibatch_full_eval_steps}, "
+            f"view_data_batch_size={args.miprov2_view_data_batch_size}"
+        )
+        compiled = optimize_with_miprov2(
+            program,
+            trainset,
+            auto=mipro_auto,
+            num_candidates=mipro_num_candidates,
+            num_trials=mipro_num_trials,
+            max_bootstrapped_demos=args.miprov2_max_bootstrapped_demos,
+            max_labeled_demos=args.miprov2_max_labeled_demos,
+            seed=args.miprov2_seed,
+            init_temperature=args.miprov2_init_temperature,
+            num_threads=args.miprov2_num_threads,
+            max_errors=args.miprov2_max_errors,
+            minibatch=not args.miprov2_no_minibatch,
+            minibatch_size=args.miprov2_minibatch_size,
+            minibatch_full_eval_steps=args.miprov2_minibatch_full_eval_steps,
+            view_data_batch_size=args.miprov2_view_data_batch_size,
+        )
+    else:
+        gepa_auto = None if args.gepa_auto == "none" else args.gepa_auto
+        gepa_max_full_evals = args.gepa_max_full_evals
+        if gepa_auto is not None or args.gepa_max_metric_calls is not None:
+            gepa_max_full_evals = None
+        print(
+            "GEPA config: "
+            f"auto={gepa_auto}, "
+            f"max_full_evals={gepa_max_full_evals}, "
+            f"max_metric_calls={args.gepa_max_metric_calls}, "
+            f"reflection_minibatch_size={args.gepa_reflection_minibatch_size}, "
+            f"candidate_selection_strategy={args.gepa_candidate_selection_strategy}, "
+            f"skip_perfect_score={not args.gepa_dont_skip_perfect_score}, "
+            f"use_merge={not args.gepa_no_merge}, "
+            f"max_merge_invocations={args.gepa_max_merge_invocations}, "
+            f"num_threads={args.gepa_num_threads}, "
+            f"seed={args.gepa_seed}, "
+            f"log_dir={args.gepa_log_dir}, "
+            f"track_stats={args.gepa_track_stats}"
+        )
+        compiled = optimize_with_gepa(
+            program,
+            trainset,
+            auto=gepa_auto,
+            max_full_evals=gepa_max_full_evals,
+            max_metric_calls=args.gepa_max_metric_calls,
+            reflection_minibatch_size=args.gepa_reflection_minibatch_size,
+            candidate_selection_strategy=args.gepa_candidate_selection_strategy,
+            skip_perfect_score=not args.gepa_dont_skip_perfect_score,
+            use_merge=not args.gepa_no_merge,
+            max_merge_invocations=args.gepa_max_merge_invocations,
+            num_threads=args.gepa_num_threads,
+            seed=args.gepa_seed,
+            log_dir=args.gepa_log_dir,
+            track_stats=args.gepa_track_stats,
         )
 
     _save_program(compiled, args.output_program)
@@ -502,6 +730,39 @@ def run_optimization() -> None:
                 "seed": args.simba_seed,
                 "temperature_for_sampling": args.simba_temperature_for_sampling,
                 "temperature_for_candidates": args.simba_temperature_for_candidates,
+            },
+            "miprov2": {
+                "auto": None if args.miprov2_auto == "none" else args.miprov2_auto,
+                "num_candidates": None if args.miprov2_auto != "none" else args.miprov2_num_candidates,
+                "num_trials": None if args.miprov2_auto != "none" else args.miprov2_num_trials,
+                "max_bootstrapped_demos": args.miprov2_max_bootstrapped_demos,
+                "max_labeled_demos": args.miprov2_max_labeled_demos,
+                "seed": args.miprov2_seed,
+                "init_temperature": args.miprov2_init_temperature,
+                "num_threads": args.miprov2_num_threads,
+                "max_errors": args.miprov2_max_errors,
+                "minibatch": not args.miprov2_no_minibatch,
+                "minibatch_size": args.miprov2_minibatch_size,
+                "minibatch_full_eval_steps": args.miprov2_minibatch_full_eval_steps,
+                "view_data_batch_size": args.miprov2_view_data_batch_size,
+            },
+            "gepa": {
+                "auto": None if args.gepa_auto == "none" else args.gepa_auto,
+                "max_full_evals": (
+                    None
+                    if args.gepa_auto != "none" or args.gepa_max_metric_calls is not None
+                    else args.gepa_max_full_evals
+                ),
+                "max_metric_calls": args.gepa_max_metric_calls,
+                "reflection_minibatch_size": args.gepa_reflection_minibatch_size,
+                "candidate_selection_strategy": args.gepa_candidate_selection_strategy,
+                "skip_perfect_score": not args.gepa_dont_skip_perfect_score,
+                "use_merge": not args.gepa_no_merge,
+                "max_merge_invocations": args.gepa_max_merge_invocations,
+                "num_threads": args.gepa_num_threads,
+                "seed": args.gepa_seed,
+                "log_dir": args.gepa_log_dir,
+                "track_stats": args.gepa_track_stats,
             },
             "elapsed_seconds": elapsed,
         }

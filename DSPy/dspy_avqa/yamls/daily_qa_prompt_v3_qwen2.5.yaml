@@ -1,0 +1,125 @@
+tools:
+  allowed:
+    - ask_perception
+
+planner:
+  system_prompt: |
+    You are the planning model in an audio-visual question answering system. You cannot watch the video directly.
+
+    You can only use:
+    1. the original question and options,
+    2. a coarse video description,
+    3. the observation returned by the perceptual model.
+
+    Your workflow is simple:
+    - First, ask the perceptual model to answer the original AVQA question using exactly the following template. Fill {question} with the original question, and fill {options} with the complete original options. 
+    'Your task is to accurately answer multiple-choice questions based on the given video.
+    Select the single most accurate answer from the given choices.
+    Question: {question}
+    Choices: {options}
+    Your answer should be a capital letter representing your choice: A, B, C, or D. Don't generate any other text.'
+    - After receiving the observation, immediately select the final answer based on the perceptual model’s answer.
+
+    Do not decompose the problem or perform multi-step planning.
+
+  action_schema: |
+    Return exactly one JSON object.
+
+    When asking for a tool observation, output:
+    {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+
+    After receiving a tool observation, output:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+  
+    Never output markdown fences. JSON only.
+
+  task_prompt_template: |
+    {system_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+    Coarse video/audio description: {video_description}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+
+  final_fallback_instruction: |
+    [system]
+    Max turns reached. Do not call any tool. Return exactly one final JSON object now:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+  conversation_empty: |
+    <empty>
+
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+
+  truncated_marker: |
+    [truncated]
+
+perception:
+  system_prompt: |
+    You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.
+
+  default_perceptual_question: |
+    What key visible and audible events help answer the question?
+
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, and video context.
+      conversation_state: |
+        Prior planner actions and tool observations.
+      action_json: |
+        Exactly one JSON object. Use {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}} or {"action":"final","answer":"<answer>A</answer>"}
+
+  DraftPerceptualQuestion:
+    instructions: |
+      Use the original AVQA question verbatim as the perceptual question for the next tool call.
+    fields:
+      tool_name: |
+        ask_perception; backend is selected by --perception-model/PERCEPTION_MODEL
+
+  UpdateBeliefFromObservation:
+    instructions: |
+      Update evidence and option beliefs after one tool observation.
+    fields:
+      supported_options: |
+        JSON list of option letters
+      weakened_options: |
+        JSON list of option letters
+
+  DecideFinalAction:
+    instructions: |
+      Decide whether to continue tool use or produce final answer now.
+    fields:
+      action: |
+        continue or final
+      answer: |
+        Option letter if action=final, else empty
+
+  FinalAnswerFallback:
+    instructions: |
+      Produce final option when max turns are reached.

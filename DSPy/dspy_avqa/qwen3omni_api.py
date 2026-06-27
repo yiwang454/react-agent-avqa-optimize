@@ -197,7 +197,8 @@ def call_qwen_messages(
                 "max_frames": max_frames,
             }
             if enable_thinking is not None and _env_flag("QWEN_INCLUDE_ENABLE_THINKING", True):
-                extra_body["enable_thinking"] = enable_thinking
+                # extra_body["enable_thinking"] = enable_thinking
+                extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = enable_thinking
 
             request_kwargs: Dict[str, Any] = {
                 "model": model,

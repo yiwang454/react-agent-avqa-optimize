@@ -388,10 +388,11 @@ def load_records(path: Path) -> list[dict[str, Any]]:
     return load_jsonl_records(path)
 
 
-def summarize(records: list[dict[str, Any]]) -> dict[str, int]:
+def summarize(records: list[dict[str, Any]]) -> dict[str, int | float]:
     total = len(records)
     errors = sum(1 for record in records if is_error_record(record))
     with_pred = sum(1 for record in records if extract_pred_answer(record))
+    total_turns = sum(len(question_data(record).get("turn_trace") or []) for record in records)
     correct = 0
     comparable = 0
     for record in records:
@@ -407,6 +408,8 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, int]:
         "with_pred": with_pred,
         "comparable": comparable,
         "correct": correct,
+        "total_turns": total_turns,
+        "avg_turns_per_question": (total_turns / total) if total else 0.0,
     }
 
 
@@ -495,6 +498,7 @@ def main() -> None:
     parts.append(f"# Predictions: {stats['with_pred']}")
     if stats["comparable"]:
         parts.append(f"# Comparable accuracy: {stats['correct']}/{stats['comparable']}")
+    parts.append(f"# Average turns per question: {stats['avg_turns_per_question']:.2f}")
     parts.append("")
 
     for idx, record in enumerate(records):
