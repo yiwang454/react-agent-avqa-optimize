@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from .prompt_config import prompt_value, render_prompt
 
 
 SUPPORTED_PERCEPTION_MODELS = {"qwen", "gemini"}
-_LAST_PERCEPTION_METADATA: dict[str, Any] = {}
+_PERCEPTION_METADATA_STATE = threading.local()
 
 def _env_flag(name: str, default: str = "false") -> bool:
     value = os.environ.get(name, default).strip().lower()
@@ -38,14 +39,14 @@ def _env_optional_int(name: str) -> int | None:
     return int(value)
 
 def _set_last_perception_metadata(**metadata: Any) -> None:
-    global _LAST_PERCEPTION_METADATA
-    _LAST_PERCEPTION_METADATA = {key: value for key, value in metadata.items() if value is not None}
+    _PERCEPTION_METADATA_STATE.last = {
+        key: value for key, value in metadata.items() if value is not None
+    }
 
 def consume_last_perception_metadata() -> dict[str, Any]:
-    """Return and clear metadata from the most recent perception call."""
-    global _LAST_PERCEPTION_METADATA
-    metadata = dict(_LAST_PERCEPTION_METADATA)
-    _LAST_PERCEPTION_METADATA = {}
+    """Return and clear metadata from the most recent perception call in this thread."""
+    metadata = dict(getattr(_PERCEPTION_METADATA_STATE, "last", {}) or {})
+    _PERCEPTION_METADATA_STATE.last = {}
     return metadata
 
 def selected_perception_model() -> str:
@@ -107,8 +108,9 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
             {"type": "text", "text": prompt},
         ]
     )
+    system_prompt = prompt_value("perception", "system_prompt").strip()
     messages = [
-        {"role": "system", "content": prompt_value("perception", "system_prompt").strip()},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
     ]
 
@@ -132,6 +134,10 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
     )
     _set_last_perception_metadata(
         backend="qwen",
+        system_prompt=system_prompt,
+        prompt=prompt,
+        model=os.environ.get("QWEN_MODEL", "qwen3-omni").strip() or "qwen3-omni",
+        # base_url=_env_optional_value("QWEN_BASE_URL"),
         token_usage=token_usage,
         thinking_text=thinking_text,
     )
@@ -149,9 +155,10 @@ def call_gemini_perception(video_path: str, audio_path: str | None, prompt: str)
         parts.append(to_gemini_inline_data(audio_path))
     parts.extend([to_gemini_inline_data(video_path), {"text": prompt}])
     contents = [{"role": "user", "parts": parts}]
+    system_prompt = prompt_value("perception", "system_prompt").strip()
     result = call_gemini_messages(
         contents,
-        system_prompt=prompt_value("perception", "system_prompt").strip(),
+        system_prompt=system_prompt,
         timeout=int(os.environ.get("GEMINI_TIMEOUT", "180")),
         max_retries=int(os.environ.get("GEMINI_MAX_RETRIES", "3")),
         retry_delay_s=float(os.environ.get("GEMINI_RETRY_DELAY_S", "5")),
@@ -170,6 +177,10 @@ def call_gemini_perception(video_path: str, audio_path: str | None, prompt: str)
         thinking_text = ""
     _set_last_perception_metadata(
         backend="gemini",
+        system_prompt=system_prompt,
+        prompt=prompt,
+        model=os.environ.get("GEMINI_MODEL", ""),
+        # base_url=_env_optional_value("GEMINI_BASE_URL"),
         token_usage=usage,
         thinking_text=thinking_text,
     )

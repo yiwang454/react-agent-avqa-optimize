@@ -30,18 +30,11 @@ export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/
 # Difference from the qwen3omni v3 script:
 # qwen2.5 local API works with file media URLs and does not include the qwen3
 # enable_thinking request field by default.
-export QWEN_MEDIA_URL_MODE="http://10.62.231.10:8000/v1"
+export QWEN_MEDIA_URL_MODE="http://10.62.185.217:8000/v1"
 export QWEN_STREAM="${QWEN_STREAM:-0}"
 export QWEN_INCLUDE_ENABLE_THINKING="${QWEN_INCLUDE_ENABLE_THINKING:-0}"
 
-# Difference from the qwen3omni v3 script:
-# do not hard-code the qwen3omni endpoint. Let the qwen2.5 YAML set it, unless
-# QWEN_BASE_URL_OVERRIDE is provided explicitly.
-if [ -n "${QWEN_BASE_URL_OVERRIDE:-}" ]; then
-  export QWEN_BASE_URL="${QWEN_BASE_URL_OVERRIDE}"
-else
-  unset QWEN_BASE_URL
-fi
+export QWEN_BASE_URL="http://10.62.185.217:8000/v1"
 
 DAILY_PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v3_qwen2.5.yaml}"
 
