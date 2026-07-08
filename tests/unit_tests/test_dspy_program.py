@@ -44,8 +44,10 @@ def _install_program_import_stubs() -> None:
     sys.modules["dspy_avqa.signatures"] = signatures
 
     tools = types.ModuleType("dspy_avqa.tools")
+    tools.ask_caption = lambda *args, **kwargs: ""
     tools.ask_perception = lambda *args, **kwargs: ""
     tools.consume_last_perception_metadata = lambda: {}
+    tools.selected_captioner_model = lambda: "gemini"
     tools.selected_perception_model = lambda: "gemini"
     tools.temporal_ground_video = lambda *args, **kwargs: ""
     sys.modules["dspy_avqa.tools"] = tools

@@ -306,7 +306,9 @@ def optimize_with_miprov2(
         "track_stats": track_stats,
         "log_dir": log_dir,
     }
-    mipro_kwargs = {key: value for key, value in mipro_kwargs.items() if value is not None}
+    # MIPROv2 defaults to auto="light"; keep an explicit auto=None so DSPy
+    # does not reject the explicit num_candidates/num_trials settings below.
+    mipro_kwargs = {key: value for key, value in mipro_kwargs.items() if value is not None or key == "auto"}
     teleprompter = MIPROv2(metric=avqa_metric, **_filtered_kwargs(MIPROv2.__init__, mipro_kwargs))
     compile_kwargs = {
         "num_trials": num_trials,

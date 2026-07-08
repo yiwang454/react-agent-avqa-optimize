@@ -12,7 +12,14 @@ from .deepseek_dspy_lm import clear_planner_call_trace, consume_planner_call_tra
 from .context import AVQARuntimeContext, configure_deepseek_lm, resolve_allowed_tools
 from .prompt_config import prompt_value, render_prompt
 from .signatures import PlanNextAction
-from .tools import ask_perception, consume_last_perception_metadata, selected_perception_model, temporal_ground_video
+from .tools import (
+    ask_caption,
+    ask_perception,
+    consume_last_perception_metadata,
+    selected_captioner_model,
+    selected_perception_model,
+    temporal_ground_video,
+)
 
 
 OPTION_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -180,7 +187,8 @@ def _conversation_state(turn_trace: list[dict[str, Any]]) -> str:
         observation = turn.get("tool_observation")
         if observation:
             tool_name = turn.get("tool_name") or "unknown"
-            question = (turn.get("tool_args") or {}).get("perceptual_question") or ""
+            tool_args = turn.get("tool_args") or {}
+            question = tool_args.get("perceptual_question") or tool_args.get("caption_instruction") or ""
             lines.append(
                 render_prompt(
                     "planner",
@@ -226,6 +234,8 @@ def _exception_info(exc: Exception) -> dict[str, Any]:
 
 def _canonical_tool_name(raw_tool_name: str) -> str:
     value = raw_tool_name.strip().lower()
+    if value in {"ask_caption", "ask_captioner", "caption_video", "captioner"}:
+        return "ask_caption"
     if value == "temporal_ground_video":
         return "temporal_ground_video"
     if value in {"ask_qwen_perception", "ask_gemini_perception", "ask_perception"}:
@@ -266,6 +276,45 @@ def _perceptual_question(payload: dict[str, Any], source_question: str | None = 
         if value:
             return value
     return _render_default_perceptual_question(source_question)
+
+
+def _default_caption_instruction() -> str:
+    try:
+        return prompt_value("captioner", "default_caption_instruction").strip()
+    except KeyError:
+        return "Produce a detailed timestamped audio-visual caption of the video."
+
+
+def _caption_instruction(payload: dict[str, Any]) -> str:
+    """Extract the captioner instruction from the compact action payload."""
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    for candidate in (
+        arguments.get("caption_instruction"),
+        arguments.get("instruction"),
+        arguments.get("prompt"),
+        payload.get("caption_instruction"),
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return _default_caption_instruction()
+
+
+def _tool_query(payload: dict[str, Any], tool_name: str, source_question: str | None = None) -> str:
+    if tool_name == "ask_caption":
+        return _caption_instruction(payload)
+    return _perceptual_question(payload, source_question=source_question)
+
+
+def _tool_args(tool_name: str, video_path: str, audio_path: str | None, query: str) -> dict[str, Any]:
+    args: dict[str, Any] = {"video_path": video_path, "audio_path": audio_path}
+    if tool_name == "ask_caption":
+        args["caption_instruction"] = query
+    else:
+        args["perceptual_question"] = query
+    return args
 
 
 class AVQADSPyReActProgram(dspy.Module):
@@ -322,19 +371,25 @@ class AVQADSPyReActProgram(dspy.Module):
         tool_name: str,
         video_path: str,
         audio_path: str | None,
-        perceptual_question: str,
+        tool_query: str,
     ) -> str:
-        """Dispatch one perceptual tool call."""
+        """Dispatch one planner tool call."""
+        if tool_name == "ask_caption":
+            return ask_caption(
+                video_path=video_path,
+                audio_path=audio_path,
+                caption_instruction=tool_query,
+            )
         if tool_name == "temporal_ground_video":
             return temporal_ground_video(
                 video_path=video_path,
                 audio_path=audio_path,
-                perceptual_question=perceptual_question,
+                perceptual_question=tool_query,
             )
         return ask_perception(
             video_path=video_path,
             audio_path=audio_path,
-            perceptual_question=perceptual_question,
+            perceptual_question=tool_query,
         )
 
     def forward(
@@ -399,13 +454,13 @@ class AVQADSPyReActProgram(dspy.Module):
 
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
-            perceptual_question = _perceptual_question(payload, source_question=question)
-            perception_backend = selected_perception_model()
+            tool_query = _tool_query(payload, tool_name, source_question=question)
+            perception_backend = selected_captioner_model() if tool_name == "ask_caption" else selected_perception_model()
             tool_observation = self._call_tool(
                 tool_name=tool_name,
                 video_path=video_path,
                 audio_path=audio_path,
-                perceptual_question=perceptual_question,
+                tool_query=tool_query,
             )
             perception_metadata = consume_last_perception_metadata()
 
@@ -416,11 +471,7 @@ class AVQADSPyReActProgram(dspy.Module):
                     "tool_name": tool_name,
                     "raw_tool_name": raw_tool_name,
                     "perception_backend": perception_backend,
-                    "tool_args": {
-                        "video_path": video_path,
-                        "audio_path": audio_path,
-                        "perceptual_question": perceptual_question,
-                    },
+                    "tool_args": _tool_args(tool_name, video_path, audio_path, tool_query),
                     "tool_observation": tool_observation,
                     "perception_system_prompt": perception_metadata.get("system_prompt", ""),
                     "perception_prompt": perception_metadata.get("prompt", ""),

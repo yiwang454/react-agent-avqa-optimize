@@ -180,6 +180,7 @@ def call_qwen_messages(
     max_tokens: int = 1024,
     fps: float = 2.0,
     max_frames: int = 128,
+    repetition_penalty: Optional[float] = None,
     enable_thinking: Optional[bool] = None,
     stream: Optional[bool] = None,
     return_thinking: bool = False,
@@ -191,6 +192,8 @@ def call_qwen_messages(
             extra_body: Dict[str, Any] = {
                 "top_k": top_k,
             }
+            if repetition_penalty is not None:
+                extra_body["repetition_penalty"] = repetition_penalty
             # if _env_flag("QWEN_INCLUDE_MM_PROCESSOR_KWARGS", True):
             extra_body["mm_processor_kwargs"] = {
                 "fps": fps,
@@ -270,6 +273,7 @@ def call_qwen(
     max_tokens: int = 1024,
     fps: float = 2.0,
     max_frames: int = 128,
+    repetition_penalty: Optional[float] = None,
     enable_thinking: Optional[bool] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     content: List[Dict[str, Any]] = []
@@ -295,6 +299,7 @@ def call_qwen(
         max_tokens=max_tokens,
         fps=fps,
         max_frames=max_frames,
+        repetition_penalty=repetition_penalty,
         enable_thinking=enable_thinking,
     )
 
@@ -333,6 +338,8 @@ def call_qwen3omni(
     max_tokens: int = 1024,
     fps: float = 2.0,
     max_frames: int = 128,
+    repetition_penalty: Optional[float] = None,
+    video_first: bool = False,
     enable_thinking: bool = True,
 ) -> Tuple[str, str, Dict[str, Any]]:
     """Qwen3-Omni call used by optimize_dailyomni scripts.
@@ -343,17 +350,14 @@ def call_qwen3omni(
     """
     video_data_url = to_data_url(video_path)
     audio_data_url = to_data_url(audio_path)
+    audio_content = {"type": "audio_url", "audio_url": {"url": audio_data_url}}
+    video_content = {"type": "video_url", "video_url": {"url": video_data_url}}
+    content = [video_content, audio_content] if video_first else [audio_content, video_content]
+    content.append({"type": "text", "text": prompt_text})
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": [
-                {"type": "audio_url", "audio_url": {"url": audio_data_url}},
-                {"type": "video_url", "video_url": {"url": video_data_url}},
-                {"type": "text", "text": prompt_text},
-            ],
-        },
+        {"role": "user", "content": content},
     ]
 
     response_text, token_usage, reasoning_text = call_qwen_messages(
@@ -371,6 +375,7 @@ def call_qwen3omni(
         max_tokens=max_tokens,
         fps=fps,
         max_frames=max_frames,
+        repetition_penalty=repetition_penalty,
         enable_thinking=enable_thinking,
         return_thinking=True,
     )

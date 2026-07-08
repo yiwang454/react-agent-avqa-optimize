@@ -65,9 +65,7 @@ planner:
     [truncated]
 
 perception:
-  system_prompt: |
-    You are a perceptual audio-visual assistant.
-
+  system_prompt: ""
   default_perceptual_question: |
     What key visible and audible events help answer the question?
 

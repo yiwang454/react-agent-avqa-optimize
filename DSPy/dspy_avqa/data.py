@@ -62,7 +62,7 @@ def debug_filter(cuts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return selected
 
 
-def build_input_state(cut: dict[str, Any], audio_caption_dir: Path) -> dict[str, Any]:
+def build_input_state(cut: dict[str, Any], audio_caption_dir: Path | None) -> dict[str, Any]:
     """Map one cut row to AVQA model inputs."""
     supervisions = cut.get("supervisions") or []
     if not supervisions:
@@ -85,7 +85,9 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path) -> dict[str,
     question_id = str(cut.get("id") or "")
     if not question_id:
         raise ValueError("Cut id is empty")
-    audio_caption = load_audio_caption_concat(audio_caption_dir, question_id)
+    audio_caption = ""
+    if audio_caption_dir is not None:
+        audio_caption = load_audio_caption_concat(audio_caption_dir, question_id)
 
     if not question or not options or not video_path:
         raise ValueError(
@@ -94,7 +96,7 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path) -> dict[str,
         )
     if not audio_path:
         raise ValueError(f"Missing required audio_path in cut_id={cut.get('id')}")
-    if not audio_caption:
+    if audio_caption_dir is not None and not audio_caption:
         raise ValueError(f"Audio caption is empty for question_id={question_id}")
 
     return {

@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch run DSPy AVQA ReAct over cut JSONL.")
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--output-jsonl", type=Path, required=True)
-    parser.add_argument("--audio-caption-dir", type=Path, required=True)
+    parser.add_argument("--audio-caption-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--debug", action="store_true", help="Run only the first debug-limit samples.")
     parser.add_argument(
@@ -104,6 +104,8 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
         os.environ["QWEN_VIDEO_ONLY"] = video_only
     if task.get("enable_thinking") is not None:
         os.environ["QWEN_ENABLE_THINKING"] = _env_bool(task["enable_thinking"])
+    if task.get("video_first") is not None:
+        os.environ["QWEN_VIDEO_FIRST"] = _env_bool(task["video_first"])
 
     _set_env_from_mapping(
         task,
@@ -160,6 +162,8 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "max_tokens": "QWEN_MAX_TOKENS",
             "fps": "QWEN_FPS",
             "max_frames": "QWEN_MAX_FRAMES",
+            "seed": "QWEN_SEED",
+            "repetition_penalty": "QWEN_REPETITION_PENALTY",
         },
     )
     return config
@@ -227,7 +231,7 @@ def load_cached_row(cut: dict[str, Any], output_dir: Path | None) -> dict[str, A
 def run_one(
     program: AVQADSPyReActProgram,
     cut: dict[str, Any],
-    audio_caption_dir: Path,
+    audio_caption_dir: Path | None,
     max_turns: int,
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]], dict[str, Any], str | None, dict[str, Any] | None]:
     """Run one cut and return response text, trace, and optional error."""
@@ -275,6 +279,10 @@ def run_batch() -> None:
     print(f"Perception model: {args.perception_model}")
     print(f"Prompt yaml: {active_prompt_yaml_path()}")
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
+    if args.audio_caption_dir:
+        print(f"Audio caption dir: {args.audio_caption_dir}")
+    else:
+        print("Audio caption dir: <none; use captioner tool if needed>")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
     if args.perception_model == "gemini":
@@ -299,6 +307,7 @@ def run_batch() -> None:
             f"model={os.environ.get('QWEN_MODEL', '')}, "
             f"base_url={os.environ.get('QWEN_BASE_URL', '')}, "
             f"video_only={os.environ.get('QWEN_VIDEO_ONLY', '')}, "
+            f"video_first={os.environ.get('QWEN_VIDEO_FIRST', '')}, "
             f"enable_thinking={os.environ.get('QWEN_ENABLE_THINKING', '')}, "
             f"timeout={os.environ.get('QWEN_TIMEOUT', '')}, "
             f"max_retries={os.environ.get('QWEN_MAX_RETRIES', '')}, "
@@ -309,7 +318,8 @@ def run_batch() -> None:
             f"max_tokens={os.environ.get('QWEN_MAX_TOKENS', '')}, "
             f"seed={os.environ.get('QWEN_SEED', '')}, "
             f"fps={os.environ.get('QWEN_FPS', '')}, "
-            f"max_frames={os.environ.get('QWEN_MAX_FRAMES', '')}"
+            f"max_frames={os.environ.get('QWEN_MAX_FRAMES', '')}, "
+            f"repetition_penalty={os.environ.get('QWEN_REPETITION_PENALTY', '')}"
         )
 
     rows_by_sample_id: dict[str, dict[str, Any]] = {}

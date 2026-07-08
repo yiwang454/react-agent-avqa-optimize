@@ -24,19 +24,18 @@ export DEBUG_LIMIT="${DEBUG_LIMIT:-4}"
 export PERCEPTION_MODEL="${PERCEPTION_MODEL:-qwen}"
 
 # Difference from the qwen3omni v5 script:
-# use the qwen2.5 perception config requested for this experiment.
-export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/demos/yamls/config_localqwen2.5_api.yaml}"
+# use the qwen2.5 perception config aligned with the tuned baseline.
+export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/config_localqwen2_5_3B_api_instruct.yaml}"
 
 # Difference from the qwen3omni v5 script:
 # qwen2.5 local API works with file media URLs and does not include the qwen3
 # enable_thinking request field by default.
 
-export QWEN_MEDIA_URL_MODE="http://10.62.185.217:8000/v1"
+export QWEN_MEDIA_URL_MODE="file"
 export QWEN_STREAM="${QWEN_STREAM:-0}"
 export QWEN_INCLUDE_ENABLE_THINKING="${QWEN_INCLUDE_ENABLE_THINKING:-0}"
 
-export QWEN_BASE_URL="http://10.62.185.217:8000/v1"
-
+export QWEN_BASE_URL="http://10.62.93.223:8000/v1"
 
 DAILY_PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v5_qwen2.5.yaml}"
 

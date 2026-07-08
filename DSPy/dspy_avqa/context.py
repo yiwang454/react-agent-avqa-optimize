@@ -13,7 +13,7 @@ from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 from .deepseek_dspy_lm import DeepSeekDSPyLM, append_planner_call_trace
 from .prompt_config import prompt_config, prompt_value
 
-SUPPORTED_TOOL_NAMES = ("ask_perception", "temporal_ground_video")
+SUPPORTED_TOOL_NAMES = ("ask_caption", "ask_perception", "temporal_ground_video")
 _SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
 
 
@@ -68,6 +68,8 @@ def resolve_allowed_tools(value: str | Iterable[str] | None = None) -> tuple[str
     normalized: list[str] = []
     for tool_name in raw_tools:
         normalized_name = tool_name.strip().lower()
+        if normalized_name in {"ask_captioner", "caption_video", "captioner"}:
+            normalized_name = "ask_caption"
         if normalized_name in {"ask_qwen_perception", "ask_gemini_perception"}:
             normalized_name = "ask_perception"
         if normalized_name not in _SUPPORTED_TOOL_SET:

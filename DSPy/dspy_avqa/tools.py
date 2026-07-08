@@ -38,6 +38,12 @@ def _env_optional_int(name: str) -> int | None:
         return None
     return int(value)
 
+def _env_optional_float(name: str) -> float | None:
+    value = _env_optional_value(name)
+    if value is None:
+        return None
+    return float(value)
+
 def _set_last_perception_metadata(**metadata: Any) -> None:
     _PERCEPTION_METADATA_STATE.last = {
         key: value for key, value in metadata.items() if value is not None
@@ -57,6 +63,22 @@ def selected_perception_model() -> str:
     if backend not in SUPPORTED_PERCEPTION_MODELS:
         raise ValueError(
             f"Unsupported PERCEPTION_MODEL={backend!r}; "
+            f"expected one of {sorted(SUPPORTED_PERCEPTION_MODELS)}"
+        )
+    return backend
+
+def selected_captioner_model() -> str:
+    """Return the configured captioner backend name."""
+    backend = (
+        os.environ.get("CAPTIONER_MODEL")
+        or os.environ.get("CAPTION_MODEL")
+        or os.environ.get("PERCEPTION_MODEL", "qwen")
+    ).strip().lower()
+    if not backend:
+        return selected_perception_model()
+    if backend not in SUPPORTED_PERCEPTION_MODELS:
+        raise ValueError(
+            f"Unsupported CAPTIONER_MODEL={backend!r}; "
             f"expected one of {sorted(SUPPORTED_PERCEPTION_MODELS)}"
         )
     return backend
@@ -91,7 +113,12 @@ def to_gemini_inline_data(path: str) -> dict[str, Any]:
         }
     }
 
-def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -> str:
+def call_qwen_perception(
+    video_path: str,
+    audio_path: str | None,
+    prompt: str,
+    system_prompt: str | None = None,
+) -> str:
     """Call Qwen3-omni for AV perception/grounding."""
     from .qwen3omni_api import call_qwen_messages, to_data_url
 
@@ -100,15 +127,22 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
         raise ValueError("audio_path is required for Qwen3-omni calls")
 
     content: list[dict[str, Any]] = []
-    if audio_path and not qwen_video_only:
-        content.append({"type": "audio_url", "audio_url": {"url": to_data_url(audio_path)}})
-    content.extend(
-        [
-            {"type": "video_url", "video_url": {"url": to_data_url(video_path)}},
-            {"type": "text", "text": prompt},
-        ]
+    video_content = {"type": "video_url", "video_url": {"url": to_data_url(video_path)}}
+    audio_content = (
+        {"type": "audio_url", "audio_url": {"url": to_data_url(audio_path)}}
+        if audio_path and not qwen_video_only
+        else None
     )
-    system_prompt = prompt_value("perception", "system_prompt").strip()
+    if _env_flag("QWEN_VIDEO_FIRST", "false"):
+        content.append(video_content)
+        if audio_content is not None:
+            content.append(audio_content)
+    else:
+        if audio_content is not None:
+            content.append(audio_content)
+        content.append(video_content)
+    content.append({"type": "text", "text": prompt})
+    system_prompt = system_prompt if system_prompt is not None else prompt_value("perception", "system_prompt").strip()
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
@@ -129,6 +163,7 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
         max_tokens=int(os.environ.get("QWEN_MAX_TOKENS", "1024")),
         fps=float(os.environ.get("QWEN_FPS", "2.0")),
         max_frames=int(os.environ.get("QWEN_MAX_FRAMES", "128")),
+        repetition_penalty=_env_optional_float("QWEN_REPETITION_PENALTY"),
         enable_thinking=_env_optional_bool("QWEN_ENABLE_THINKING"),
         return_thinking=True,
     )
@@ -138,6 +173,7 @@ def call_qwen_perception(video_path: str, audio_path: str | None, prompt: str) -
         prompt=prompt,
         model=os.environ.get("QWEN_MODEL", "qwen3-omni").strip() or "qwen3-omni",
         # base_url=_env_optional_value("QWEN_BASE_URL"),
+        video_first=_env_flag("QWEN_VIDEO_FIRST", "false"),
         token_usage=token_usage,
         thinking_text=thinking_text,
     )
@@ -148,14 +184,19 @@ def gemini_video_only() -> bool:
     value = os.environ.get("GEMINI_VIDEO_ONLY", "true").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
-def call_gemini_perception(video_path: str, audio_path: str | None, prompt: str) -> str:
+def call_gemini_perception(
+    video_path: str,
+    audio_path: str | None,
+    prompt: str,
+    system_prompt: str | None = None,
+) -> str:
     """Call Gemini for AV perception/grounding."""
     parts: list[dict[str, Any]] = []
     if audio_path and not gemini_video_only():
         parts.append(to_gemini_inline_data(audio_path))
     parts.extend([to_gemini_inline_data(video_path), {"text": prompt}])
     contents = [{"role": "user", "parts": parts}]
-    system_prompt = prompt_value("perception", "system_prompt").strip()
+    system_prompt = system_prompt if system_prompt is not None else prompt_value("perception", "system_prompt").strip()
     result = call_gemini_messages(
         contents,
         system_prompt=system_prompt,
@@ -186,12 +227,81 @@ def call_gemini_perception(video_path: str, audio_path: str | None, prompt: str)
     )
     return response_text.strip()
 
-def call_perception(video_path: str, audio_path: str | None, prompt: str) -> str:
+def call_perception(
+    video_path: str,
+    audio_path: str | None,
+    prompt: str,
+    backend: str | None = None,
+    system_prompt: str | None = None,
+) -> str:
     """Call the selected perceptual backend."""
-    backend = selected_perception_model()
+    backend = backend or selected_perception_model()
     if backend == "gemini":
-        return call_gemini_perception(video_path=video_path, audio_path=audio_path, prompt=prompt)
-    return call_qwen_perception(video_path=video_path, audio_path=audio_path, prompt=prompt)
+        return call_gemini_perception(
+            video_path=video_path,
+            audio_path=audio_path,
+            prompt=prompt,
+            system_prompt=system_prompt,
+        )
+    return call_qwen_perception(
+        video_path=video_path,
+        audio_path=audio_path,
+        prompt=prompt,
+        system_prompt=system_prompt,
+    )
+
+def _caption_prompt_value(*keys: str, default: str = "") -> str:
+    try:
+        return prompt_value(*keys).strip()
+    except KeyError:
+        return default
+
+
+def build_caption_prompt(caption_instruction: str | None = None) -> str:
+    """Build the captioner prompt from YAML, with a stable fallback."""
+    instruction = (caption_instruction or "").strip()
+    if not instruction:
+        instruction = _caption_prompt_value(
+            "captioner",
+            "default_caption_instruction",
+            default=(
+                "Given a video, produce a detailed timestamped shot list describing "
+                "all salient visible and audible events."
+            ),
+        )
+    try:
+        return render_prompt(
+            "captioner",
+            "caption_prompt_template",
+            caption_instruction=instruction,
+        )
+    except KeyError:
+        return instruction
+
+
+def captioner_system_prompt() -> str:
+    """Return the captioner system prompt, falling back to a factual tool role."""
+    return _caption_prompt_value(
+        "captioner",
+        "system_prompt",
+        default="You are an audio-visual captioning system. Be factual and concise.",
+    )
+
+
+def ask_caption(
+    video_path: str,
+    caption_instruction: str | None = None,
+    audio_path: str | None = None,
+) -> str:
+    """Tool: ask the selected captioner backend for a factual AV caption."""
+    return call_perception(
+        video_path=video_path,
+        audio_path=audio_path,
+        prompt=build_caption_prompt(caption_instruction),
+        backend=selected_captioner_model(),
+        system_prompt=captioner_system_prompt(),
+    )
+
 
 def build_perception_prompt(
     perceptual_question: str,

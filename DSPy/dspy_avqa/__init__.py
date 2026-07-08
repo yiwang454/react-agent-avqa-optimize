@@ -27,12 +27,14 @@ from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_c
 from .runner import parse_args, run_batch, run_one
 from .signatures import apply_prompt_config_to_signatures
 from .tools import (
+    ask_caption,
     ask_gemini_perception,
     ask_perception,
     ask_qwen_perception,
     call_gemini_perception,
     call_perception,
     call_qwen_perception,
+    selected_captioner_model,
     selected_perception_model,
     temporal_ground_video,
 )
@@ -58,6 +60,7 @@ __all__ = [
     "prompt_config",
     "prompt_value",
     "apply_prompt_config_to_signatures",
+    "ask_caption",
     "ask_qwen_perception",
     "ask_gemini_perception",
     "ask_perception",
@@ -65,6 +68,7 @@ __all__ = [
     "call_qwen_perception",
     "call_gemini_perception",
     "call_perception",
+    "selected_captioner_model",
     "selected_perception_model",
     "parse_args",
     "run_one",

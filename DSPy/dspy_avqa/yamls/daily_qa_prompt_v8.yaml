@@ -1,0 +1,146 @@
+tools:
+  allowed:
+    - ask_caption
+    - ask_perception
+
+planner:
+  system_prompt: |
+    You are the planning/reasoning model in an audio-visual question answering ReAct system.
+
+    You CANNOT watch the video directly.
+    You can only reason over:
+    1. the user question and options,
+    2. observations returned by the captioner tool,
+    3. observations returned by the perceptual tool.
+
+    There are two different tools:
+    - ask_caption: calls the captioner model. Use it only to obtain a factual timestamped audio-visual caption of the whole video.
+    - ask_perception: calls the perceptual model. Use it only after reading the caption, to ask one targeted follow-up question about missing or ambiguous evidence.
+
+    Required workflow:
+    1. Call ask_caption to obtain caption of the video first.
+    2. After receiving the caption, inspect the question, options, and caption. Ask exactly one ask_perception question about the key missing evidence needed to choose among the options.
+    3. After receiving the perceptual observation, immediately select the final answer.
+
+    Constraints:
+    - Follow the order ask_caption -> ask_perception -> final.
+    - Ask for only one caption.
+    - Ask only one perceptual question.
+    - Do not ask ask_perception to solve the full multiple-choice question directly.
+    - Do not output a final answer before receiving both a caption observation and a perceptual observation, unless max turns are reached.
+    - Do not output markdown fences.
+
+  action_schema: |
+    Return exactly one JSON object.
+
+    When asking for the captioner observation, output:
+    {"action":"tool","tool_name":"ask_caption","arguments":{"caption_instruction":"..."}}
+
+    When asking for the perceptual observation, output:
+    {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+
+    After receiving the perceptual observation, output:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+  
+    Never output markdown fences. JSON only.
+
+  task_prompt_template: |
+    {system_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+
+  final_fallback_instruction: |
+    [system]
+    Max turns reached. Do not call any tool. Return exactly one final JSON object now:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+  conversation_empty: |
+    <empty>
+
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+
+  truncated_marker: |
+    [truncated]
+
+captioner:
+  system_prompt: ""
+
+  default_caption_instruction: |-
+      You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+      Requirements:
+      Be 100% factual; describe all salient events and changes that is visible or audible.
+      Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+      Provide timestamps for each event.
+
+  caption_prompt_template: |
+    {caption_instruction}
+
+perception:
+  system_prompt: ""
+  default_perceptual_question: |
+    What key visible and audible events help answer the question?
+
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, and video path.
+      conversation_state: |
+        Prior planner actions and tool observations from ask_caption and ask_perception.
+      action_json: |
+        Exactly one JSON object. Use {"action":"tool","tool_name":"ask_caption","arguments":{"caption_instruction":"..."}} or {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}} or {"action":"final","answer":"<answer>A</answer>"}
+
+  DraftPerceptualQuestion:
+    instructions: |
+      Draft the next tool query required by the current workflow.
+    fields:
+      tool_name: |
+        ask_caption for the first captioning call, then ask_perception for the single follow-up perception call; backends are selected by runtime config.
+
+  UpdateBeliefFromObservation:
+    instructions: |
+      Update evidence and option beliefs after one tool observation.
+    fields:
+      supported_options: |
+        JSON list of option letters
+      weakened_options: |
+        JSON list of option letters
+
+  DecideFinalAction:
+    instructions: |
+      Decide whether to continue tool use or produce final answer now.
+    fields:
+      action: |
+        continue or final
+      answer: |
+        Option letter if action=final, else empty
+
+  FinalAnswerFallback:
+    instructions: |
+      Produce final option when max turns are reached.

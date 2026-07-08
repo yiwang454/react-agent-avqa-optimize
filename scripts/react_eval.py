@@ -14,9 +14,15 @@ def parse_answer_tag(text: str) -> str:
     if not text:
         return ""
     match = re.search(r"<answer>\s*([^<]+?)\s*</answer>", text, flags=re.IGNORECASE)
-    if not match:
-        return ""
-    return match.group(1).strip().upper()
+    if match:
+        return match.group(1).strip().upper()
+    stripped = text.strip().upper()
+    if re.fullmatch(r"[A-F]", stripped):
+        return stripped
+    match = re.match(r"\s*([A-F])(?:[\).\]:\s]|$)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return ""
 
 
 def get_question_data(sample: Dict[str, Any]) -> Dict[str, Any]:

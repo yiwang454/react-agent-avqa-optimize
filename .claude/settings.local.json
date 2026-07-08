@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(D=/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_captioner_qwen2.5_3B_qwen2.5-omni_QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP5_0.0 *)",
+      "Read(//mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_captioner_qwen2.5_3B_qwen2.5-omni_QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP5_0.0/**)"
+    ]
+  }
+}

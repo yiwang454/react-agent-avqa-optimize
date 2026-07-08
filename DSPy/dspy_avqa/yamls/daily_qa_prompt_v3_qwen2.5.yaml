@@ -67,8 +67,7 @@ planner:
     [truncated]
 
 perception:
-  system_prompt: |
-    You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.
+  system_prompt: You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.
 
   default_perceptual_question: |
     What key visible and audible events help answer the question?

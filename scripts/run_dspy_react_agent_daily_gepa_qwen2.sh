@@ -26,7 +26,7 @@ export QWEN_SEED="${QWEN_SEED:-1234}"
 export DEEPSEEK_SEED="${DEEPSEEK_SEED:-7}"
 export PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v6.yaml}"
 export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/config_localqwen_api_instruct.yaml}"
-export QWEN_BASE_URL="${QWEN_BASE_URL_OVERRIDE:-http://10.62.2.189:8000/v1}"
+export QWEN_BASE_URL="${QWEN_BASE_URL_OVERRIDE:-http://10.62.2.147:8000/v1}"
 export MAX_TURNS="${GEPA_MAX_TURNS:-${MAX_TURNS:-4}}"
 export PERCEPTION_MODEL="${GEPA_PERCEPTION_MODEL:-qwen}"
 

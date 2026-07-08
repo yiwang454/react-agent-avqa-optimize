@@ -23,47 +23,46 @@ export DEBUG="${DEBUG:-false}"
 export DEBUG_LIMIT="${DEBUG_LIMIT:-4}"
 export PERCEPTION_MODEL="${PERCEPTION_MODEL:-qwen}"
 
-# Difference from the qwen3omni v3 script:
+# Difference from the qwen3omni v5 script:
 # use the qwen2.5 perception config aligned with the tuned baseline.
-export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/config_localqwen2_5_3B_api_instruct.yaml}"
+export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/config_localqwen2_5_3B_api_instruct1024.yaml}"
 
-# Difference from the qwen3omni v3 script:
+# Difference from the qwen3omni v5 script:
 # qwen2.5 local API works with file media URLs and does not include the qwen3
 # enable_thinking request field by default.
+
 export QWEN_MEDIA_URL_MODE="file"
 export QWEN_STREAM="${QWEN_STREAM:-0}"
 export QWEN_INCLUDE_ENABLE_THINKING="${QWEN_INCLUDE_ENABLE_THINKING:-0}"
 
-export QWEN_BASE_URL="http://10.62.93.223:8000/v1"
+export QWEN_BASE_URL="http://10.62.93.191:8000/v1"
 
-DAILY_PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v3_qwen2.5.yaml}"
+DAILY_PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v5_qwen2.5.yaml}"
 
-# Difference from the qwen3omni v3 script:
+# Difference from the qwen3omni v5 script:
 # AVUT is added after daily omni. The baseline qwen2.5 script switches from
 # config_daily_qa_prompt_repetition.yaml to config_AVUT_qa_prompt_repetition.yaml;
 # DSPy prompt YAMLs use a different planner/perception schema, so AVUT keeps the
-# v3 DSPy prompt unless AVUT_PROMPT_YAML_OVERRIDE is set.
+# v5 DSPy prompt unless AVUT_PROMPT_YAML_OVERRIDE is set.
 AVUT_PROMPT_YAML="${AVUT_PROMPT_YAML_OVERRIDE:-${DAILY_PROMPT_YAML}}"
 
-# Difference from the qwen3omni v3 script:
+# Difference from the qwen3omni v5 script:
 # use the same daily/AVUT input-jsonl split as the qwen2.5 baseline reference.
 DAILY_INPUT_JSONL="${DAILY_INPUT_JSONL_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_v3.jsonl}"
 AVUT_INPUT_JSONL="${AVUT_INPUT_JSONL_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/avut_jsonls/avut_cuts_human_av_seperated.jsonl}"
 
+DAILY_AUDIO_CAPTION_DIR_OVERRIDE="/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_captioner_qwen2.5_3B_qwen2.5-omni_QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP5_0.0"
 DAILY_AUDIO_CAPTION_DIR="${DAILY_AUDIO_CAPTION_DIR_OVERRIDE:-${AUDIO_CAPTION_DIR:-}}"
 # DSPy requires response JSONs keyed by AVUT cut id. Override this with a true
 # AVUT caption directory if one is available.
 AVUT_AUDIO_CAPTION_DIR="${AVUT_AUDIO_CAPTION_DIR_OVERRIDE:-${AVUT_AUDIO_CAPTION_DIR:-/mnt/ceph_rbd/data/avqa_project/AVUTBenchmark/results/AVUT_think_local_qwen3omni}}"
 
-# Difference from the qwen3omni v3 script:
+# Difference from the qwen3omni v5 script:
 # output directories explicitly include qwen2.5 and are split by dataset.
-DAILY_BASE_OUTPUT_DIR="${DAILY_OUTPUT_DIR_OVERRIDE:-${OUTPUT_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_qwen2.5_v3SYS_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}}"
-AVUT_BASE_OUTPUT_DIR="${AVUT_OUTPUT_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/AVUTBenchmark/results/AVUT_dspy_qwen2.5_v3SYS_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}"
+DAILY_BASE_OUTPUT_DIR="${DAILY_OUTPUT_DIR_OVERRIDE:-${OUTPUT_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_qwen2.5_v5ConsistCaption_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}}"
+AVUT_BASE_OUTPUT_DIR="${AVUT_OUTPUT_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/AVUTBenchmark/results/AVUT_dspy_qwen2.5_v5ConsistCaption_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}"
 
 RUN_REPEATS="${RUN_REPEATS:-3}"
-# Difference from the original qwen3omni v3 script:
-# this fresh qwen2.5 run starts at repeat1 by default; set RUN_START_IDX=2 to
-# mimic the old v3 script's resume behavior.
 RUN_START_IDX="${RUN_START_IDX:-1}"
 
 run_dataset() {
