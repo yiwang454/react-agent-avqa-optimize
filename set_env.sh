@@ -13,7 +13,7 @@ conda activate "${ENV_PREFIX}"
 python -m pip install -U uv
 
 # 4) 进入项目并安装依赖
-cd /mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa
+cd /mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa-optimize
 
 # 安装依赖（包含 dev 组里 langgraph-cli[inmem]）
 uv sync

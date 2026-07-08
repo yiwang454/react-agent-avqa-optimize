@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Install environment for DSPy-based ReAct implementation on local ceph workspace.
-PROJECT_ROOT="/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa"
+PROJECT_ROOT="/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa-optimize"
 CONDA_ENVS_DIR="/mnt/ceph_rbd/applications/anaconda3/envs"
 ENV_PREFIX="${CONDA_ENVS_DIR}/react-avqa-dspy"
 PYTHON_VERSION="3.11"

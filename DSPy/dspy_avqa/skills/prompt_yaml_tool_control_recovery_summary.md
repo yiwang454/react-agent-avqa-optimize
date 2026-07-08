@@ -131,7 +131,7 @@ scripts/env_files/.env_dspy_react_agent_daily_tool3
 sets:
 
 ```bash
-PROMPT_YAML=/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v1.yaml
+PROMPT_YAML=/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa-optimize/DSPy/dspy_avqa/yamls/daily_qa_prompt_v1.yaml
 DSPY_AVQA_ALLOWED_TOOLS=ask_perception
 ```
 
@@ -155,7 +155,7 @@ passes both values through to `DSPy/avqa_dspy_impl.py` as:
 If `PROMPT_YAML` is set to:
 
 ```text
-/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa/DSPy/dspy_avqa/yamls/daily_qa_prompt_v0.yaml
+/mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa-optimize/DSPy/dspy_avqa/yamls/daily_qa_prompt_v0.yaml
 ```
 
 can temporal grounding still be used?
