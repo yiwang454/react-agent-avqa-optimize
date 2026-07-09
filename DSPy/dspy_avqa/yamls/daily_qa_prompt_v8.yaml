@@ -4,7 +4,7 @@ tools:
     - ask_perception
 
 planner:
-  system_prompt: |
+  workflow_prompt: |
     You are the planning/reasoning model in an audio-visual question answering ReAct system.
 
     You CANNOT watch the video directly.
