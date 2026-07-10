@@ -238,6 +238,17 @@ def call_qwen_messages(
                         token_usage = usage
                 response_text = "".join(content_chunks)
                 reasoning_text = "".join(reasoning_chunks).strip()
+                if not response_text.strip() and not reasoning_text:
+                    retry_kwargs = dict(request_kwargs)
+                    retry_kwargs["stream"] = False
+                    retry_kwargs.pop("stream_options", None)
+                    retry_completion = _client(api_key=api_key, base_url=base_url).chat.completions.create(
+                        **retry_kwargs
+                    )
+                    message = retry_completion.choices[0].message
+                    response_text = _extract_text_content(getattr(message, "content", None))
+                    reasoning_text = _extract_message_reasoning(message).strip()
+                    token_usage = _extract_usage(retry_completion) or token_usage
             else:
                 message = completion.choices[0].message
                 response_text = _extract_text_content(getattr(message, "content", None))

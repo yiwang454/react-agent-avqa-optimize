@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import logging
 import os
 import random
 import time
@@ -17,9 +19,11 @@ from .context import AVQARuntimeContext, resolve_allowed_tools
 from .deepseek_dspy_lm import consume_planner_call_trace
 from .data import build_input_state, build_result_row, maybe_dump_question_data, read_jsonl, write_results_jsonl
 from .program import AVQADSPyReActProgram, normalize_option_letter
-from .prompt_config import active_prompt_yaml_path, load_prompt_config
+from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_overrides, prompt_value
 from .runner import extract_error_info, load_perception_config_yaml
 from .signatures import apply_prompt_config_to_signatures
+
+logger = logging.getLogger(__name__)
 
 
 def avqa_metric(example: dspy.Example, pred: dspy.Prediction, trace: Any = None) -> float:
@@ -36,7 +40,7 @@ def avqa_gepa_feedback_metric(
     pred_name: str | None = None,
     pred_trace: Any = None,
 ) -> dspy.Prediction:
-    """Exact-match metric with textual feedback for GEPA reflection."""
+    """Exact-match metric with textual feedback for GEPA reflection. 例如 gold answer、predicted answer、question、options、reasoning summary 等"""
     gold = normalize_option_letter(str(example.answer))
     got = normalize_option_letter(str(getattr(pred, "answer", "")))
     score = 1.0 if gold == got else 0.0
@@ -213,6 +217,354 @@ def _resolve_gepa_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+PROMPT_OPTIMIZE_TARGETS = {
+    "planner.workflow_prompt",
+    "captioner.default_caption_instruction",
+    "captioner.caption_prompt_template",
+    "perception.default_perceptual_question",
+    "perception.evidence_prompt_template",
+}
+PROMPT_OPTIMIZE_EXCLUDED_TARGETS = {
+    "signatures.PlanNextAction.instructions",
+    "captioner.system_prompt",
+    "perception.system_prompt",
+    "planner.action_schema",
+    "planner.task_prompt_template",
+    "planner.final_fallback_instruction",
+    "planner.conversation_empty",
+    "planner.assistant_turn_template",
+    "planner.tool_turn_template",
+    "planner.truncated_marker",
+}
+
+
+class PromptComponentSignature(dspy.Signature):
+    """Prompt component text being optimized."""
+
+    prompt_context = dspy.InputField(desc="Description of where this prompt component is used.")
+    prompt_text = dspy.OutputField(desc="The prompt component text.")
+
+
+def _target_keys(target_path: str) -> tuple[str, ...]:
+    return tuple(part for part in target_path.split(".") if part)
+
+
+def _get_nested(mapping: dict[str, Any], target_path: str) -> Any:
+    value: Any = mapping
+    for key in _target_keys(target_path):
+        if not isinstance(value, dict) or key not in value:
+            raise KeyError(target_path)
+        value = value[key]
+    return value
+
+
+def _set_nested(mapping: dict[str, Any], target_path: str, value: str) -> None:
+    keys = _target_keys(target_path)
+    current: dict[str, Any] = mapping
+    for key in keys[:-1]:
+        next_value = current.setdefault(key, {})
+        if not isinstance(next_value, dict):
+            raise ValueError(f"Cannot set {target_path}; {key} is not a mapping")
+        current = next_value
+    current[keys[-1]] = value
+
+
+def validate_optimize_target(target_path: str) -> None:
+    if target_path == "signature":
+        raise ValueError("Signature optimization is disabled for v8; use --optimize-target planner.workflow_prompt or another explicit prompt dot path")
+    if target_path in PROMPT_OPTIMIZE_EXCLUDED_TARGETS:
+        raise ValueError(f"Prompt target {target_path!r} is intentionally fixed and excluded from optimization")
+    if target_path not in PROMPT_OPTIMIZE_TARGETS:
+        allowed = ", ".join(sorted(PROMPT_OPTIMIZE_TARGETS))
+        raise ValueError(f"Unsupported prompt optimize target {target_path!r}; expected one of: {allowed}")
+    value = _get_nested(prompt_config(), target_path)
+    if not isinstance(value, str):
+        raise ValueError(f"Prompt optimize target must resolve to a string: {target_path}")
+
+
+def prompt_target_initial_text(target_path: str) -> str:
+    return str(_get_nested(prompt_config(), target_path)).strip()
+
+
+class PromptTargetProgram(dspy.Module):
+    """Expose one prompt config string as the optimizer-visible component. 把一个 YAML prompt component 包成可优化 program"""
+
+    def __init__(self, base_program: AVQADSPyReActProgram, target_path: str, initial_text: str):
+        super().__init__()
+        object.__setattr__(self, "_base_program", base_program)
+        self.target_path = target_path
+        signature = PromptComponentSignature.with_instructions(initial_text)
+        self.prompt_component = dspy.Predict(signature)
+
+    def _candidate_text(self) -> str:
+        signature = getattr(self.prompt_component, "signature", None)
+        return str(getattr(signature, "instructions", "") or "").strip()
+
+    def forward(self, *args: Any, **kwargs: Any) -> dspy.Prediction:
+        with prompt_overrides({_target_keys(self.target_path): self._candidate_text()}):
+            return self._base_program(*args, **kwargs)
+
+    def named_predictors(self):
+        return [("prompt_component", self.prompt_component)]
+
+    def predictors(self):
+        return [self.prompt_component]
+
+
+def _prompt_component_text(program: dspy.Module) -> str:
+    component = getattr(program, "prompt_component", None)
+    signature = getattr(component, "signature", None)
+    return str(getattr(signature, "instructions", "") or "").strip()
+
+
+class PromptTargetGEPAAdapter:
+    """GEPA adapter for prompt components that are read but not called as predictors."""
+
+    def __init__(
+        self,
+        *,
+        student_module: PromptTargetProgram,
+        target_path: str,
+        metric_fn: Any,
+        failure_score: float = 0.0,
+        num_threads: int | None = None,
+        rng: random.Random | None = None,
+        reflection_lm: Any = None,
+        reflection_minibatch_size: int | None = None,
+    ):
+        self.student = student_module
+        self.target_path = target_path
+        self.component_name = "prompt_component"
+        self.metric_fn = metric_fn
+        self.failure_score = failure_score
+        self.num_threads = num_threads
+        self.rng = rng or random.Random(0)
+        self.reflection_lm = reflection_lm
+        self.reflection_minibatch_size = reflection_minibatch_size
+
+    def stripped_lm_call(self, x: str) -> list[str]:
+        raw_outputs = (self.reflection_lm or dspy.settings.lm)(x)
+        outputs: list[str] = []
+        for raw_output in raw_outputs:
+            if isinstance(raw_output, str):
+                outputs.append(raw_output)
+            elif isinstance(raw_output, dict) and "text" in raw_output:
+                outputs.append(str(raw_output["text"]))
+            else:
+                outputs.append(str(raw_output))
+        return outputs
+
+    def build_program(self, candidate: dict[str, str]) -> PromptTargetProgram:
+        new_prog = self.student.deepcopy()
+        candidate_text = candidate.get(self.component_name)
+        if candidate_text is not None:
+            new_prog.prompt_component.signature = new_prog.prompt_component.signature.with_instructions(candidate_text)
+        return new_prog
+
+    def evaluate(self, batch: list[dspy.Example], candidate: dict[str, str], capture_traces: bool = False):
+        from dspy.evaluate import Evaluate
+        from gepa.core.adapter import EvaluationBatch
+
+        program = self.build_program(candidate)
+        callback_metadata = (
+            {"metric_key": "eval_full"}
+            if self.reflection_minibatch_size is None or len(batch) > self.reflection_minibatch_size
+            else {"disable_logging": True}
+        )
+        if capture_traces:
+            from dspy.teleprompt import bootstrap_trace as bootstrap_trace_module
+
+            trajs = bootstrap_trace_module.bootstrap_trace_data(
+                program=program,
+                dataset=batch,
+                metric=self.metric_fn,
+                num_threads=self.num_threads,
+                raise_on_error=False,
+                capture_failed_parses=True,
+                failure_score=self.failure_score,
+                format_failure_score=self.failure_score,
+                callback_metadata=callback_metadata,
+            )
+            scores = []
+            outputs = []
+            for item in trajs:
+                outputs.append(item["prediction"])
+                score = item.get("score", self.failure_score)
+                if hasattr(score, "score"):
+                    score = score["score"]
+                scores.append(score)
+            return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajs)
+
+        evaluator = Evaluate(
+            devset=batch,
+            metric=self.metric_fn,
+            num_threads=self.num_threads,
+            return_all_scores=True,
+            failure_score=self.failure_score,
+            provide_traceback=True,
+            max_errors=len(batch) * 100,
+            callback_metadata=callback_metadata,
+        )
+        result = evaluator(program)
+        outputs = [row[1] for row in result.results]
+        scores = [row[2] for row in result.results]
+        scores = [score["score"] if hasattr(score, "score") else score for score in scores]
+        return EvaluationBatch(outputs=outputs, scores=scores, trajectories=None)
+
+    def make_reflective_dataset(self, candidate: dict[str, str], eval_batch: Any, components_to_update: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """把 trajectories 转成 GEPA reflection dataset"""
+        items: list[dict[str, Any]] = []
+        trajectories = eval_batch.trajectories or []
+        for data in trajectories:
+            example = data.get("example")
+            prediction = data.get("prediction")
+            score = data.get("score", self.failure_score)
+            if hasattr(score, "score"):
+                score = score["score"]
+            feedback = self.metric_fn(example, prediction, data.get("trace"), self.component_name, None)
+            if hasattr(feedback, "feedback"):
+                feedback_text = str(feedback.feedback)
+            elif hasattr(feedback, "get"):
+                feedback_text = str(feedback.get("feedback", ""))
+            else:
+                feedback_text = str(feedback)
+            items.append({
+                "Inputs": {
+                    "Prompt target path": self.target_path,
+                    "Current prompt text": candidate.get(self.component_name, ""),
+                    "Question": str(getattr(example, "question", "") or ""),
+                    "Options JSON": str(getattr(example, "options_json", "") or ""),
+                    "Video ID": str(getattr(example, "video_id", "") or ""),
+                },
+                "Generated Outputs": {
+                    "answer": str(getattr(prediction, "answer", "") or ""),
+                    "reasoning_summary": str(getattr(prediction, "reasoning_summary", "") or ""),
+                    "turn_trace": json.dumps(_json_safe(getattr(prediction, "turn_trace", [])), ensure_ascii=False),
+                    "score": str(score),
+                },
+                "Feedback": feedback_text,
+            })
+        if not items:
+            raise Exception(f"No valid reflective examples found for {self.component_name}")
+        return {self.component_name: items}
+
+    def propose_new_texts(self, candidate: dict[str, str], reflective_dataset: dict[str, list[dict[str, Any]]], components_to_update: list[str]) -> dict[str, str]:
+        from dspy.teleprompt.gepa.gepa_utils import InstructionProposalSignature
+
+        results: dict[str, str] = {}
+        reflection_lm = self.reflection_lm or dspy.settings.lm
+        with dspy.context(lm=reflection_lm):
+            for name in components_to_update:
+                results[name] = InstructionProposalSignature.run(
+                    lm=(lambda x: self.stripped_lm_call(x)[0]),
+                    input_dict={
+                        "current_instruction_doc": candidate[name],
+                        "dataset_with_feedback": reflective_dataset[name],
+                    },
+                )["new_instruction"]
+        return results
+
+
+def optimize_prompt_target_with_gepa(
+    program: PromptTargetProgram,
+    trainset: list[dspy.Example],
+    *,
+    valset: list[dspy.Example] | None = None,
+    auto: str | None = None,
+    max_full_evals: int | None = 6,
+    max_metric_calls: int | None = None,
+    reflection_minibatch_size: int = 3,
+    candidate_selection_strategy: str = "pareto",
+    skip_perfect_score: bool = True,
+    use_merge: bool = True,
+    max_merge_invocations: int | None = 5,
+    num_threads: int | None = None,
+    seed: int | None = 0,
+    log_dir: str | None = None,
+    track_stats: bool = False,
+    track_best_outputs: bool = False,
+) -> dspy.Module:
+    """Compile one prompt component with GEPA without adding runtime LM calls."""
+    from gepa import optimize
+    from dspy.teleprompt import GEPA
+    from dspy.teleprompt.gepa.gepa import AUTO_RUN_SETTINGS
+    from dspy.teleprompt.gepa.gepa_utils import LoggerAdapter
+
+    valset = valset or trainset
+    teleprompter = GEPA(
+        metric=avqa_gepa_feedback_metric,
+        auto=auto,
+        max_full_evals=max_full_evals,
+        max_metric_calls=max_metric_calls,
+        reflection_minibatch_size=reflection_minibatch_size,
+        candidate_selection_strategy=candidate_selection_strategy,
+        reflection_lm=dspy.settings.lm,
+        skip_perfect_score=skip_perfect_score,
+        use_merge=use_merge,
+        max_merge_invocations=max_merge_invocations,
+        num_threads=num_threads,
+        seed=seed,
+        log_dir=log_dir,
+        track_stats=track_stats,
+        track_best_outputs=track_best_outputs,
+    )
+    if teleprompter.auto is not None:
+        teleprompter.max_metric_calls = teleprompter.auto_budget(
+            num_preds=1,
+            num_candidates=AUTO_RUN_SETTINGS[teleprompter.auto]["n"],
+            valset_size=len(valset),
+        )
+    elif teleprompter.max_full_evals is not None:
+        teleprompter.max_metric_calls = teleprompter.max_full_evals * (len(trainset) + len(valset))
+    rng = random.Random(seed)
+    adapter = PromptTargetGEPAAdapter(
+        student_module=program,
+        target_path=program.target_path,
+        metric_fn=avqa_gepa_feedback_metric,
+        failure_score=teleprompter.failure_score,
+        num_threads=num_threads,
+        rng=rng,
+        reflection_lm=dspy.settings.lm,
+        reflection_minibatch_size=reflection_minibatch_size,
+    )
+    seed_candidate = {adapter.component_name: program._candidate_text()}
+    result = optimize(
+        seed_candidate=seed_candidate,
+        trainset=trainset,
+        valset=valset,
+        adapter=adapter,
+        reflection_lm=(lambda x: adapter.stripped_lm_call(x)[0]),
+        candidate_selection_strategy=candidate_selection_strategy,
+        skip_perfect_score=skip_perfect_score,
+        reflection_minibatch_size=reflection_minibatch_size,
+        module_selector="round_robin",
+        perfect_score=teleprompter.perfect_score,
+        use_merge=use_merge,
+        max_merge_invocations=max_merge_invocations,
+        max_metric_calls=teleprompter.max_metric_calls,
+        logger=LoggerAdapter(logger),
+        run_dir=log_dir,
+        track_best_outputs=track_best_outputs,
+        display_progress_bar=True,
+        raise_on_exception=True,
+        seed=seed,
+    )
+    new_prog = adapter.build_program(result.best_candidate)
+    rows: list[dict[str, Any]] = []
+    for idx, candidate in enumerate(result.candidates):
+        rows.append(_drop_none_values({
+            "candidate_index": idx,
+            "prompt_text": candidate.get(adapter.component_name),
+            "full_valset_score": result.val_aggregate_scores[idx] if idx < len(result.val_aggregate_scores) else None,
+            "parents": result.parents[idx] if idx < len(result.parents) else None,
+            "discovery_eval_count": result.discovery_eval_counts[idx] if idx < len(result.discovery_eval_counts) else None,
+            "whether_selected_as_best": idx == result.best_idx,
+        }))
+    new_prog.prompt_target_candidate_rows = rows
+    new_prog.prompt_target_gepa_result = result
+    return new_prog
+
+
 def optimize_with_copro(
     program: AVQADSPyReActProgram,
     trainset: list[dspy.Example],
@@ -380,6 +732,7 @@ def parse_optimize_args() -> argparse.Namespace:
     """Parse optimizer CLI arguments."""
     parser = argparse.ArgumentParser(description="Optimize DSPy AVQA ReAct with DSPy optimizers.")
     parser.add_argument("--algorithm", choices=("copro", "simba", "miprov2", "gepa"), default="copro")
+    parser.add_argument("--optimize-target", default="planner.workflow_prompt", help="Supported prompt-config dot path to optimize. Default: planner.workflow_prompt.")
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--trainset-jsonl", type=Path, default=None)
     parser.add_argument("--valset-jsonl", type=Path, default=None)
@@ -998,6 +1351,98 @@ def write_batch_style_program_outputs(
         "final_eval_skipped_examples": skipped,
     }
 
+def _optimized_prompt_config(target_path: str, optimized_text: str) -> dict[str, Any]:
+    config = copy.deepcopy(prompt_config())
+    _set_nested(config, target_path, optimized_text)
+    return config
+
+
+def _optimized_prompt_text_for_target(program: dspy.Module, target_path: str) -> str:
+    return _prompt_component_text(program)
+
+
+def _candidate_prompt_text_for_target(program: dspy.Module | None, target_path: str) -> str:
+    if program is None:
+        return ""
+    return _prompt_component_text(program)
+
+
+def _candidate_prompt_rows_from_program(program: dspy.Module, target_path: str) -> list[dict[str, Any]]:
+    rows = list(getattr(program, "prompt_target_candidate_rows", []) or [])
+    if rows:
+        return rows
+    out: list[dict[str, Any]] = []
+    candidate_index = 0
+    for attr_name, eval_scope in (("candidate_programs", "full"), ("mb_candidate_programs", "subsample")):
+        for candidate in list(getattr(program, attr_name, []) or []):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_program = candidate.get("program")
+            prompt_text = _candidate_prompt_text_for_target(candidate_program, target_path)
+            if not prompt_text:
+                continue
+            out.append(_drop_none_values({
+                "candidate_index": candidate_index,
+                "prompt_text": prompt_text,
+                "full_valset_score": candidate.get("score") if eval_scope == "full" else None,
+                "subsample_score": candidate.get("score") if eval_scope == "subsample" else None,
+                "iteration": candidate.get("depth") if "depth" in candidate else candidate.get("trial"),
+                "whether_selected_as_best": candidate_index == 0 and eval_scope == "full",
+                "evaluation_scope": eval_scope,
+            }))
+            candidate_index += 1
+    if not out:
+        out.append({
+            "candidate_index": 0,
+            "prompt_text": _optimized_prompt_text_for_target(program, target_path),
+            "whether_selected_as_best": True,
+        })
+    return out
+
+def write_prompt_target_artifacts(
+    program: dspy.Module,
+    target_path: str,
+    output_program: Path,
+    optimizer_log_dir: Path,
+) -> dict[str, str]:
+    """Write optimized prompt component artifacts for explicit dot-path optimization."""
+    safe_target = _safe_filename_part(target_path.replace(".", "_"))
+    output_dir = output_program.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    optimizer_log_dir.mkdir(parents=True, exist_ok=True)
+    instructions_dir = optimizer_log_dir / "instructions"
+    instructions_dir.mkdir(parents=True, exist_ok=True)
+
+    optimized_text = _optimized_prompt_text_for_target(program, target_path)
+    optimized_txt = output_dir / f"optimized_{safe_target}.txt"
+    optimized_txt.write_text(optimized_text, encoding="utf-8")
+
+    optimized_yaml = output_dir / "optimized_prompt_config_v8.yaml"
+    with optimized_yaml.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(_optimized_prompt_config(target_path, optimized_text), f, allow_unicode=True, sort_keys=False)
+
+    candidate_rows: list[dict[str, Any]] = []
+    for row in _candidate_prompt_rows_from_program(program, target_path):
+        candidate_index = int(row.get("candidate_index", len(candidate_rows)))
+        prompt_text = str(row.get("prompt_text") or "")
+        instruction_path = instructions_dir / f"candidate_{candidate_index:04d}_{safe_target}.txt"
+        instruction_path.write_text(prompt_text, encoding="utf-8")
+        candidate_rows.append(_drop_none_values({
+            **row,
+            "optimize_target": target_path,
+            "instruction_text": prompt_text,
+            "instruction_path": str(instruction_path),
+        }))
+
+    candidates_jsonl = output_dir / f"{safe_target}_candidates.jsonl"
+    _write_jsonl_rows(candidates_jsonl, candidate_rows)
+    return {
+        "optimized_prompt_txt": str(optimized_txt),
+        "optimized_prompt_config_yaml": str(optimized_yaml),
+        "prompt_target_candidates_jsonl": str(candidates_jsonl),
+    }
+
+
 def run_optimization() -> None:
     """Entrypoint for DSPy AVQA optimization."""
     args = parse_optimize_args()
@@ -1006,7 +1451,8 @@ def run_optimization() -> None:
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     load_perception_config_yaml(args.perception_config_yaml)
     load_prompt_config(args.prompt_yaml)
-    apply_prompt_config_to_signatures()
+    validate_optimize_target(args.optimize_target)
+    apply_prompt_config_to_signatures(apply_instructions=False)
 
     dataset_info = resolve_optimization_datasets(args)
     cuts = dataset_info["input_cuts"]
@@ -1018,7 +1464,12 @@ def run_optimization() -> None:
 
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
     context = AVQARuntimeContext(max_turns=args.max_turns, allowed_tools=allowed_tools)
-    program = AVQADSPyReActProgram(context=context)
+    base_program = AVQADSPyReActProgram(context=context)
+    program: dspy.Module = PromptTargetProgram(
+        base_program,
+        args.optimize_target,
+        prompt_target_initial_text(args.optimize_target),
+    )
     initial_program_signatures = _program_signature_summary(program)
 
     if args.initial_program is not None:
@@ -1026,6 +1477,7 @@ def run_optimization() -> None:
         print(f"Saved initial program to {args.initial_program}")
 
     print(f"Algorithm: {args.algorithm}")
+    print(f"Optimize target: {args.optimize_target}")
     print(f"Loaded input cuts: {len(cuts)}")
     print(f"Train source jsonl: {dataset_info['train_source_path']}")
     print(f"Val source jsonl: {dataset_info['val_source_path']}")
@@ -1143,7 +1595,7 @@ def run_optimization() -> None:
             f"track_stats={gepa_config['track_stats']}, "
             f"track_best_outputs={gepa_config['track_best_outputs']}"
         )
-        compiled = optimize_with_gepa(
+        compiled = optimize_prompt_target_with_gepa(
             program,
             trainset,
             valset=valset,
@@ -1168,6 +1620,13 @@ def run_optimization() -> None:
     optimizer_log_paths: dict[str, str] = {}
     if args.algorithm in {"copro", "miprov2", "gepa"}:
         optimizer_log_paths = write_optimizer_candidate_logs(compiled, args.algorithm, optimizer_log_dir)
+    prompt_target_artifacts = write_prompt_target_artifacts(
+        compiled,
+        args.optimize_target,
+        args.output_program,
+        optimizer_log_dir,
+    )
+    optimizer_log_paths.update(prompt_target_artifacts)
 
     final_eval_metadata: dict[str, Any] = {}
     if args.final_eval_output_jsonl is not None:
@@ -1189,6 +1648,7 @@ def run_optimization() -> None:
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata = {
             "algorithm": args.algorithm,
+            "optimize_target": args.optimize_target,
             "input_jsonl": str(args.input_jsonl),
             "trainset_jsonl": str(args.trainset_jsonl) if args.trainset_jsonl else None,
             "valset_jsonl": str(args.valset_jsonl) if args.valset_jsonl else None,

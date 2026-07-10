@@ -10,11 +10,24 @@ from typing import Any
 import dspy
 
 from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
-from .deepseek_dspy_lm import DeepSeekDSPyLM, append_planner_call_trace
+from .deepseek_dspy_lm import DeepSeekDSPyLM, FIXED_PLANNER_SYSTEM_PROMPT, append_planner_call_trace
 from .prompt_config import prompt_config, prompt_value
 
 SUPPORTED_TOOL_NAMES = ("ask_caption", "ask_perception", "temporal_ground_video")
 _SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
+
+
+def default_planner_workflow_prompt() -> str:
+    """Return the planner workflow prompt from the active prompt config."""
+    for keys in (
+        ("planner", "workflow_prompt"),
+        ("planner", "system_prompt"),
+    ):
+        try:
+            return prompt_value(*keys).strip()
+        except KeyError:
+            continue
+    return ""
 
 
 def pick_env(*keys: str, default: str) -> str:
@@ -89,7 +102,7 @@ def resolve_allowed_tools(value: str | Iterable[str] | None = None) -> tuple[str
 class AVQARuntimeContext:
     """Runtime context aligned with original react_agent configuration."""
 
-    system_prompt: str = field(default_factory=lambda: prompt_value("planner", "system_prompt").strip())
+    system_prompt: str = field(default_factory=default_planner_workflow_prompt)
     planner_model: str = field(
         default_factory=lambda: pick_env(
             "DEEPSEEK_MODEL",
@@ -215,6 +228,37 @@ def _usage_dict(response: Any) -> dict[str, Any]:
 class SerialNOpenAICompatibleLM(dspy.LM):
     """DSPy LM that records reasoning_content and emulates n>1 with serial n=1 calls."""
 
+    def _normalize_planner_messages(
+        self,
+        prompt: str | None,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        source_messages = messages if messages is not None else [{"role": "user", "content": prompt or ""}]
+        system_parts: list[str] = []
+        user_messages: list[dict[str, Any]] = []
+        for message in source_messages:
+            role = str(message.get("role") or "user").strip().lower() or "user"
+            content = message.get("content", "")
+            if role == "system":
+                system_parts.append(str(content or "").strip())
+            else:
+                user_messages.append({"role": role, "content": content})
+        if not user_messages:
+            user_messages.append({"role": "user", "content": prompt or ""})
+        if system_parts:
+            format_block = "\n\n".join(part for part in system_parts if part)
+            if format_block:
+                first = dict(user_messages[0])
+                first_content = str(first.get("content") or "")
+                first["role"] = "user"
+                first["content"] = (
+                    "DSPy response format instruction:\n"
+                    f"{format_block}\n\n"
+                    f"{first_content}"
+                )
+                user_messages[0] = first
+        return [{"role": "system", "content": FIXED_PLANNER_SYSTEM_PROMPT}, *user_messages]
+
     def _record_response(
         self,
         *,
@@ -258,8 +302,9 @@ class SerialNOpenAICompatibleLM(dspy.LM):
             request_kwargs.pop("temperature", None)
         if not _env_is_set("PLANNER_TOP_P"):
             request_kwargs.pop("top_p", None)
-        response = dspy.LM.forward(self, prompt=prompt, messages=messages, **request_kwargs)
-        self._record_response(prompt=prompt, messages=messages, kwargs=request_kwargs, response=response)
+        normalized_messages = self._normalize_planner_messages(prompt, messages)
+        response = dspy.LM.forward(self, prompt=None, messages=normalized_messages, **request_kwargs)
+        self._record_response(prompt=None, messages=normalized_messages, kwargs=request_kwargs, response=response)
         return response
 
     def forward(self, prompt=None, messages=None, **kwargs):

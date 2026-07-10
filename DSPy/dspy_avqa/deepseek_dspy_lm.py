@@ -11,6 +11,10 @@ from .deepseek_api import DeepSeekPlannerClient
 
 
 _PLANNER_CALL_TRACE: list[dict[str, Any]] = []
+FIXED_PLANNER_SYSTEM_PROMPT = (
+    "You are a concise audio-visual question answering planner. "
+    "Follow the user prompt and return the requested structured response."
+)
 
 
 def clear_planner_call_trace() -> None:
@@ -101,10 +105,17 @@ class DeepSeekDSPyLM(dspy.BaseLM):
         prompt: str | None,
         messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        """Convert DSPy inputs to an OpenAI-style messages array."""
-        if messages is not None:
-            return messages
-        return [{"role": "user", "content": prompt or ""}]
+        """Convert DSPy inputs to OpenAI-style messages with a fixed planner system prompt."""
+        normalized: list[dict[str, Any]] = []
+        source_messages = messages if messages is not None else [{"role": "user", "content": prompt or ""}]
+        for message in source_messages:
+            role = str(message.get("role") or "user").strip().lower() or "user"
+            if role == "system":
+                continue
+            normalized.append({"role": role, "content": message.get("content", "")})
+        if not normalized:
+            normalized.append({"role": "user", "content": prompt or ""})
+        return [{"role": "system", "content": FIXED_PLANNER_SYSTEM_PROMPT}, *normalized]
 
     def forward(
         self,

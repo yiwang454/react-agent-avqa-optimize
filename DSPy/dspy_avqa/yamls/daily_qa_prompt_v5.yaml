@@ -3,7 +3,7 @@ tools:
     - ask_perception
 
 planner:
-  system_prompt: |
+  workflow_prompt: |
     You are the planning/reasoning model in an audio-visual question answering ReAct system.
 
     You CANNOT watch the video directly.
@@ -92,31 +92,3 @@ signatures:
       action_json: |
         Exactly one JSON object. Use {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}} or {"action":"final","answer":"<answer>A</answer>"}
 
-  DraftPerceptualQuestion:
-    instructions: |
-      Use the original AVQA question verbatim as the perceptual question for the next tool call.
-    fields:
-      tool_name: |
-        ask_perception; backend is selected by --perception-model/PERCEPTION_MODEL
-
-  UpdateBeliefFromObservation:
-    instructions: |
-      Update evidence and option beliefs after one tool observation.
-    fields:
-      supported_options: |
-        JSON list of option letters
-      weakened_options: |
-        JSON list of option letters
-
-  DecideFinalAction:
-    instructions: |
-      Decide whether to continue tool use or produce final answer now.
-    fields:
-      action: |
-        continue or final
-      answer: |
-        Option letter if action=final, else empty
-
-  FinalAnswerFallback:
-    instructions: |
-      Produce final option when max turns are reached.

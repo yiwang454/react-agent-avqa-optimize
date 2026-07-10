@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional YAML file with perception backend runtime/sampling parameters.",
     )
     parser.add_argument(
+        "--captioner-config-yaml",
+        type=Path,
+        default=None,
+        help="Optional YAML file with captioner backend runtime/sampling parameters.",
+    )
+    parser.add_argument(
         "--prompt-yaml",
         type=Path,
         default=None,
@@ -77,6 +83,139 @@ def _set_env_from_mapping(mapping: dict[str, Any], key_map: dict[str, str]) -> N
         value = mapping.get(source_key)
         if value is not None:
             os.environ[env_key] = str(value)
+
+def _load_qwen_config_yaml(path: Path | None, *, prefix: str, preserve_base_url_override: bool) -> dict[str, Any]:
+    """Load Qwen runtime parameters into env vars, optionally under a prefix."""
+    base_url_key = f"{prefix}_BASE_URL"
+    qwen_base_url_override = os.environ.get(base_url_key) if preserve_base_url_override else None
+    if path is None:
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"Qwen config must be a YAML mapping: {path}")
+
+    task = config.get("task") or {}
+    model = config.get("model") or {}
+    sampling = config.get("sampling_params") or {}
+    if not isinstance(task, dict):
+        raise ValueError(f"Qwen config task section must be a mapping: {path}")
+    if not isinstance(model, dict):
+        raise ValueError(f"Qwen config model section must be a mapping: {path}")
+    if not isinstance(sampling, dict):
+        raise ValueError(f"Qwen config sampling_params section must be a mapping: {path}")
+
+    if task.get("video_only") is not None:
+        os.environ[f"{prefix}_VIDEO_ONLY"] = _env_bool(task["video_only"])
+    if task.get("enable_thinking") is not None:
+        os.environ[f"{prefix}_ENABLE_THINKING"] = _env_bool(task["enable_thinking"])
+    if task.get("video_first") is not None:
+        os.environ[f"{prefix}_VIDEO_FIRST"] = _env_bool(task["video_first"])
+    if task.get("use_audio_in_video") is not None:
+        os.environ[f"{prefix}_USE_AUDIO_IN_VIDEO"] = _env_bool(task["use_audio_in_video"])
+
+    _set_env_from_mapping(
+        task,
+        {
+            "timeout": f"{prefix}_TIMEOUT",
+            "max_retries": f"{prefix}_MAX_RETRIES",
+            "qwen_delay_s": f"{prefix}_DELAY_S",
+        },
+    )
+    _set_env_from_mapping(
+        model,
+        {
+            "qwen_model": f"{prefix}_MODEL",
+            "qwen_base_url": f"{prefix}_BASE_URL",
+            "qwen_api_key": f"{prefix}_API_KEY",
+        },
+    )
+    if qwen_base_url_override:
+        os.environ[base_url_key] = qwen_base_url_override
+
+    _set_env_from_mapping(
+        sampling,
+        {
+            "temperature": f"{prefix}_TEMPERATURE",
+            "top_p": f"{prefix}_TOP_P",
+            "top_k": f"{prefix}_TOP_K",
+            "max_tokens": f"{prefix}_MAX_TOKENS",
+            "fps": f"{prefix}_FPS",
+            "max_frames": f"{prefix}_MAX_FRAMES",
+            "seed": f"{prefix}_SEED",
+            "repetition_penalty": f"{prefix}_REPETITION_PENALTY",
+        },
+    )
+    return config
+
+
+def load_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
+    """Load captioner-specific runtime parameters under captioner env vars."""
+    backend = (
+        os.environ.get("CAPTIONER_MODEL")
+        or os.environ.get("CAPTION_MODEL")
+        or os.environ.get("PERCEPTION_MODEL", "qwen")
+    ).strip().lower()
+    if backend == "gemini":
+        return load_gemini_captioner_config_yaml(path)
+    return _load_qwen_config_yaml(path, prefix="CAPTIONER_QWEN", preserve_base_url_override=True)
+
+
+def load_gemini_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
+    """Load Gemini captioner runtime parameters under CAPTIONER_GEMINI_* env vars."""
+    if path is None:
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"Gemini captioner config must be a YAML mapping: {path}")
+
+    task = config.get("task") or {}
+    model = config.get("model") or {}
+    sampling = config.get("sampling_params") or {}
+    if not isinstance(task, dict):
+        raise ValueError(f"Gemini captioner config task section must be a mapping: {path}")
+    if not isinstance(model, dict):
+        raise ValueError(f"Gemini captioner config model section must be a mapping: {path}")
+    if not isinstance(sampling, dict):
+        raise ValueError(f"Gemini captioner config sampling_params section must be a mapping: {path}")
+
+    if task.get("video_only") is not None:
+        os.environ["CAPTIONER_GEMINI_VIDEO_ONLY"] = _env_bool(task["video_only"])
+    if task.get("print_first_prompt") is not None:
+        os.environ["CAPTIONER_GEMINI_PRINT_FIRST_PROMPT"] = _env_bool(task["print_first_prompt"])
+        os.environ["GEMINI_PRINT_FIRST_PROMPT"] = _env_bool(task["print_first_prompt"])
+
+    _set_env_from_mapping(
+        task,
+        {
+            "batch_size": "CAPTIONER_GEMINI_BATCH_SIZE",
+            "timeout": "CAPTIONER_GEMINI_TIMEOUT",
+            "max_retries": "CAPTIONER_GEMINI_MAX_RETRIES",
+            "retry_delay_s": "CAPTIONER_GEMINI_RETRY_DELAY_S",
+        },
+    )
+    _set_env_from_mapping(
+        model,
+        {
+            "gemini_model": "CAPTIONER_GEMINI_MODEL",
+            "gemini_base_url": "CAPTIONER_GEMINI_BASE_URL",
+            "gemini_api_key": "CAPTIONER_GEMINI_API_KEY",
+        },
+    )
+    _set_env_from_mapping(
+        sampling,
+        {
+            "temperature": "CAPTIONER_GEMINI_TEMPERATURE",
+            "top_p": "CAPTIONER_GEMINI_TOP_P",
+            "top_k": "CAPTIONER_GEMINI_TOP_K",
+            "max_tokens": "CAPTIONER_GEMINI_MAX_TOKENS",
+            "gemini_seed": "CAPTIONER_GEMINI_SEED",
+            "seed": "CAPTIONER_GEMINI_SEED",
+        },
+    )
+    return config
+
 
 def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
     """Load perception backend parameters from a baseline-style YAML config."""
@@ -262,6 +401,7 @@ def run_batch() -> None:
     args = parse_args()
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     load_perception_config_yaml(args.perception_config_yaml)
+    load_captioner_config_yaml(args.captioner_config_yaml)
     load_prompt_config(args.prompt_yaml)
     apply_prompt_config_to_signatures()
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
@@ -285,6 +425,50 @@ def run_batch() -> None:
         print("Audio caption dir: <none; use captioner tool if needed>")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
+    if args.captioner_config_yaml:
+        print(f"Captioner config yaml: {args.captioner_config_yaml}")
+    print(
+        "Qwen perception config: "
+        f"model={os.environ.get('QWEN_MODEL', '')}, "
+        f"base_url={os.environ.get('QWEN_BASE_URL', '')}, "
+        f"temperature={os.environ.get('QWEN_TEMPERATURE', '')}, "
+        f"top_p={os.environ.get('QWEN_TOP_P', '')}, "
+        f"top_k={os.environ.get('QWEN_TOP_K', '')}, "
+        f"max_tokens={os.environ.get('QWEN_MAX_TOKENS', '')}, "
+        f"fps={os.environ.get('QWEN_FPS', '')}, "
+        f"max_frames={os.environ.get('QWEN_MAX_FRAMES', '')}, "
+        f"seed={os.environ.get('QWEN_SEED', '')}"
+    )
+    print(
+        "Qwen captioner config: "
+        f"model={os.environ.get('CAPTIONER_QWEN_MODEL', '')}, "
+        f"base_url={os.environ.get('CAPTIONER_QWEN_BASE_URL', '')}, "
+        f"temperature={os.environ.get('CAPTIONER_QWEN_TEMPERATURE', '')}, "
+        f"top_p={os.environ.get('CAPTIONER_QWEN_TOP_P', '')}, "
+        f"top_k={os.environ.get('CAPTIONER_QWEN_TOP_K', '')}, "
+        f"max_tokens={os.environ.get('CAPTIONER_QWEN_MAX_TOKENS', '')}, "
+        f"fps={os.environ.get('CAPTIONER_QWEN_FPS', '')}, "
+        f"max_frames={os.environ.get('CAPTIONER_QWEN_MAX_FRAMES', '')}, "
+        f"seed={os.environ.get('CAPTIONER_QWEN_SEED', '')}"
+    )
+    if (os.environ.get("CAPTIONER_MODEL") or os.environ.get("CAPTION_MODEL", "")).strip().lower() == "gemini":
+        print(
+            "Gemini captioner config: "
+            f"model={os.environ.get('CAPTIONER_GEMINI_MODEL', '')}, "
+            f"base_url={os.environ.get('CAPTIONER_GEMINI_BASE_URL', '')}, "
+            f"api_key={'***set***' if os.environ.get('CAPTIONER_GEMINI_API_KEY') else ''}, "
+            f"video_only={os.environ.get('CAPTIONER_GEMINI_VIDEO_ONLY', '')}, "
+            f"timeout={os.environ.get('CAPTIONER_GEMINI_TIMEOUT', '')}, "
+            f"max_retries={os.environ.get('CAPTIONER_GEMINI_MAX_RETRIES', '')}, "
+            f"retry_delay_s={os.environ.get('CAPTIONER_GEMINI_RETRY_DELAY_S', '')}, "
+            f"temperature={os.environ.get('CAPTIONER_GEMINI_TEMPERATURE', '')}, "
+            f"top_p={os.environ.get('CAPTIONER_GEMINI_TOP_P', '')}, "
+            f"top_k={os.environ.get('CAPTIONER_GEMINI_TOP_K', '')}, "
+            f"max_tokens={os.environ.get('CAPTIONER_GEMINI_MAX_TOKENS', '')}, "
+            f"seed={os.environ.get('CAPTIONER_GEMINI_SEED', '')}, "
+            f"print_first_prompt={os.environ.get('CAPTIONER_GEMINI_PRINT_FIRST_PROMPT', '')}, "
+            f"batch_size={os.environ.get('CAPTIONER_GEMINI_BATCH_SIZE', '')}"
+        )
     if args.perception_model == "gemini":
         print(
             "Gemini config: "

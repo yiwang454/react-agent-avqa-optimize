@@ -44,6 +44,45 @@ def _env_optional_float(name: str) -> float | None:
         return None
     return float(value)
 
+def _env_name(prefix: str, suffix: str) -> str:
+    return f"{prefix}_{suffix}"
+
+def _env_flag_prefixed(prefix: str, suffix: str, default: str = "false") -> bool:
+    value = _env_optional_value_prefixed(prefix, suffix)
+    if value is None:
+        value = default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+def _env_fallback_name(prefix: str, suffix: str) -> str | None:
+    if prefix == "CAPTIONER_QWEN":
+        return _env_name("QWEN", suffix)
+    return None
+
+def _env_optional_value_prefixed(prefix: str, suffix: str) -> str | None:
+    value = _env_optional_value(_env_name(prefix, suffix))
+    if value is not None:
+        return value
+    fallback = _env_fallback_name(prefix, suffix)
+    return _env_optional_value(fallback) if fallback else None
+
+def _env_optional_int_prefixed(prefix: str, suffix: str) -> int | None:
+    value = _env_optional_value_prefixed(prefix, suffix)
+    return int(value) if value is not None else None
+
+def _env_optional_float_prefixed(prefix: str, suffix: str) -> float | None:
+    value = _env_optional_value_prefixed(prefix, suffix)
+    return float(value) if value is not None else None
+
+def _env_optional_bool_prefixed(prefix: str, suffix: str) -> bool | None:
+    value = _env_optional_value_prefixed(prefix, suffix)
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+def _env_value_prefixed(prefix: str, suffix: str, default: str) -> str:
+    value = _env_optional_value_prefixed(prefix, suffix)
+    return value if value is not None else default
+
 def _set_last_perception_metadata(**metadata: Any) -> None:
     _PERCEPTION_METADATA_STATE.last = {
         key: value for key, value in metadata.items() if value is not None
@@ -118,11 +157,12 @@ def call_qwen_perception(
     audio_path: str | None,
     prompt: str,
     system_prompt: str | None = None,
+    env_prefix: str = "QWEN",
 ) -> str:
     """Call Qwen3-omni for AV perception/grounding."""
     from .qwen3omni_api import call_qwen_messages, to_data_url
 
-    qwen_video_only = _env_flag("QWEN_VIDEO_ONLY", "false")
+    qwen_video_only = _env_flag_prefixed(env_prefix, "VIDEO_ONLY", "false")
     if not audio_path and not qwen_video_only:
         raise ValueError("audio_path is required for Qwen3-omni calls")
 
@@ -133,7 +173,7 @@ def call_qwen_perception(
         if audio_path and not qwen_video_only
         else None
     )
-    if _env_flag("QWEN_VIDEO_FIRST", "false"):
+    if _env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false"):
         content.append(video_content)
         if audio_content is not None:
             content.append(audio_content)
@@ -143,56 +183,76 @@ def call_qwen_perception(
         content.append(video_content)
     content.append({"type": "text", "text": prompt})
     system_prompt = system_prompt if system_prompt is not None else prompt_value("perception", "system_prompt").strip()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": content},
-    ]
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": content})
 
     response_text, token_usage, thinking_text = call_qwen_messages(
         messages,
-        model=os.environ.get("QWEN_MODEL", "qwen3-omni-flash").strip() or "qwen3-omni-flash",
-        api_key=_env_optional_value("QWEN_API_KEY"),
-        base_url=_env_optional_value("QWEN_BASE_URL"),
-        timeout=int(os.environ.get("QWEN_TIMEOUT", "180")),
-        max_retries=int(os.environ.get("QWEN_MAX_RETRIES", "3")),
-        retry_delay_s=float(os.environ.get("QWEN_DELAY_S", "1.0")),
-        temperature=float(os.environ.get("QWEN_TEMPERATURE", "0.6")),
-        qwen_seed=_env_optional_int("QWEN_SEED"),
-        top_p=float(os.environ.get("QWEN_TOP_P", "0.95")),
-        top_k=int(os.environ.get("QWEN_TOP_K", "20")),
-        max_tokens=int(os.environ.get("QWEN_MAX_TOKENS", "1024")),
-        fps=float(os.environ.get("QWEN_FPS", "2.0")),
-        max_frames=int(os.environ.get("QWEN_MAX_FRAMES", "128")),
-        repetition_penalty=_env_optional_float("QWEN_REPETITION_PENALTY"),
-        enable_thinking=_env_optional_bool("QWEN_ENABLE_THINKING"),
+        model=_env_value_prefixed(env_prefix, "MODEL", "qwen3-omni-flash") or "qwen3-omni-flash",
+        api_key=_env_optional_value_prefixed(env_prefix, "API_KEY"),
+        base_url=_env_optional_value_prefixed(env_prefix, "BASE_URL"),
+        timeout=int(_env_value_prefixed(env_prefix, "TIMEOUT", "180")),
+        max_retries=int(_env_value_prefixed(env_prefix, "MAX_RETRIES", "3")),
+        retry_delay_s=float(_env_value_prefixed(env_prefix, "DELAY_S", "1.0")),
+        temperature=float(_env_value_prefixed(env_prefix, "TEMPERATURE", "0.6")),
+        qwen_seed=_env_optional_int_prefixed(env_prefix, "SEED"),
+        top_p=float(_env_value_prefixed(env_prefix, "TOP_P", "0.95")),
+        top_k=int(_env_value_prefixed(env_prefix, "TOP_K", "20")),
+        max_tokens=int(_env_value_prefixed(env_prefix, "MAX_TOKENS", "1024")),
+        fps=float(_env_value_prefixed(env_prefix, "FPS", "2.0")),
+        max_frames=int(_env_value_prefixed(env_prefix, "MAX_FRAMES", "128")),
+        repetition_penalty=_env_optional_float_prefixed(env_prefix, "REPETITION_PENALTY"),
+        enable_thinking=_env_optional_bool_prefixed(env_prefix, "ENABLE_THINKING"),
         return_thinking=True,
     )
     _set_last_perception_metadata(
         backend="qwen",
         system_prompt=system_prompt,
         prompt=prompt,
-        model=os.environ.get("QWEN_MODEL", "qwen3-omni").strip() or "qwen3-omni",
-        # base_url=_env_optional_value("QWEN_BASE_URL"),
-        video_first=_env_flag("QWEN_VIDEO_FIRST", "false"),
+        model=_env_value_prefixed(env_prefix, "MODEL", "qwen3-omni") or "qwen3-omni",
+        base_url=_env_optional_value_prefixed(env_prefix, "BASE_URL"),
+        video_first=_env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false"),
+        env_prefix=env_prefix,
         token_usage=token_usage,
         thinking_text=thinking_text,
     )
     return response_text.strip()
 
-def gemini_video_only() -> bool:
+def _gemini_env_optional_value(prefix: str, suffix: str) -> str | None:
+    value = _env_optional_value(_env_name(prefix, suffix))
+    if value is not None:
+        return value
+    if prefix != "GEMINI":
+        return _env_optional_value(_env_name("GEMINI", suffix))
+    return None
+
+def _gemini_env_value(prefix: str, suffix: str, default: str) -> str:
+    value = _gemini_env_optional_value(prefix, suffix)
+    return value if value is not None else default
+
+def _gemini_env_flag(prefix: str, suffix: str, default: str = "false") -> bool:
+    return _gemini_env_value(prefix, suffix, default).strip().lower() in {"1", "true", "yes", "on"}
+
+def _gemini_env_optional_int(prefix: str, suffix: str) -> int | None:
+    value = _gemini_env_optional_value(prefix, suffix)
+    return int(value) if value is not None else None
+
+def gemini_video_only(env_prefix: str = "GEMINI") -> bool:
     """Return whether Gemini should receive only video input."""
-    value = os.environ.get("GEMINI_VIDEO_ONLY", "true").strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    return _gemini_env_value(env_prefix, "VIDEO_ONLY", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 def call_gemini_perception(
     video_path: str,
     audio_path: str | None,
     prompt: str,
     system_prompt: str | None = None,
+    env_prefix: str = "GEMINI",
 ) -> str:
     """Call Gemini for AV perception/grounding."""
     parts: list[dict[str, Any]] = []
-    if audio_path and not gemini_video_only():
+    if audio_path and not gemini_video_only(env_prefix):
         parts.append(to_gemini_inline_data(audio_path))
     parts.extend([to_gemini_inline_data(video_path), {"text": prompt}])
     contents = [{"role": "user", "parts": parts}]
@@ -200,16 +260,19 @@ def call_gemini_perception(
     result = call_gemini_messages(
         contents,
         system_prompt=system_prompt,
-        timeout=int(os.environ.get("GEMINI_TIMEOUT", "180")),
-        max_retries=int(os.environ.get("GEMINI_MAX_RETRIES", "3")),
-        retry_delay_s=float(os.environ.get("GEMINI_RETRY_DELAY_S", "5")),
-        include_thoughts=_env_flag("GEMINI_INCLUDE_THOUGHTS", "true"),
-        return_thinking=_env_flag("GEMINI_RETURN_THINKING", "true"),
-        temperature=float(os.environ.get("GEMINI_TEMPERATURE", "0.6")),
-        gemini_seed=_env_optional_int("GEMINI_SEED"),
-        top_p=float(os.environ.get("GEMINI_TOP_P", "0.95")),
-        top_k=int(os.environ.get("GEMINI_TOP_K", "20")),
-        max_tokens=int(os.environ.get("GEMINI_MAX_TOKENS", "1024")),
+        model=_gemini_env_optional_value(env_prefix, "MODEL"),
+        api_key=_gemini_env_optional_value(env_prefix, "API_KEY"),
+        base_url=_gemini_env_optional_value(env_prefix, "BASE_URL"),
+        timeout=int(_gemini_env_value(env_prefix, "TIMEOUT", "180")),
+        max_retries=int(_gemini_env_value(env_prefix, "MAX_RETRIES", "3")),
+        retry_delay_s=float(_gemini_env_value(env_prefix, "RETRY_DELAY_S", "5")),
+        include_thoughts=_gemini_env_flag(env_prefix, "INCLUDE_THOUGHTS", "true"),
+        return_thinking=_gemini_env_flag(env_prefix, "RETURN_THINKING", "true"),
+        temperature=float(_gemini_env_value(env_prefix, "TEMPERATURE", "0.6")),
+        gemini_seed=_gemini_env_optional_int(env_prefix, "SEED"),
+        top_p=float(_gemini_env_value(env_prefix, "TOP_P", "0.95")),
+        top_k=int(_gemini_env_value(env_prefix, "TOP_K", "20")),
+        max_tokens=int(_gemini_env_value(env_prefix, "MAX_TOKENS", "1024")),
     )
     if len(result) == 3:
         response_text, usage, thinking_text = result
@@ -220,8 +283,9 @@ def call_gemini_perception(
         backend="gemini",
         system_prompt=system_prompt,
         prompt=prompt,
-        model=os.environ.get("GEMINI_MODEL", ""),
+        model=_gemini_env_value(env_prefix, "MODEL", ""),
         # base_url=_env_optional_value("GEMINI_BASE_URL"),
+        env_prefix=env_prefix,
         token_usage=usage,
         thinking_text=thinking_text,
     )
@@ -294,12 +358,21 @@ def ask_caption(
     audio_path: str | None = None,
 ) -> str:
     """Tool: ask the selected captioner backend for a factual AV caption."""
-    return call_perception(
+    backend = selected_captioner_model()
+    if backend == "gemini":
+        return call_gemini_perception(
+            video_path=video_path,
+            audio_path=audio_path,
+            prompt=build_caption_prompt(caption_instruction),
+            system_prompt=captioner_system_prompt(),
+            env_prefix="CAPTIONER_GEMINI",
+        )
+    return call_qwen_perception(
         video_path=video_path,
         audio_path=audio_path,
         prompt=build_caption_prompt(caption_instruction),
-        backend=selected_captioner_model(),
         system_prompt=captioner_system_prompt(),
+        env_prefix="CAPTIONER_QWEN",
     )
 
 

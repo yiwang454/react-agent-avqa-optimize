@@ -146,7 +146,7 @@ def _compact_text(text: Any, limit: int = MAX_OBSERVATION_CHARS) -> str:
 
 def _build_task_text(
     *,
-    system_prompt: str,
+    workflow_prompt: str,
     question: str,
     options_json: str,
     video_path: str,
@@ -157,7 +157,8 @@ def _build_task_text(
     return render_prompt(
         "planner",
         "task_prompt_template",
-        system_prompt=system_prompt,
+        system_prompt=workflow_prompt,
+        workflow_prompt=workflow_prompt,
         planner_action_schema=prompt_value("planner", "action_schema").strip(),
         video_id=video_id or "unknown",
         video_path=video_path,
@@ -332,6 +333,12 @@ class AVQADSPyReActProgram(dspy.Module):
         configure_deepseek_lm(self.context)
         self.action_planner = dspy.Predict(PlanNextAction)
 
+    def _workflow_prompt(self) -> str:
+        try:
+            return prompt_value("planner", "workflow_prompt").strip()
+        except KeyError:
+            return self.context.system_prompt
+
     def _plan_next_action(
         self,
         *,
@@ -407,7 +414,7 @@ class AVQADSPyReActProgram(dspy.Module):
         clear_planner_call_trace()
 
         task = _build_task_text(
-            system_prompt=self.context.system_prompt,
+            workflow_prompt=self._workflow_prompt(),
             question=question,
             options_json=options_json,
             video_path=video_path,

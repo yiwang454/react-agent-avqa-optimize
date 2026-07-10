@@ -1,5 +1,6 @@
 # running scripts
 scripts/env_files
+scripts/logs/
 scripts/run_dspy_react_agent_daily_qwen_v2_dsthink.sh
 result_examples/
 old_scripts
@@ -8,6 +9,8 @@ old_scripts
 __pycache__/
 *.py[cod]
 *$py.class
+
+DSPy/dspy_avqa/skills/
 
 # C extensions
 *.so
