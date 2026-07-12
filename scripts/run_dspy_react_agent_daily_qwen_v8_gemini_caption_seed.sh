@@ -28,7 +28,7 @@ export DSPY_AVQA_ALLOWED_TOOLS="${DSPY_AVQA_ALLOWED_TOOLS_OVERRIDE:-ask_caption,
 BASE_ENV_OUTPUT_DIR=/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_qwen_v8GeminiCaption
 export OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-${BASE_ENV_OUTPUT_DIR}_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}"
 export OUTPUT_JSONL="${OUTPUT_DIR}/output_test.jsonl"
-export QWEN_BASE_URL="http://10.62.187.79:8000/v1"
+export QWEN_BASE_URL="http://10.62.187.92:8000/v1"
 
 # Print related settings to verify env loading without leaking secrets.
 echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:+***set***}"
@@ -96,6 +96,7 @@ for run_idx in $(seq 1 $RUN_REPEATS); do
     --output-dir "${run_output_dir}"
     --max-turns "${MAX_TURNS}"
     --perception-model "${PERCEPTION_MODEL}"
+    --signature-in-system-prompt
   )
 
   if [ -n "${PERCEPTION_CONFIG_YAML:-}" ]; then

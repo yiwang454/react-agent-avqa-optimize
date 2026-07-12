@@ -26,6 +26,15 @@ from .signatures import apply_prompt_config_to_signatures
 logger = logging.getLogger(__name__)
 
 
+def _env_flag_value(name: str, default: str = "false") -> bool:
+    value = os.environ.get(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _env_bool(value: Any) -> str:
+    return "true" if bool(value) else "false"
+
+
 def avqa_metric(example: dspy.Example, pred: dspy.Prediction, trace: Any = None) -> float:
     """Exact-match metric on option letter."""
     gold = normalize_option_letter(str(example.answer))
@@ -765,6 +774,12 @@ def parse_optimize_args() -> argparse.Namespace:
         help="Directory for normalized optimizer candidate logs. Defaults beside output-program.",
     )
     parser.add_argument(
+        "--optimized-prompt-config-yaml",
+        type=Path,
+        default=None,
+        help="Optional YAML path for the optimized prompt config artifact.",
+    )
+    parser.add_argument(
         "--final-eval-output-jsonl",
         type=Path,
         default=None,
@@ -801,6 +816,16 @@ def parse_optimize_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional YAML file with DSPy AVQA planner/perception/signature prompts.",
+    )
+    parser.add_argument(
+        "--signature-in-system-prompt",
+        action="store_true",
+        default=_env_flag_value("DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"),
+        help=(
+            "Evaluate optimizer rollouts with the DSPy-rendered PlanNextAction "
+            "signature/schema prompt kept as the chat-level system message. This "
+            "does not change --optimize-target."
+        ),
     )
     parser.add_argument(
         "--allowed-tools",
@@ -1404,6 +1429,7 @@ def write_prompt_target_artifacts(
     target_path: str,
     output_program: Path,
     optimizer_log_dir: Path,
+    optimized_prompt_config_yaml: Path | None = None,
 ) -> dict[str, str]:
     """Write optimized prompt component artifacts for explicit dot-path optimization."""
     safe_target = _safe_filename_part(target_path.replace(".", "_"))
@@ -1417,7 +1443,8 @@ def write_prompt_target_artifacts(
     optimized_txt = output_dir / f"optimized_{safe_target}.txt"
     optimized_txt.write_text(optimized_text, encoding="utf-8")
 
-    optimized_yaml = output_dir / "optimized_prompt_config_v8.yaml"
+    optimized_yaml = optimized_prompt_config_yaml or (output_dir / f"optimized_prompt_config_{safe_target}.yaml")
+    optimized_yaml.parent.mkdir(parents=True, exist_ok=True)
     with optimized_yaml.open("w", encoding="utf-8") as f:
         yaml.safe_dump(_optimized_prompt_config(target_path, optimized_text), f, allow_unicode=True, sort_keys=False)
 
@@ -1449,6 +1476,7 @@ def run_optimization() -> None:
     started = time.perf_counter()
 
     os.environ["PERCEPTION_MODEL"] = args.perception_model
+    os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     load_perception_config_yaml(args.perception_config_yaml)
     load_prompt_config(args.prompt_yaml)
     validate_optimize_target(args.optimize_target)
@@ -1478,6 +1506,7 @@ def run_optimization() -> None:
 
     print(f"Algorithm: {args.algorithm}")
     print(f"Optimize target: {args.optimize_target}")
+    print(f"Signature in system prompt: {args.signature_in_system_prompt}")
     print(f"Loaded input cuts: {len(cuts)}")
     print(f"Train source jsonl: {dataset_info['train_source_path']}")
     print(f"Val source jsonl: {dataset_info['val_source_path']}")
@@ -1625,6 +1654,7 @@ def run_optimization() -> None:
         args.optimize_target,
         args.output_program,
         optimizer_log_dir,
+        args.optimized_prompt_config_yaml,
     )
     optimizer_log_paths.update(prompt_target_artifacts)
 

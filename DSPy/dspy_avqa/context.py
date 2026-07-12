@@ -48,6 +48,11 @@ def pick_optional_int_env(*keys: str) -> int | None:
     return None
 
 
+def env_flag(name: str, default: str = "false") -> bool:
+    value = os.environ.get(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _split_tool_names(value: str | Iterable[str] | None) -> list[str]:
     if value is None:
         return []
@@ -234,6 +239,15 @@ class SerialNOpenAICompatibleLM(dspy.LM):
         messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         source_messages = messages if messages is not None else [{"role": "user", "content": prompt or ""}]
+        if env_flag("DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"):
+            normalized: list[dict[str, Any]] = []
+            for message in source_messages:
+                role = str(message.get("role") or "user").strip().lower() or "user"
+                normalized.append({"role": role, "content": message.get("content", "")})
+            if not normalized:
+                normalized.append({"role": "user", "content": prompt or ""})
+            return normalized
+
         system_parts: list[str] = []
         user_messages: list[dict[str, Any]] = []
         for message in source_messages:

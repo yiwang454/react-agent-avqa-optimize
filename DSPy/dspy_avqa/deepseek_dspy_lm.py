@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any
 
 import dspy
@@ -42,6 +43,11 @@ def _copy_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "content": message.get("content"),
         })
     return copied
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    value = os.environ.get(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -105,9 +111,16 @@ class DeepSeekDSPyLM(dspy.BaseLM):
         prompt: str | None,
         messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        """Convert DSPy inputs to OpenAI-style messages with a fixed planner system prompt."""
-        normalized: list[dict[str, Any]] = []
+        """Convert DSPy inputs to OpenAI-style messages."""
         source_messages = messages if messages is not None else [{"role": "user", "content": prompt or ""}]
+        if _env_flag("DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"):
+            normalized = []
+            for message in source_messages:
+                role = str(message.get("role") or "user").strip().lower() or "user"
+                normalized.append({"role": role, "content": message.get("content", "")})
+            return normalized or [{"role": "user", "content": prompt or ""}]
+
+        normalized: list[dict[str, Any]] = []
         for message in source_messages:
             role = str(message.get("role") or "user").strip().lower() or "user"
             if role == "system":

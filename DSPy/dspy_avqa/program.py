@@ -144,6 +144,14 @@ def _compact_text(text: Any, limit: int = MAX_OBSERVATION_CHARS) -> str:
     return value[:limit].rstrip() + "\n" + prompt_value("planner", "truncated_marker").strip()
 
 
+def _format_observation_for_planner(tool_name: str, observation: Any) -> str:
+    """Format tool observations for planner context."""
+    value = str(observation or "").strip()
+    if str(tool_name or "").strip().lower() in {"ask_caption", "ask_captioner", "caption_video", "captioner"}:
+        return value
+    return _compact_text(value)
+
+
 def _build_task_text(
     *,
     workflow_prompt: str,
@@ -196,7 +204,7 @@ def _conversation_state(turn_trace: list[dict[str, Any]]) -> str:
                     "tool_turn_template",
                     tool_name=tool_name,
                     question=_compact_text(question, 400),
-                    observation=_compact_text(observation),
+                    observation=_format_observation_for_planner(tool_name, observation),
                 )
             )
 

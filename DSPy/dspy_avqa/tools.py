@@ -143,14 +143,26 @@ def b64_file(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
-def to_gemini_inline_data(path: str) -> dict[str, Any]:
-    """Convert a local file to Gemini inlineData payload."""
+def to_gemini_media_data(path: str) -> dict[str, Any]:
+    """Convert local media to inlineData, or a GCS URI to Vertex fileData."""
+    if path.startswith("gs://"):
+        return {
+            "fileData": {
+                "mimeType": mime_type_for_path(path),
+                "fileUri": path,
+            }
+        }
     return {
         "inlineData": {
             "mimeType": mime_type_for_path(path),
             "data": b64_file(path),
         }
     }
+
+
+def to_gemini_inline_data(path: str) -> dict[str, Any]:
+    """Backward-compatible alias for Gemini media payload conversion."""
+    return to_gemini_media_data(path)
 
 def call_qwen_perception(
     video_path: str,
@@ -263,6 +275,8 @@ def call_gemini_perception(
         model=_gemini_env_optional_value(env_prefix, "MODEL"),
         api_key=_gemini_env_optional_value(env_prefix, "API_KEY"),
         base_url=_gemini_env_optional_value(env_prefix, "BASE_URL"),
+        provider=_gemini_env_optional_value(env_prefix, "PROVIDER"),
+        auth_mode=_gemini_env_optional_value(env_prefix, "AUTH_MODE"),
         timeout=int(_gemini_env_value(env_prefix, "TIMEOUT", "180")),
         max_retries=int(_gemini_env_value(env_prefix, "MAX_RETRIES", "3")),
         retry_delay_s=float(_gemini_env_value(env_prefix, "RETRY_DELAY_S", "5")),

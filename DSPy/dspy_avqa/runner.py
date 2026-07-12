@@ -23,6 +23,12 @@ from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config
 from .signatures import apply_prompt_config_to_signatures
 
+
+def _env_flag_value(name: str, default: str = "false") -> bool:
+    value = os.environ.get(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="Batch run DSPy AVQA ReAct over cut JSONL.")
@@ -70,6 +76,16 @@ def parse_args() -> argparse.Namespace:
         choices=("qwen", "gemini"),
         default=os.environ.get("PERCEPTION_MODEL", "qwen").strip().lower() or "qwen",
         help="Perceptual backend used by DSPy tools.",
+    )
+    parser.add_argument(
+        "--signature-in-system-prompt",
+        action="store_true",
+        default=_env_flag_value("DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"),
+        help=(
+            "Keep the DSPy-rendered PlanNextAction signature/schema prompt as the "
+            "chat-level system message instead of moving it into the user prompt; "
+            "when enabled, the fixed short planner system prompt is not injected."
+        ),
     )
     return parser.parse_args()
 
@@ -201,6 +217,8 @@ def load_gemini_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
             "gemini_model": "CAPTIONER_GEMINI_MODEL",
             "gemini_base_url": "CAPTIONER_GEMINI_BASE_URL",
             "gemini_api_key": "CAPTIONER_GEMINI_API_KEY",
+            "gemini_provider": "CAPTIONER_GEMINI_PROVIDER",
+            "gemini_auth_mode": "CAPTIONER_GEMINI_AUTH_MODE",
         },
     )
     _set_env_from_mapping(
@@ -400,6 +418,7 @@ def run_batch() -> None:
     """Entrypoint for batch execution."""
     args = parse_args()
     os.environ["PERCEPTION_MODEL"] = args.perception_model
+    os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     load_perception_config_yaml(args.perception_config_yaml)
     load_captioner_config_yaml(args.captioner_config_yaml)
     load_prompt_config(args.prompt_yaml)
@@ -419,6 +438,7 @@ def run_batch() -> None:
     print(f"Perception model: {args.perception_model}")
     print(f"Prompt yaml: {active_prompt_yaml_path()}")
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
+    print(f"Signature in system prompt: {args.signature_in_system_prompt}")
     if args.audio_caption_dir:
         print(f"Audio caption dir: {args.audio_caption_dir}")
     else:
