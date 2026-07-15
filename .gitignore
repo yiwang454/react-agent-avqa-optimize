@@ -5,12 +5,23 @@ scripts/run_dspy_react_agent_daily_qwen_v2_dsthink.sh
 result_examples/
 old_scripts
 
+# smoke test / temporary tests for development
+scripts/gemini_official_api.py
+scripts/gemini_test/
+scripts/smoke_test_dspy_gemini.sh
+scripts/smoke_test_dspy_gemini_video.py
+scripts/smoke_test_official_gemini.py
+scripts/gepa_smoke_test.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 
 DSPy/dspy_avqa/skills/
+
+# original files
+*.orig
 
 # C extensions
 *.so

@@ -17,31 +17,31 @@ set +a
 export PROJECT_DIR="${PROJECT_DIR_OVERRIDE:-${REPO_DIR}}"
 cd "${PROJECT_DIR}"
 
-PYTHON_BIN="${PYTHON_BIN:-}"
-if [ -z "${PYTHON_BIN}" ] && [ -n "${ENV_PREFIX:-}" ] && [ -x "${ENV_PREFIX}/bin/python" ]; then
-  PYTHON_BIN="${ENV_PREFIX}/bin/python"
-fi
-PYTHON_BIN="${PYTHON_BIN:-python}"
-
 # Keep the same starting runtime choices as run_dspy_react_agent_daily_qwen_v5_qwen_seed.sh.
 export QWEN_SEED="${QWEN_SEED:-1234}"
 export DEEPSEEK_SEED="${DEEPSEEK_SEED:-7}"
 export PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/daily_qa_prompt_v5.yaml}"
 export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/config_localqwen_api_instruct.yaml}"
-export QWEN_BASE_URL="${QWEN_BASE_URL_OVERRIDE:-http://10.62.141.154:8000/v1}"
+
+export QWEN_BASE_URL="http://10.62.187.92:8000/v1"
 export MAX_TURNS="${GEPA_MAX_TURNS:-${MAX_TURNS:-4}}"
 export PERCEPTION_MODEL="${GEPA_PERCEPTION_MODEL:-qwen}"
+
+export PLANNER_TEMPERATURE=0.0
+export GEPA_REFLECTION_TEMPERATURE=0.7
+export AUDIO_CAPTION_DIR="/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_captioner_seed27_gemini-2.5-flash_QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP3_0.0/"
+
 
 OPTIMIZE_TARGET="planner.workflow_prompt"
 START_PROMPT_YAML_NAME="${GEPA_START_PROMPT_YAML_NAME:-$(basename "${PROMPT_YAML}")}"
 START_PROMPT_YAML_NAME="${START_PROMPT_YAML_NAME%.*}"
 SIGNATURE_IN_SYSTEM_PROMPT="${GEPA_SIGNATURE_IN_SYSTEM_PROMPT:-true}"
 
-BASE_ENV_OUTPUT_DIR="${GEPA_BASE_ENV_OUTPUT_DIR:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_changeoptimize_qwen_v5_gepa_workflow_prompt}"
+BASE_ENV_OUTPUT_DIR="${GEPA_BASE_ENV_OUTPUT_DIR:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_changeoptimize_qwen_v5_gemini_caption_gepa_workflow_prompt_temp0p7}"
 INPUT_JSONL="${GEPA_INPUT_JSONL:-${INPUT_JSONL}}"
 TRAINSET_JSONL="${GEPA_TRAINSET_JSONL:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_selectedTrain125.jsonl}"
 VALSET_JSONL="${GEPA_VALSET_JSONL:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_selectedVal125.jsonl}"
-AUDIO_CAPTION_DIR="${GEPA_AUDIO_CAPTION_DIR:-${AUDIO_CAPTION_DIR}}"
+
 BASE_GEPA_RUN_DIR="${GEPA_RUN_DIR:-${BASE_ENV_OUTPUT_DIR}_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}"
 TRAIN_LIMIT="${GEPA_TRAIN_LIMIT:-64}"
 DEBUG="${GEPA_DEBUG:-${DEBUG:-false}}"
@@ -158,7 +158,7 @@ JSON
   echo "DEBUG_LIMIT=${DEBUG_LIMIT}"
 
   cmd=(
-    "${PYTHON_BIN}" DSPy/avqa_dspy_optimize.py
+    python DSPy/avqa_dspy_optimize.py
     --algorithm gepa
     --optimize-target "${OPTIMIZE_TARGET}"
     --input-jsonl "${INPUT_JSONL}"
@@ -178,6 +178,7 @@ JSON
     --perception-model "${PERCEPTION_MODEL}"
     --gepa-config "${gepa_config_file}"
     --signature-in-system-prompt
+    --caption-placement task
   )
 
   if [ -n "${TRAIN_LIMIT}" ]; then
