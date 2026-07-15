@@ -15,6 +15,11 @@ from .prompt_config import prompt_config, prompt_value
 
 SUPPORTED_TOOL_NAMES = ("ask_caption", "ask_perception", "temporal_ground_video")
 _SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
+CAPTION_PLACEMENT_CHOICES = ("conversation_state", "task")
+_CAPTION_PLACEMENT_SET = set(CAPTION_PLACEMENT_CHOICES)
+PLANNER_PROVIDER_DEEPSEEK = "deepseek"
+PLANNER_PROVIDER_ELM_GPT = "elm_gpt"
+_PLANNER_PROVIDER_SET = {PLANNER_PROVIDER_DEEPSEEK, PLANNER_PROVIDER_ELM_GPT}
 
 
 def default_planner_workflow_prompt() -> str:
@@ -48,9 +53,37 @@ def pick_optional_int_env(*keys: str) -> int | None:
     return None
 
 
+def normalize_planner_provider(value: str | None = None) -> str:
+    """Resolve and validate the planner provider selected by the environment."""
+    provider = (value or os.environ.get("PLANNER_PROVIDER") or PLANNER_PROVIDER_DEEPSEEK).strip().lower()
+    if provider not in _PLANNER_PROVIDER_SET:
+        raise ValueError(
+            f"Unsupported PLANNER_PROVIDER={provider!r}; "
+            f"expected one of {sorted(_PLANNER_PROVIDER_SET)}"
+        )
+    return provider
+
+
+def resolve_planner_model(provider: str) -> str:
+    """Resolve a provider-specific planner model while retaining legacy fallback."""
+    if provider == PLANNER_PROVIDER_ELM_GPT:
+        return pick_env("PLANNER_MODEL", "DEEPSEEK_MODEL", default="gpt-5-mini")
+    return pick_env("DEEPSEEK_MODEL", "PLANNER_MODEL", default="deepseek-v4-pro")
+
+
 def env_flag(name: str, default: str = "false") -> bool:
     value = os.environ.get(name, default).strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def normalize_caption_placement(value: str | None = None) -> str:
+    placement = (value or os.environ.get("DSPY_AVQA_CAPTION_PLACEMENT") or "conversation_state").strip().lower()
+    if placement not in _CAPTION_PLACEMENT_SET:
+        raise ValueError(
+            f"Unsupported caption placement {placement!r}; "
+            f"expected one of {list(CAPTION_PLACEMENT_CHOICES)}"
+        )
+    return placement
 
 
 def _split_tool_names(value: str | Iterable[str] | None) -> list[str]:
@@ -108,13 +141,8 @@ class AVQARuntimeContext:
     """Runtime context aligned with original react_agent configuration."""
 
     system_prompt: str = field(default_factory=default_planner_workflow_prompt)
-    planner_model: str = field(
-        default_factory=lambda: pick_env(
-            "DEEPSEEK_MODEL",
-            "PLANNER_MODEL",
-            default="deepseek-v4-pro",
-        )
-    )
+    planner_provider: str = field(default_factory=normalize_planner_provider)
+    planner_model: str = ""
     planner_api_key: str = field(
         default_factory=lambda: pick_env(
             "DEEPSEEK_API_KEY",
@@ -183,6 +211,13 @@ class AVQARuntimeContext:
     )
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
+    caption_placement: str = field(default_factory=normalize_caption_placement)
+
+    def __post_init__(self) -> None:
+        self.planner_provider = normalize_planner_provider(self.planner_provider)
+        if not self.planner_model.strip():
+            self.planner_model = resolve_planner_model(self.planner_provider)
+        self.caption_placement = normalize_caption_placement(self.caption_placement)
 
 
 def _obj_get(value: Any, key: str, default: Any = None) -> Any:
@@ -371,26 +406,31 @@ def _env_is_set(key: str) -> bool:
 
 
 def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
-    """Configure DSPy native LM for an OpenAI-compatible DeepSeek endpoint."""
+    """Configure DSPy's native LiteLLM planner backend."""
     api_key = None if context.planner_api_key.upper() == "EMPTY" else context.planner_api_key
     lm_kwargs: dict[str, Any] = {
         "model_type": "chat",
         "api_key": api_key,
-        "api_base": context.planner_api_base,
         "max_tokens": context.planner_max_tokens,
         "timeout": context.planner_timeout,
         "num_retries": context.planner_max_retries,
         "cache": False,
     }
+    if context.planner_provider == PLANNER_PROVIDER_DEEPSEEK:
+        lm_kwargs["api_base"] = context.planner_api_base
     if _env_is_set("PLANNER_TEMPERATURE"):
         lm_kwargs["temperature"] = context.planner_temperature
     if _env_is_set("PLANNER_TOP_P"):
         lm_kwargs["top_p"] = context.planner_top_p
-    if context.planner_deepseek_random_seed is not None:
+    if (
+        context.planner_provider == PLANNER_PROVIDER_DEEPSEEK
+        and context.planner_deepseek_random_seed is not None
+    ):
         lm_kwargs["seed"] = context.planner_deepseek_random_seed
-    extra_body = _planner_thinking_extra_body(context.planner_thinking_mode)
-    if extra_body is not None:
-        lm_kwargs["extra_body"] = extra_body
+    if context.planner_provider == PLANNER_PROVIDER_DEEPSEEK:
+        extra_body = _planner_thinking_extra_body(context.planner_thinking_mode)
+        if extra_body is not None:
+            lm_kwargs["extra_body"] = extra_body
 
     lm = SerialNOpenAICompatibleLM(
         _native_litellm_model_name(context.planner_model),
@@ -444,13 +484,19 @@ def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
 def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
     """Configure DSPy's planner LM.
 
-    The default uses DSPy's native LiteLLM-backed LM against the DeepSeek
-    OpenAI-compatible endpoint so optimizers such as COPRO can request multiple
-    completions with `n`. Set DSPY_PLANNER_LM_BACKEND=custom to use the legacy
+    The default uses DSPy's native LiteLLM-backed OpenAI-compatible LM so
+    optimizers such as COPRO can request multiple completions with `n`.
+    ``PLANNER_PROVIDER=elm_gpt`` uses the SDK default endpoint and never passes
+    an API base URL. Set DSPY_PLANNER_LM_BACKEND=custom only for the legacy
     one-completion DeepSeekDSPyLM wrapper.
     """
     backend = os.environ.get("DSPY_PLANNER_LM_BACKEND", "native_litellm").strip().lower()
     if backend in {"custom", "deepseek_custom", "legacy"}:
+        if context.planner_provider != PLANNER_PROVIDER_DEEPSEEK:
+            raise ValueError(
+                "DSPY_PLANNER_LM_BACKEND=custom is only supported with "
+                "PLANNER_PROVIDER=deepseek; use native_litellm for elm_gpt"
+            )
         return _configure_custom_deepseek_lm(context)
     if backend not in {"native", "native_litellm", "litellm", "openai_compatible"}:
         raise ValueError(
@@ -458,4 +504,3 @@ def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
             f"{backend!r}; expected native_litellm or custom"
         )
     return _configure_native_litellm(context)
-

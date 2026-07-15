@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import os
 import threading
@@ -15,6 +16,49 @@ from .prompt_config import prompt_value, render_prompt
 
 SUPPORTED_PERCEPTION_MODELS = {"qwen", "gemini"}
 _PERCEPTION_METADATA_STATE = threading.local()
+_DSPY_GEMINI_PROMPT_LOCK = threading.Lock()
+_PRINTED_DSPY_GEMINI_PROMPT = False
+
+
+class GeminiResponseCircuitBreak(BaseException):
+    """Fatal Gemini-only circuit breaker that bypasses normal per-sample error saves."""
+
+
+def _gemini_response_error_sensitive() -> bool:
+    return _env_flag("GEMINI_RESPONSE_ERROR_SENSITIVE", "false")
+
+
+def _gemini_response_error_reason(response_text: Any) -> str | None:
+    text = str(response_text or "").strip()
+    if not text:
+        return "Gemini returned an empty response"
+    lowered = text.lower()
+    if lowered.startswith("[error]"):
+        return "Gemini returned an explicit [ERROR] response"
+    if "litellm" in lowered and any(token in lowered for token in ("error", "exception", "failed")):
+        return "Gemini returned a LiteLLM error response"
+    return None
+
+
+def _trip_gemini_response_circuit(reason: str, *, backend: str, env_prefix: str) -> None:
+    if _gemini_response_error_sensitive():
+        raise GeminiResponseCircuitBreak(
+            f"Gemini response circuit breaker tripped ({backend}, {env_prefix}): {reason}"
+        )
+
+
+def _call_gemini_with_circuit_breaker(
+    call: Any,
+    *args: Any,
+    backend: str,
+    env_prefix: str,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return call(*args, **kwargs)
+    except Exception as exc:
+        _trip_gemini_response_circuit(str(exc), backend=backend, env_prefix=env_prefix)
+        raise
 
 def _env_flag(name: str, default: str = "false") -> bool:
     value = os.environ.get(name, default).strip().lower()
@@ -255,6 +299,36 @@ def gemini_video_only(env_prefix: str = "GEMINI") -> bool:
     """Return whether Gemini should receive only video input."""
     return _gemini_env_value(env_prefix, "VIDEO_ONLY", "true").strip().lower() not in {"0", "false", "no", "off"}
 
+def gemini_api_backend() -> str:
+    """Return the configured Gemini transport, validating direct tool use too."""
+    backend = os.environ.get("GEMINI_API_BACKEND", "legacy").strip().lower() or "legacy"
+    if backend not in {"legacy", "dspy"}:
+        raise ValueError("GEMINI_API_BACKEND must be legacy or dspy, got {!r}.".format(backend))
+    return backend
+
+
+def _dspy_gemini_top_k(env_prefix: str) -> int:
+    top_k = int(_gemini_env_value(env_prefix, "TOP_K", "20"))
+    if not 1 <= top_k <= 64:
+        raise ValueError(
+            f"{env_prefix}_TOP_K={top_k} is invalid for DSPy Vertex Gemini; expected 1..64. "
+            "Update the Gemini YAML sampling_params.top_k (for example, to 64)."
+        )
+    return top_k
+
+
+def _maybe_print_dspy_gemini_messages(messages: list[dict[str, Any]], env_prefix: str) -> None:
+    global _PRINTED_DSPY_GEMINI_PROMPT
+    if _PRINTED_DSPY_GEMINI_PROMPT or not _gemini_env_flag(env_prefix, "PRINT_FIRST_PROMPT"):
+        return
+    with _DSPY_GEMINI_PROMPT_LOCK:
+        if _PRINTED_DSPY_GEMINI_PROMPT:
+            return
+        print("[Gemini DSPy first prompt]", flush=True)
+        print(json.dumps(messages, ensure_ascii=False, indent=2), flush=True)
+        _PRINTED_DSPY_GEMINI_PROMPT = True
+
+
 def call_gemini_perception(
     video_path: str,
     audio_path: str | None,
@@ -262,46 +336,111 @@ def call_gemini_perception(
     system_prompt: str | None = None,
     env_prefix: str = "GEMINI",
 ) -> str:
-    """Call Gemini for AV perception/grounding."""
-    parts: list[dict[str, Any]] = []
-    if audio_path and not gemini_video_only(env_prefix):
-        parts.append(to_gemini_inline_data(audio_path))
-    parts.extend([to_gemini_inline_data(video_path), {"text": prompt}])
-    contents = [{"role": "user", "parts": parts}]
+    """Call Gemini for AV perception through the selected legacy or DSPy backend."""
+    backend = gemini_api_backend()
     system_prompt = system_prompt if system_prompt is not None else prompt_value("perception", "system_prompt").strip()
-    result = call_gemini_messages(
-        contents,
-        system_prompt=system_prompt,
-        model=_gemini_env_optional_value(env_prefix, "MODEL"),
-        api_key=_gemini_env_optional_value(env_prefix, "API_KEY"),
-        base_url=_gemini_env_optional_value(env_prefix, "BASE_URL"),
-        provider=_gemini_env_optional_value(env_prefix, "PROVIDER"),
-        auth_mode=_gemini_env_optional_value(env_prefix, "AUTH_MODE"),
-        timeout=int(_gemini_env_value(env_prefix, "TIMEOUT", "180")),
-        max_retries=int(_gemini_env_value(env_prefix, "MAX_RETRIES", "3")),
-        retry_delay_s=float(_gemini_env_value(env_prefix, "RETRY_DELAY_S", "5")),
-        include_thoughts=_gemini_env_flag(env_prefix, "INCLUDE_THOUGHTS", "true"),
-        return_thinking=_gemini_env_flag(env_prefix, "RETURN_THINKING", "true"),
-        temperature=float(_gemini_env_value(env_prefix, "TEMPERATURE", "0.6")),
-        gemini_seed=_gemini_env_optional_int(env_prefix, "SEED"),
-        top_p=float(_gemini_env_value(env_prefix, "TOP_P", "0.95")),
-        top_k=int(_gemini_env_value(env_prefix, "TOP_K", "20")),
-        max_tokens=int(_gemini_env_value(env_prefix, "MAX_TOKENS", "1024")),
-    )
+    include_audio = bool(audio_path and not gemini_video_only(env_prefix))
+
+    if backend == "dspy":
+        from .gemini_api_new import (
+            VERTEX_LOCATION as default_vertex_location,
+            VERTEX_PROJECT as default_vertex_project,
+            build_gemini_messages,
+            call_gemini_messages as call_dspy_gemini_messages,
+        )
+
+        local_data_root = _env_optional_value("GEMINI_LOCAL_DATA_ROOT")
+        gcs_data_root = _env_optional_value("GEMINI_GCS_DATA_ROOT")
+        if not local_data_root or not gcs_data_root:
+            raise ValueError(
+                "DSPy Vertex Gemini requires GEMINI_LOCAL_DATA_ROOT and GEMINI_GCS_DATA_ROOT. "
+                "Pass --gemini-local-data-root and --gemini-gcs-data-root to the runner."
+            )
+        messages = build_gemini_messages(
+            prompt,
+            system_prompt=system_prompt,
+            video_path=video_path,
+            audio_path=audio_path if include_audio else None,
+            local_data_root=local_data_root,
+            gcs_data_root=gcs_data_root,
+        )
+        _maybe_print_dspy_gemini_messages(messages, env_prefix)
+        vertex_project = _env_optional_value("VERTEXAI_PROJECT") or default_vertex_project
+        vertex_location = _env_optional_value("VERTEXAI_LOCATION") or default_vertex_location
+        result = _call_gemini_with_circuit_breaker(
+            call_dspy_gemini_messages,
+            messages,
+            backend="dspy",
+            env_prefix=env_prefix,
+            model=_gemini_env_value(env_prefix, "MODEL", "gemini-2.5-flash"),
+            vertex_project=vertex_project,
+            vertex_location=vertex_location,
+            timeout=int(_gemini_env_value(env_prefix, "TIMEOUT", "180")),
+            max_retries=int(_gemini_env_value(env_prefix, "MAX_RETRIES", "3")),
+            return_thinking=True,
+            temperature=float(_gemini_env_value(env_prefix, "TEMPERATURE", "0.6")),
+            gemini_seed=_gemini_env_optional_int(env_prefix, "SEED"),
+            top_p=float(_gemini_env_value(env_prefix, "TOP_P", "0.95")),
+            top_k=_dspy_gemini_top_k(env_prefix),
+            max_tokens=int(_gemini_env_value(env_prefix, "MAX_TOKENS", "1024")),
+        )
+        api_metadata: dict[str, Any] = {
+            "api_backend": "dspy",
+            "vertex_project": vertex_project,
+            "vertex_location": vertex_location,
+            "local_data_root": local_data_root,
+            "gcs_data_root": gcs_data_root,
+        }
+    else:
+        parts: list[dict[str, Any]] = []
+        if include_audio:
+            parts.append(to_gemini_inline_data(audio_path))
+        parts.extend([to_gemini_inline_data(video_path), {"text": prompt}])
+        contents = [{"role": "user", "parts": parts}]
+        result = _call_gemini_with_circuit_breaker(
+            call_gemini_messages,
+            contents,
+            backend="legacy",
+            env_prefix=env_prefix,
+            system_prompt=system_prompt,
+            model=_gemini_env_optional_value(env_prefix, "MODEL"),
+            api_key=_gemini_env_optional_value(env_prefix, "API_KEY"),
+            base_url=_gemini_env_optional_value(env_prefix, "BASE_URL"),
+            provider=_gemini_env_optional_value(env_prefix, "PROVIDER"),
+            auth_mode=_gemini_env_optional_value(env_prefix, "AUTH_MODE"),
+            timeout=int(_gemini_env_value(env_prefix, "TIMEOUT", "180")),
+            max_retries=int(_gemini_env_value(env_prefix, "MAX_RETRIES", "3")),
+            retry_delay_s=float(_gemini_env_value(env_prefix, "RETRY_DELAY_S", "5")),
+            include_thoughts=_gemini_env_flag(env_prefix, "INCLUDE_THOUGHTS", "true"),
+            return_thinking=_gemini_env_flag(env_prefix, "RETURN_THINKING", "true"),
+            temperature=float(_gemini_env_value(env_prefix, "TEMPERATURE", "0.6")),
+            gemini_seed=_gemini_env_optional_int(env_prefix, "SEED"),
+            top_p=float(_gemini_env_value(env_prefix, "TOP_P", "0.95")),
+            top_k=int(_gemini_env_value(env_prefix, "TOP_K", "20")),
+            max_tokens=int(_gemini_env_value(env_prefix, "MAX_TOKENS", "1024")),
+        )
+        api_metadata = {
+            "api_backend": "legacy",
+            "base_url": _gemini_env_optional_value(env_prefix, "BASE_URL"),
+        }
+
     if len(result) == 3:
         response_text, usage, thinking_text = result
     else:
         response_text, usage = result
         thinking_text = ""
+    response_error_reason = _gemini_response_error_reason(response_text)
+    if response_error_reason:
+        _trip_gemini_response_circuit(response_error_reason, backend=backend, env_prefix=env_prefix)
     _set_last_perception_metadata(
         backend="gemini",
         system_prompt=system_prompt,
         prompt=prompt,
         model=_gemini_env_value(env_prefix, "MODEL", ""),
-        # base_url=_env_optional_value("GEMINI_BASE_URL"),
         env_prefix=env_prefix,
         token_usage=usage,
         thinking_text=thinking_text,
+        **api_metadata,
     )
     return response_text.strip()
 

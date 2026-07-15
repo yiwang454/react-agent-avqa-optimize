@@ -15,15 +15,24 @@ from typing import Any
 import dspy
 import yaml
 
-from .context import AVQARuntimeContext, resolve_allowed_tools
+from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
 from .deepseek_dspy_lm import consume_planner_call_trace
 from .data import build_input_state, build_result_row, maybe_dump_question_data, read_jsonl, write_results_jsonl
 from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_overrides, prompt_value
-from .runner import extract_error_info, load_perception_config_yaml
+from .runner import (
+    add_gemini_backend_args,
+    configure_gemini_api_backend,
+    extract_error_info,
+    gemini_backend_log_lines,
+    load_captioner_config_yaml,
+    load_perception_config_yaml,
+)
 from .signatures import apply_prompt_config_to_signatures
 
 logger = logging.getLogger(__name__)
+
+GEPA_REFLECTION_TEMPERATURE_ENV = "GEPA_REFLECTION_TEMPERATURE"
 
 
 def _env_flag_value(name: str, default: str = "false") -> bool:
@@ -33,6 +42,20 @@ def _env_flag_value(name: str, default: str = "false") -> bool:
 
 def _env_bool(value: Any) -> str:
     return "true" if bool(value) else "false"
+
+
+def build_gepa_reflection_lm(planner_lm: Any) -> Any:
+    """Return a planner LM copy with an optional GEPA-only temperature."""
+    raw_temperature = os.environ.get(GEPA_REFLECTION_TEMPERATURE_ENV)
+    if raw_temperature is None or not raw_temperature.strip():
+        return planner_lm
+    try:
+        temperature = float(raw_temperature)
+    except ValueError as exc:
+        raise ValueError(
+            f"{GEPA_REFLECTION_TEMPERATURE_ENV} must be a float, got {raw_temperature!r}"
+        ) from exc
+    return planner_lm.copy(temperature=temperature)
 
 
 def avqa_metric(example: dspy.Example, pred: dspy.Prediction, trace: Any = None) -> float:
@@ -478,6 +501,7 @@ def optimize_prompt_target_with_gepa(
     program: PromptTargetProgram,
     trainset: list[dspy.Example],
     *,
+    reflection_lm: Any = None,
     valset: list[dspy.Example] | None = None,
     auto: str | None = None,
     max_full_evals: int | None = 6,
@@ -500,6 +524,7 @@ def optimize_prompt_target_with_gepa(
     from dspy.teleprompt.gepa.gepa_utils import LoggerAdapter
 
     valset = valset or trainset
+    reflection_lm = reflection_lm or dspy.settings.lm
     teleprompter = GEPA(
         metric=avqa_gepa_feedback_metric,
         auto=auto,
@@ -507,7 +532,7 @@ def optimize_prompt_target_with_gepa(
         max_metric_calls=max_metric_calls,
         reflection_minibatch_size=reflection_minibatch_size,
         candidate_selection_strategy=candidate_selection_strategy,
-        reflection_lm=dspy.settings.lm,
+        reflection_lm=reflection_lm,
         skip_perfect_score=skip_perfect_score,
         use_merge=use_merge,
         max_merge_invocations=max_merge_invocations,
@@ -533,7 +558,7 @@ def optimize_prompt_target_with_gepa(
         failure_score=teleprompter.failure_score,
         num_threads=num_threads,
         rng=rng,
-        reflection_lm=dspy.settings.lm,
+        reflection_lm=reflection_lm,
         reflection_minibatch_size=reflection_minibatch_size,
     )
     seed_candidate = {adapter.component_name: program._candidate_text()}
@@ -812,6 +837,12 @@ def parse_optimize_args() -> argparse.Namespace:
         help="Optional YAML file with perception backend runtime/sampling parameters.",
     )
     parser.add_argument(
+        "--captioner-config-yaml",
+        type=Path,
+        default=None,
+        help="Optional YAML file with captioner backend runtime/sampling parameters.",
+    )
+    parser.add_argument(
         "--prompt-yaml",
         type=Path,
         default=None,
@@ -828,6 +859,15 @@ def parse_optimize_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--caption-placement",
+        choices=CAPTION_PLACEMENT_CHOICES,
+        default=normalize_caption_placement(),
+        help=(
+            "Where to place caption tool observations in later planner turns. "
+            "This changes rollout prompt topology but does not change --optimize-target."
+        ),
+    )
+    parser.add_argument(
         "--allowed-tools",
         default=os.environ.get("DSPY_AVQA_ALLOWED_TOOLS") or os.environ.get("DSPY_ALLOWED_TOOLS"),
         help="Comma-separated DSPy AVQA tools to expose to the planner.",
@@ -838,6 +878,7 @@ def parse_optimize_args() -> argparse.Namespace:
         default=os.environ.get("PERCEPTION_MODEL", "qwen").strip().lower() or "qwen",
         help="Perceptual backend used by DSPy tools.",
     )
+    add_gemini_backend_args(parser)
     parser.add_argument("--copro-breadth", type=int, default=None)
     parser.add_argument("--copro-depth", type=int, default=None)
     parser.add_argument("--copro-init-temperature", type=float, default=None)
@@ -1477,7 +1518,10 @@ def run_optimization() -> None:
 
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
+    os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
     load_perception_config_yaml(args.perception_config_yaml)
+    load_captioner_config_yaml(args.captioner_config_yaml)
+    configure_gemini_api_backend(args)
     load_prompt_config(args.prompt_yaml)
     validate_optimize_target(args.optimize_target)
     apply_prompt_config_to_signatures(apply_instructions=False)
@@ -1491,8 +1535,14 @@ def run_optimization() -> None:
     skipped_val = dataset_info["skipped_val"]
 
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
-    context = AVQARuntimeContext(max_turns=args.max_turns, allowed_tools=allowed_tools)
+    context = AVQARuntimeContext(
+        max_turns=args.max_turns,
+        allowed_tools=allowed_tools,
+        caption_placement=args.caption_placement,
+    )
     base_program = AVQADSPyReActProgram(context=context)
+    planner_lm = dspy.settings.lm
+    gepa_reflection_lm = build_gepa_reflection_lm(planner_lm) if args.algorithm == "gepa" else planner_lm
     program: dspy.Module = PromptTargetProgram(
         base_program,
         args.optimize_target,
@@ -1507,6 +1557,7 @@ def run_optimization() -> None:
     print(f"Algorithm: {args.algorithm}")
     print(f"Optimize target: {args.optimize_target}")
     print(f"Signature in system prompt: {args.signature_in_system_prompt}")
+    print(f"Caption placement: {context.caption_placement}")
     print(f"Loaded input cuts: {len(cuts)}")
     print(f"Train source jsonl: {dataset_info['train_source_path']}")
     print(f"Val source jsonl: {dataset_info['val_source_path']}")
@@ -1523,12 +1574,21 @@ def run_optimization() -> None:
     print(f"Skipped train examples: {len(skipped)}")
     print(f"Skipped val examples: {len(skipped_val)}")
     print(f"Planner model: {context.planner_model}")
+    print(f"Planner temperature: {planner_lm.kwargs.get('temperature')}")
+    if args.algorithm == "gepa":
+        print(
+            f"GEPA reflection temperature: {gepa_reflection_lm.kwargs.get('temperature')}"
+        )
     print(f"Perception model: {args.perception_model}")
+    for line in gemini_backend_log_lines():
+        print(line)
     print(f"Prompt yaml: {active_prompt_yaml_path()}")
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
     print(f"Max turns: {context.max_turns}")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
+    if args.captioner_config_yaml:
+        print(f"Captioner config yaml: {args.captioner_config_yaml}")
 
     optimizer_log_dir = args.optimizer_log_dir or (args.output_program.parent / f"{args.algorithm}_optimizer_logs")
     miprov2_config = _resolve_miprov2_config(args)
@@ -1627,6 +1687,7 @@ def run_optimization() -> None:
         compiled = optimize_prompt_target_with_gepa(
             program,
             trainset,
+            reflection_lm=gepa_reflection_lm,
             valset=valset,
             **gepa_config,
         )

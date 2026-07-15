@@ -24,6 +24,7 @@ from .tools import (
 
 OPTION_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MAX_OBSERVATION_CHARS = 2400
+CAPTION_MOVED_TO_TASK_MARKER = "<caption moved into task>"
 
 
 def _strip_fences(text: str) -> str:
@@ -144,12 +145,48 @@ def _compact_text(text: Any, limit: int = MAX_OBSERVATION_CHARS) -> str:
     return value[:limit].rstrip() + "\n" + prompt_value("planner", "truncated_marker").strip()
 
 
-def _format_observation_for_planner(tool_name: str, observation: Any) -> str:
+def _is_caption_tool(tool_name: str | None) -> bool:
+    return str(tool_name or "").strip().lower() in {"ask_caption", "ask_captioner", "caption_video", "captioner"}
+
+
+def _format_observation_for_planner(
+    tool_name: str,
+    observation: Any,
+    *,
+    caption_placement: str = "conversation_state",
+) -> str:
     """Format tool observations for planner context."""
     value = str(observation or "").strip()
-    if str(tool_name or "").strip().lower() in {"ask_caption", "ask_captioner", "caption_video", "captioner"}:
+    if _is_caption_tool(tool_name):
+        if caption_placement == "task":
+            return CAPTION_MOVED_TO_TASK_MARKER
         return value
     return _compact_text(value)
+
+
+def _task_prompt_template_references_video_description() -> bool:
+    template = prompt_value("planner", "task_prompt_template")
+    return "{video_description}" in template
+
+
+def _validate_caption_placement_inputs(*, caption_placement: str, video_description: str | None) -> None:
+    template_references_video_description = _task_prompt_template_references_video_description()
+    if caption_placement == "task":
+        if not template_references_video_description:
+            raise ValueError(
+                "caption_placement='task' requires planner.task_prompt_template to reference "
+                "{video_description}; otherwise the caption is removed from conversation_state "
+                "but never rendered into task."
+            )
+        return
+    if caption_placement != "conversation_state":
+        return
+    if str(video_description or "").strip() and template_references_video_description:
+        raise ValueError(
+            "caption_placement='conversation_state' requires video_description not to be rendered "
+            "into planner.task_prompt_template. Pass an empty video_description, use a task template "
+            "without {video_description}, or use --caption-placement task."
+        )
 
 
 def _build_task_text(
@@ -176,7 +213,11 @@ def _build_task_text(
     )
 
 
-def _conversation_state(turn_trace: list[dict[str, Any]]) -> str:
+def _conversation_state(
+    turn_trace: list[dict[str, Any]],
+    *,
+    caption_placement: str = "conversation_state",
+) -> str:
     """Serialize prior planner/tool turns like the LangGraph implementation."""
     if not turn_trace:
         return prompt_value("planner", "conversation_empty").strip()
@@ -197,14 +238,21 @@ def _conversation_state(turn_trace: list[dict[str, Any]]) -> str:
         if observation:
             tool_name = turn.get("tool_name") or "unknown"
             tool_args = turn.get("tool_args") or {}
-            question = tool_args.get("perceptual_question") or tool_args.get("caption_instruction") or ""
+            if caption_placement == "task" and _is_caption_tool(tool_name):
+                question = ""
+            else:
+                question = tool_args.get("perceptual_question") or tool_args.get("caption_instruction") or ""
             lines.append(
                 render_prompt(
                     "planner",
                     "tool_turn_template",
                     tool_name=tool_name,
                     question=_compact_text(question, 400),
-                    observation=_format_observation_for_planner(tool_name, observation),
+                    observation=_format_observation_for_planner(
+                        tool_name,
+                        observation,
+                        caption_placement=caption_placement,
+                    ),
                 )
             )
 
@@ -418,22 +466,38 @@ class AVQADSPyReActProgram(dspy.Module):
         max_turns: int | None = None,
     ) -> dspy.Prediction:
         max_iters = max_turns or self.context.max_turns
-        turn_trace: list[dict[str, Any]] = []
-        clear_planner_call_trace()
-
-        task = _build_task_text(
-            workflow_prompt=self._workflow_prompt(),
-            question=question,
-            options_json=options_json,
-            video_path=video_path,
-            video_id=video_id,
+        _validate_caption_placement_inputs(
+            caption_placement=self.context.caption_placement,
             video_description=video_description,
         )
+        turn_trace: list[dict[str, Any]] = []
+        caption_task_description: str | None = None
+        workflow_prompt = self._workflow_prompt()
+        clear_planner_call_trace()
+
+        def current_task_text() -> str:
+            active_video_description = (
+                caption_task_description
+                if self.context.caption_placement == "task" and caption_task_description is not None
+                else video_description
+            )
+            return _build_task_text(
+                workflow_prompt=workflow_prompt,
+                question=question,
+                options_json=options_json,
+                video_path=video_path,
+                video_id=video_id,
+                video_description=active_video_description,
+            )
 
         for turn_idx in range(1, max_iters + 1):
+            task = current_task_text()
             raw_action, planner_calls, planner_error = self._plan_next_action(
                 task=task,
-                conversation_state=_conversation_state(turn_trace),
+                conversation_state=_conversation_state(
+                    turn_trace,
+                    caption_placement=self.context.caption_placement,
+                ),
                 turn_index=str(turn_idx),
                 max_turns=str(max_iters),
             )
@@ -458,7 +522,10 @@ class AVQADSPyReActProgram(dspy.Module):
                         "video_id": video_id,
                     }
                 )
-                evidence_summary = _conversation_state(turn_trace)
+                evidence_summary = _conversation_state(
+                    turn_trace,
+                    caption_placement=self.context.caption_placement,
+                )
                 return dspy.Prediction(
                     answer=final_answer,
                     reasoning_summary=raw_answer,
@@ -478,6 +545,8 @@ class AVQADSPyReActProgram(dspy.Module):
                 tool_query=tool_query,
             )
             perception_metadata = consume_last_perception_metadata()
+            if tool_name == "ask_caption" and self.context.caption_placement == "task":
+                caption_task_description = str(tool_observation or "").strip()
 
             turn_trace.append(
                 {
@@ -501,8 +570,9 @@ class AVQADSPyReActProgram(dspy.Module):
                 }
             )
 
+        task = current_task_text()
         fallback_state = (
-            f"{_conversation_state(turn_trace)}\n\n"
+            f"{_conversation_state(turn_trace, caption_placement=self.context.caption_placement)}\n\n"
             + prompt_value("planner", "final_fallback_instruction").strip()
         )
         raw_action, planner_calls, planner_error = self._plan_next_action(
@@ -530,7 +600,10 @@ class AVQADSPyReActProgram(dspy.Module):
             }
         )
 
-        evidence_summary = _conversation_state(turn_trace)
+        evidence_summary = _conversation_state(
+            turn_trace,
+            caption_placement=self.context.caption_placement,
+        )
         return dspy.Prediction(
             answer=final_answer,
             reasoning_summary=raw_answer,

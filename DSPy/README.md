@@ -94,6 +94,46 @@ uv run --no-sync python DSPy/avqa_dspy_impl.py \
   --debug
 ```
 
+## ELM GPT planner
+
+Use the University of Edinburgh ELM GPT endpoint as the planner and GEPA
+reflection model by setting the following values in a local, untracked env
+file. `PLANNER_PROVIDER=elm_gpt` deliberately ignores every DeepSeek/base-URL
+setting and lets the OpenAI-compatible SDK use its default endpoint.
+
+```bash
+PLANNER_PROVIDER=elm_gpt
+PLANNER_MODEL=gpt-5-mini
+PLANNER_API_KEY=...
+PLANNER_TEMPERATURE=0.0
+GEPA_REFLECTION_TEMPERATURE=0.7
+```
+
+`DEEPSEEK_API_KEY` remains a compatibility alias for `PLANNER_API_KEY` (the
+existing precedence is `DEEPSEEK_API_KEY`, `DEEPSEEK_TOKEN`, then
+`PLANNER_API_KEY`). Do not set or depend on `DEEPSEEK_BASE_URL`,
+`DEEPSEEK_API_BASE`, or `PLANNER_API_BASE` in this mode. Planner rollout uses
+`PLANNER_TEMPERATURE`; GEPA copies the same LM and only overrides its
+temperature with `GEPA_REFLECTION_TEMPERATURE`.
+
+## Gemini legacy / DSPy Vertex 后端
+
+Gemini 默认走现有 `legacy` generateContent 路径。若要通过 DSPy/LiteLLM 调用官方 Vertex Gemini，必须同时显式提供本地媒体根与对应 GCS 根；`GEMINI_API_KEY`、`GEMINI_BASE_URL` 在该模式下不会使用。
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+python DSPy/avqa_dspy_impl.py ... \
+  --gemini-api-backend dspy \
+  --vertex-project decoupled-avqa-501420 \
+  --vertex-location global \
+  --gemini-local-data-root /local/dataset/root \
+  --gemini-gcs-data-root gs://bucket/dataset-prefix
+```
+
+`--gemini-api-backend dspy` 同时覆盖 Gemini perception 与 Gemini captioner。Vertex Gemini 的 `sampling_params.top_k` 必须为 `1..64`；旧配置中的 `0` 请改为例如 `64`。认证由 ADC/service account 完成。
+
+`--response-error-sensitive` 会仅对 Gemini 启用进程级熔断：空响应、`[ERROR]` 响应或最终 Gemini/LiteLLM 调用异常会立即停止当前运行，不再写成普通失败样本。默认关闭；可用 `--no-response-error-sensitive` 显式关闭。
+
 ## Caveat:
 
 小 caveat：如果不是走 run_batch()，而是在别的 Python 代码里直接 new AVQARuntimeContext() / AVQADSPyReActProgram()，想用自定义 YAML，需要先调用 load_prompt_config(custom_path)，再创建 context/program；否则会用默认 v0。
