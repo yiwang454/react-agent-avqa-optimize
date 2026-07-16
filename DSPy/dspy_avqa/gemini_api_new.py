@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .response_quality import degenerate_response_reason
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VERTEX_PROJECT = os.getenv("VERTEXAI_PROJECT", "decoupled-avqa-501420")
@@ -156,6 +158,8 @@ def call_gemini_messages(
     top_p: float = 0.95,
     top_k: int = 20,
     max_tokens: int = 1024,
+    retry_delay_s: float = 5.0,
+    retry_degenerate_response: bool = False,
 ) -> Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], str]:
     """Call Vertex Gemini through DSPy's LiteLLM-backed LM."""
     try:
@@ -180,15 +184,37 @@ def call_gemini_messages(
     if gemini_seed is not None:
         lm_kwargs["seed"] = gemini_seed
 
-    lm = dspy.LM(f"vertex_ai/{model}", **lm_kwargs)
-    outputs = lm(messages=messages)
-    if not outputs:
-        raise RuntimeError("DSPy returned no Gemini output.")
+    for attempt in range(1, max_retries + 1):
+        lm = dspy.LM(f"vertex_ai/{model}", **lm_kwargs)
+        outputs = lm(messages=messages)
+        if not outputs:
+            raise RuntimeError("DSPy returned no Gemini output.")
 
-    response_text = _response_text(outputs[0])
-    usage: Dict[str, Any] = {}
-    if lm.history:
-        usage = _usage_dict(lm.history[-1].get("usage"))
-    if return_thinking:
-        return response_text, usage, ""
-    return response_text, usage
+        response_text = _response_text(outputs[0])
+        usage: Dict[str, Any] = {}
+        if lm.history:
+            usage = _usage_dict(lm.history[-1].get("usage"))
+        degenerate_reason = (
+            degenerate_response_reason(response_text, usage, max_tokens=max_tokens)
+            if retry_degenerate_response
+            else None
+        )
+        if degenerate_reason and attempt < max_retries:
+            print(
+                f"[warn] DSPy Gemini attempt {attempt}/{max_retries} returned a degenerate "
+                f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
+                flush=True,
+            )
+            time.sleep(retry_delay_s)
+            continue
+        if degenerate_reason:
+            print(
+                f"[warn] DSPy Gemini exhausted {max_retries} attempts after a degenerate "
+                f"perception response: {degenerate_reason}. Keeping the final response.",
+                flush=True,
+            )
+        if return_thinking:
+            return response_text, usage, ""
+        return response_text, usage
+
+    raise RuntimeError("Gemini API call failed without attempting a request.")

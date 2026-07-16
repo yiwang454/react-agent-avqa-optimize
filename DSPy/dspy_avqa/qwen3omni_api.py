@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from .response_quality import degenerate_response_reason
 
 API_KEY = os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY", os.getenv("QWEN_TOKEN", "")))
 BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
@@ -184,6 +185,7 @@ def call_qwen_messages(
     enable_thinking: Optional[bool] = None,
     stream: Optional[bool] = None,
     return_thinking: bool = False,
+    retry_degenerate_response: bool = False,
 ) -> Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], str]:
     last_err: Exception | None = None
     resolved_stream = _env_flag("QWEN_STREAM", True) if stream is None else stream
@@ -254,6 +256,26 @@ def call_qwen_messages(
                 response_text = _extract_text_content(getattr(message, "content", None))
                 reasoning_text = _extract_message_reasoning(message).strip()
                 token_usage = _extract_usage(completion)
+
+            degenerate_reason = (
+                degenerate_response_reason(response_text, token_usage, max_tokens=max_tokens)
+                if retry_degenerate_response
+                else None
+            )
+            if degenerate_reason and attempt < max_retries:
+                print(
+                    f"[warn] Qwen API attempt {attempt}/{max_retries} returned a degenerate "
+                    f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
+                    flush=True,
+                )
+                time.sleep(retry_delay_s)
+                continue
+            if degenerate_reason:
+                print(
+                    f"[warn] Qwen API exhausted {max_retries} attempts after a degenerate "
+                    f"perception response: {degenerate_reason}. Keeping the final response.",
+                    flush=True,
+                )
 
             if return_thinking:
                 return response_text, token_usage, reasoning_text

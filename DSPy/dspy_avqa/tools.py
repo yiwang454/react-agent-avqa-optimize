@@ -262,6 +262,7 @@ def call_qwen_perception(
         repetition_penalty=_env_optional_float_prefixed(env_prefix, "REPETITION_PENALTY"),
         enable_thinking=_env_optional_bool_prefixed(env_prefix, "ENABLE_THINKING"),
         return_thinking=True,
+        retry_degenerate_response=True,
     )
     _set_last_perception_metadata(
         backend="qwen",
@@ -383,6 +384,8 @@ def call_gemini_perception(
             top_p=float(_gemini_env_value(env_prefix, "TOP_P", "0.95")),
             top_k=_dspy_gemini_top_k(env_prefix),
             max_tokens=int(_gemini_env_value(env_prefix, "MAX_TOKENS", "1024")),
+            retry_delay_s=float(_gemini_env_value(env_prefix, "RETRY_DELAY_S", "5")),
+            retry_degenerate_response=True,
         )
         api_metadata: dict[str, Any] = {
             "api_backend": "dspy",
@@ -418,6 +421,7 @@ def call_gemini_perception(
             top_p=float(_gemini_env_value(env_prefix, "TOP_P", "0.95")),
             top_k=int(_gemini_env_value(env_prefix, "TOP_K", "20")),
             max_tokens=int(_gemini_env_value(env_prefix, "MAX_TOKENS", "1024")),
+            retry_degenerate_response=True,
         )
         api_metadata = {
             "api_backend": "legacy",

@@ -105,8 +105,10 @@ setting and lets the OpenAI-compatible SDK use its default endpoint.
 PLANNER_PROVIDER=elm_gpt
 PLANNER_MODEL=gpt-5-mini
 PLANNER_API_KEY=...
+PLANNER_REASONING_EFFORT=medium
+PLANNER_SEED=7
 PLANNER_TEMPERATURE=0.0
-GEPA_REFLECTION_TEMPERATURE=0.7
+GEPA_REFLECTION_TEMPERATURE=1.0
 ```
 
 `DEEPSEEK_API_KEY` remains a compatibility alias for `PLANNER_API_KEY` (the
@@ -114,7 +116,11 @@ existing precedence is `DEEPSEEK_API_KEY`, `DEEPSEEK_TOKEN`, then
 `PLANNER_API_KEY`). Do not set or depend on `DEEPSEEK_BASE_URL`,
 `DEEPSEEK_API_BASE`, or `PLANNER_API_BASE` in this mode. Planner rollout uses
 `PLANNER_TEMPERATURE`; GEPA copies the same LM and only overrides its
-temperature with `GEPA_REFLECTION_TEMPERATURE`.
+temperature with `GEPA_REFLECTION_TEMPERATURE`. In the currently pinned DSPy
+version, dash-named GPT-5 variants such as `gpt-5-mini` accept only `0.0` or
+`1.0` as an explicit temperature and require `PLANNER_OUTPUT_SEQ_LEN >= 16000`;
+`PLANNER_REASONING_EFFORT` and `PLANNER_SEED` are forwarded only in `elm_gpt`
+mode.
 
 ## Gemini legacy / DSPy Vertex 后端
 

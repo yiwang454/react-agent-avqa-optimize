@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from .response_quality import degenerate_response_reason
 
 API_KEY = os.getenv("GEMINI_API_KEY", "")
 BASE_URL = os.getenv("GEMINI_BASE_URL", "https://api.apiplus.org")
@@ -241,6 +242,7 @@ def call_gemini_messages(
     top_p: float = 0.95,
     top_k: int = 20,
     max_tokens: int = 1024,
+    retry_degenerate_response: bool = False,
 ) -> Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], str]:
     resolved_model = model or os.getenv("GEMINI_MODEL", MODEL)
     resolved_api_key = api_key or os.getenv("GEMINI_API_KEY", API_KEY)
@@ -280,6 +282,25 @@ def call_gemini_messages(
             resp_json = resp.json()
             response_text, thinking_text = _response_text_parts(resp_json)
             token_usage = _usage(resp_json)
+            degenerate_reason = (
+                degenerate_response_reason(response_text, token_usage, max_tokens=max_tokens)
+                if retry_degenerate_response
+                else None
+            )
+            if degenerate_reason and attempt < max_retries:
+                print(
+                    f"[warn] Gemini API attempt {attempt}/{max_retries} returned a degenerate "
+                    f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
+                    flush=True,
+                )
+                time.sleep(retry_delay_s)
+                continue
+            if degenerate_reason:
+                print(
+                    f"[warn] Gemini API exhausted {max_retries} attempts after a degenerate "
+                    f"perception response: {degenerate_reason}. Keeping the final response.",
+                    flush=True,
+                )
             if return_thinking:
                 return response_text, token_usage, thinking_text
             return response_text, token_usage

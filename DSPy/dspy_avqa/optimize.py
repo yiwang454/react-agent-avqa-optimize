@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import json
 import logging
 import os
@@ -32,7 +33,133 @@ from .signatures import apply_prompt_config_to_signatures
 
 logger = logging.getLogger(__name__)
 
+GEPA_OPTIMIZER_LOG_FILENAME = "gepa_optimizer.log"
+GEPA_REFLECTIVE_DATASET_DIRNAME = "reflective_datasets"
+GEPA_REFLECTIVE_DATASET_STATE_FILENAME = "capture_state.json"
+DEFAULT_GEPA_REFLECTIVE_DATASET_SAVE_INTERVAL = 50
+
 GEPA_REFLECTION_TEMPERATURE_ENV = "GEPA_REFLECTION_TEMPERATURE"
+GEPA_REFLECTION_MODEL_ENV = "GEPA_REFLECTION_MODEL"
+GEPA_REFLECTION_REASONING_EFFORT_ENV = "GEPA_REFLECTION_REASONING_EFFORT"
+
+
+def _log_gepa_stage_exceptions(stage: str):
+    """Log a traceback before GEPA converts a reflection failure into no proposal."""
+    def decorator(method: Any) -> Any:
+        @functools.wraps(method)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return method(*args, **kwargs)
+            except Exception:
+                logger.exception("GEPA %s failed", stage)
+                raise
+
+        return wrapped
+
+    return decorator
+
+
+def _start_gepa_file_logging(log_dir: str | None) -> tuple[logging.FileHandler | None, int]:
+    """Route this module and GEPA's LoggerAdapter messages to the run directory."""
+    previous_level = logger.level
+    if log_dir is None:
+        return None, previous_level
+
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(
+        log_path / GEPA_OPTIMIZER_LOG_FILENAME,
+        mode="a",
+        encoding="utf-8",
+    )
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.info("GEPA optimizer logging started")
+    return handler, previous_level
+
+
+def _stop_gepa_file_logging(handler: logging.FileHandler | None, previous_level: int) -> None:
+    if handler is None:
+        return
+    logger.info("GEPA optimizer logging finished")
+    handler.flush()
+    logger.removeHandler(handler)
+    handler.close()
+    logger.setLevel(previous_level)
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as f:
+        json.dump(_json_safe(payload), f, ensure_ascii=False, indent=2, default=str)
+        f.write("\n")
+    os.replace(temporary_path, path)
+
+
+class ReflectiveDatasetSnapshotCallback:
+    """Persist a sparse, resume-aware sample of GEPA reflective datasets."""
+
+    def __init__(
+        self,
+        log_dir: str | Path,
+        save_interval: int = DEFAULT_GEPA_REFLECTIVE_DATASET_SAVE_INTERVAL,
+    ):
+        if save_interval < 0:
+            raise ValueError("reflective_dataset_save_interval must be >= 0")
+        self.save_interval = save_interval
+        self.output_dir = Path(log_dir) / GEPA_REFLECTIVE_DATASET_DIRNAME
+        self.state_path = self.output_dir / GEPA_REFLECTIVE_DATASET_STATE_FILENAME
+        self.datasets_seen = 0
+        if self.save_interval > 0:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.datasets_seen = self._load_datasets_seen()
+
+    def _load_datasets_seen(self) -> int:
+        if not self.state_path.exists():
+            return 0
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            datasets_seen = int(payload.get("datasets_seen", 0))
+            if datasets_seen < 0:
+                raise ValueError("datasets_seen must be >= 0")
+            return datasets_seen
+        except Exception:
+            logger.exception("Failed to load reflective dataset capture state: %s", self.state_path)
+            return 0
+
+    def _should_save(self, dataset_index: int) -> bool:
+        return dataset_index == 1 or dataset_index % self.save_interval == 0
+
+    def on_reflective_dataset_built(self, event: Any) -> None:
+        if self.save_interval == 0:
+            return
+        try:
+            dataset_index = self.datasets_seen + 1
+            iteration = int(event["iteration"])
+            candidate_idx = int(event["candidate_idx"])
+            if self._should_save(dataset_index):
+                snapshot_path = self.output_dir / (
+                    f"reflective_dataset_{dataset_index:06d}_"
+                    f"iteration_{iteration:06d}_candidate_{candidate_idx:06d}.json"
+                )
+                _write_json_atomic(snapshot_path, {
+                    "reflective_dataset_index": dataset_index,
+                    "gepa_iteration": iteration,
+                    "candidate_index": candidate_idx,
+                    "components": event.get("components", []),
+                    "dataset": event.get("dataset", {}),
+                })
+                logger.info("Saved GEPA reflective dataset snapshot: %s", snapshot_path)
+
+            self.datasets_seen = dataset_index
+            _write_json_atomic(self.state_path, {"datasets_seen": self.datasets_seen})
+        except Exception:
+            logger.exception("Failed to persist GEPA reflective dataset snapshot")
 
 
 def _env_flag_value(name: str, default: str = "false") -> bool:
@@ -44,18 +171,56 @@ def _env_bool(value: Any) -> str:
     return "true" if bool(value) else "false"
 
 
-def build_gepa_reflection_lm(planner_lm: Any) -> Any:
-    """Return a planner LM copy with an optional GEPA-only temperature."""
-    raw_temperature = os.environ.get(GEPA_REFLECTION_TEMPERATURE_ENV)
-    if raw_temperature is None or not raw_temperature.strip():
-        return planner_lm
-    try:
-        temperature = float(raw_temperature)
-    except ValueError as exc:
+def _optional_env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip() or value.strip().upper() == "EMPTY":
+        return None
+    return value.strip()
+
+
+def _normalize_openai_model_name(model: str) -> str:
+    return model if "/" in model else f"openai/{model}"
+
+
+def _validate_reasoning_effort(value: str, *, env_name: str) -> str:
+    effort = value.lower()
+    valid_efforts = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    if effort not in valid_efforts:
         raise ValueError(
-            f"{GEPA_REFLECTION_TEMPERATURE_ENV} must be a float, got {raw_temperature!r}"
-        ) from exc
-    return planner_lm.copy(temperature=temperature)
+            f"{env_name}={value!r} is invalid; expected one of {sorted(valid_efforts)}"
+        )
+    return effort
+
+
+def build_gepa_reflection_lm(planner_lm: Any) -> Any:
+    """Return a GEPA reflection LM with optional model, effort, and temperature overrides."""
+    overrides: dict[str, Any] = {}
+    raw_model = _optional_env_value(GEPA_REFLECTION_MODEL_ENV)
+    raw_effort = _optional_env_value(GEPA_REFLECTION_REASONING_EFFORT_ENV)
+    raw_temperature = os.environ.get(GEPA_REFLECTION_TEMPERATURE_ENV)
+    if raw_model is not None:
+        overrides["model"] = _normalize_openai_model_name(raw_model)
+    if raw_effort is not None:
+        overrides["reasoning_effort"] = _validate_reasoning_effort(
+            raw_effort,
+            env_name=GEPA_REFLECTION_REASONING_EFFORT_ENV,
+        )
+
+    if raw_temperature is not None and raw_temperature.strip():
+        try:
+            overrides["temperature"] = float(raw_temperature)
+        except ValueError as exc:
+            raise ValueError(
+                f"{GEPA_REFLECTION_TEMPERATURE_ENV} must be a float, got {raw_temperature!r}"
+            ) from exc
+    elif overrides:
+        # A distinct reflection LM should omit temperature unless explicitly set,
+        # rather than inheriting the planner's sampling temperature.
+        overrides["temperature"] = None
+
+    if not overrides:
+        return planner_lm
+    return planner_lm.copy(**overrides)
 
 
 def avqa_metric(example: dspy.Example, pred: dspy.Prediction, trace: Any = None) -> float:
@@ -203,6 +368,16 @@ def _none_if_unset(value: Any) -> Any:
     return value
 
 
+def _nonnegative_int(value: Any, *, name: str) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+    if result < 0:
+        raise ValueError(f"{name} must be >= 0, got {result}")
+    return result
+
+
 def _resolve_miprov2_config(args: argparse.Namespace) -> dict[str, Any]:
     config = _load_optimizer_config(args.miprov2_config)
     auto = _none_if_unset(_config_value(config, "auto", args.miprov2_auto))
@@ -244,6 +419,14 @@ def _resolve_gepa_config(args: argparse.Namespace) -> dict[str, Any]:
         "num_threads": _none_if_unset(_config_value(config, "num_threads", args.gepa_num_threads)),
         "seed": _none_if_unset(_config_value(config, "seed", args.gepa_seed)),
         "log_dir": _none_if_unset(_config_value(config, "log_dir", args.gepa_log_dir)),
+        "reflective_dataset_save_interval": _nonnegative_int(
+            _config_value(
+                config,
+                "reflective_dataset_save_interval",
+                args.gepa_reflective_dataset_save_interval,
+            ),
+            name="reflective_dataset_save_interval",
+        ),
         "track_stats": _config_value(config, "track_stats", args.gepa_track_stats),
         "track_best_outputs": _config_value(config, "track_best_outputs", args.gepa_track_best_outputs),
     }
@@ -443,6 +626,7 @@ class PromptTargetGEPAAdapter:
         scores = [score["score"] if hasattr(score, "score") else score for score in scores]
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=None)
 
+    @_log_gepa_stage_exceptions("reflective dataset construction")
     def make_reflective_dataset(self, candidate: dict[str, str], eval_batch: Any, components_to_update: list[str]) -> dict[str, list[dict[str, Any]]]:
         """把 trajectories 转成 GEPA reflection dataset"""
         items: list[dict[str, Any]] = []
@@ -480,6 +664,7 @@ class PromptTargetGEPAAdapter:
             raise Exception(f"No valid reflective examples found for {self.component_name}")
         return {self.component_name: items}
 
+    @_log_gepa_stage_exceptions("instruction proposal")
     def propose_new_texts(self, candidate: dict[str, str], reflective_dataset: dict[str, list[dict[str, Any]]], components_to_update: list[str]) -> dict[str, str]:
         from dspy.teleprompt.gepa.gepa_utils import InstructionProposalSignature
 
@@ -514,6 +699,7 @@ def optimize_prompt_target_with_gepa(
     num_threads: int | None = None,
     seed: int | None = 0,
     log_dir: str | None = None,
+    reflective_dataset_save_interval: int = DEFAULT_GEPA_REFLECTIVE_DATASET_SAVE_INTERVAL,
     track_stats: bool = False,
     track_best_outputs: bool = False,
 ) -> dspy.Module:
@@ -562,27 +748,48 @@ def optimize_prompt_target_with_gepa(
         reflection_minibatch_size=reflection_minibatch_size,
     )
     seed_candidate = {adapter.component_name: program._candidate_text()}
-    result = optimize(
-        seed_candidate=seed_candidate,
-        trainset=trainset,
-        valset=valset,
-        adapter=adapter,
-        reflection_lm=(lambda x: adapter.stripped_lm_call(x)[0]),
-        candidate_selection_strategy=candidate_selection_strategy,
-        skip_perfect_score=skip_perfect_score,
-        reflection_minibatch_size=reflection_minibatch_size,
-        module_selector="round_robin",
-        perfect_score=teleprompter.perfect_score,
-        use_merge=use_merge,
-        max_merge_invocations=max_merge_invocations,
-        max_metric_calls=teleprompter.max_metric_calls,
-        logger=LoggerAdapter(logger),
-        run_dir=log_dir,
-        track_best_outputs=track_best_outputs,
-        display_progress_bar=True,
-        raise_on_exception=True,
-        seed=seed,
+    reflective_dataset_save_interval = _nonnegative_int(
+        reflective_dataset_save_interval,
+        name="reflective_dataset_save_interval",
     )
+    file_handler, previous_logger_level = _start_gepa_file_logging(log_dir)
+    try:
+        callbacks = None
+        if log_dir is not None and reflective_dataset_save_interval > 0:
+            callbacks = [
+                ReflectiveDatasetSnapshotCallback(
+                    log_dir,
+                    save_interval=reflective_dataset_save_interval,
+                )
+            ]
+        elif log_dir is None and reflective_dataset_save_interval > 0:
+            logger.warning(
+                "GEPA reflective dataset snapshots are disabled because log_dir is not set"
+            )
+        result = optimize(
+            seed_candidate=seed_candidate,
+            trainset=trainset,
+            valset=valset,
+            adapter=adapter,
+            reflection_lm=(lambda x: adapter.stripped_lm_call(x)[0]),
+            candidate_selection_strategy=candidate_selection_strategy,
+            skip_perfect_score=skip_perfect_score,
+            reflection_minibatch_size=reflection_minibatch_size,
+            module_selector="round_robin",
+            perfect_score=teleprompter.perfect_score,
+            use_merge=use_merge,
+            max_merge_invocations=max_merge_invocations,
+            max_metric_calls=teleprompter.max_metric_calls,
+            logger=LoggerAdapter(logger),
+            run_dir=log_dir,
+            callbacks=callbacks,
+            track_best_outputs=track_best_outputs,
+            display_progress_bar=True,
+            raise_on_exception=True,
+            seed=seed,
+        )
+    finally:
+        _stop_gepa_file_logging(file_handler, previous_logger_level)
     new_prog = adapter.build_program(result.best_candidate)
     rows: list[dict[str, Any]] = []
     for idx, candidate in enumerate(result.candidates):
@@ -919,6 +1126,12 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--gepa-num-threads", type=int, default=None)
     parser.add_argument("--gepa-seed", type=int, default=0)
     parser.add_argument("--gepa-log-dir", type=str, default=None)
+    parser.add_argument(
+        "--gepa-reflective-dataset-save-interval",
+        type=int,
+        default=DEFAULT_GEPA_REFLECTIVE_DATASET_SAVE_INTERVAL,
+        help="Save the first GEPA reflective dataset and then every Nth one; 0 disables snapshots.",
+    )
     parser.add_argument("--gepa-track-stats", action="store_true")
     parser.add_argument("--gepa-track-best-outputs", action="store_true")
     return parser.parse_args()
@@ -934,13 +1147,27 @@ def _save_program(program: dspy.Module, output_program: Path) -> None:
 
 def _json_safe(value: Any) -> Any:
     """Convert metadata values into JSON-serializable objects."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
-    return value
+    for converter_name in ("model_dump", "to_dict"):
+        converter = getattr(value, converter_name, None)
+        if callable(converter):
+            try:
+                return _json_safe(converter())
+            except Exception:
+                logger.debug(
+                    "Failed to serialize %s via %s",
+                    type(value).__name__,
+                    converter_name,
+                    exc_info=True,
+                )
+    return str(value)
 
 
 def _field_summary(field: Any) -> dict[str, Any]:
@@ -1681,6 +1908,7 @@ def run_optimization() -> None:
             f"num_threads={gepa_config['num_threads']}, "
             f"seed={gepa_config['seed']}, "
             f"log_dir={gepa_config['log_dir']}, "
+            f"reflective_dataset_save_interval={gepa_config['reflective_dataset_save_interval']}, "
             f"track_stats={gepa_config['track_stats']}, "
             f"track_best_outputs={gepa_config['track_best_outputs']}"
         )

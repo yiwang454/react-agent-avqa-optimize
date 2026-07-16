@@ -71,6 +71,21 @@ def resolve_planner_model(provider: str) -> str:
     return pick_env("DEEPSEEK_MODEL", "PLANNER_MODEL", default="deepseek-v4-pro")
 
 
+def pick_optional_reasoning_effort_env(*keys: str) -> str | None:
+    """Return a normalized optional GPT reasoning effort value from the environment."""
+    value = pick_env(*keys, default="")
+    if not value:
+        return None
+    effort = value.strip().lower()
+    valid_efforts = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    if effort not in valid_efforts:
+        raise ValueError(
+            f"PLANNER_REASONING_EFFORT={value!r} is invalid; "
+            f"expected one of {sorted(valid_efforts)}"
+        )
+    return effort
+
+
 def env_flag(name: str, default: str = "false") -> bool:
     value = os.environ.get(name, default).strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -209,6 +224,12 @@ class AVQARuntimeContext:
     planner_deepseek_random_seed: int | None = field(
         default_factory=lambda: pick_optional_int_env("DEEPSEEK_SEED")
     )
+    planner_seed: int | None = field(
+        default_factory=lambda: pick_optional_int_env("PLANNER_SEED")
+    )
+    planner_reasoning_effort: str | None = field(
+        default_factory=lambda: pick_optional_reasoning_effort_env("PLANNER_REASONING_EFFORT")
+    )
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
     caption_placement: str = field(default_factory=normalize_caption_placement)
@@ -334,7 +355,10 @@ class SerialNOpenAICompatibleLM(dspy.LM):
                 "temperature": kwargs.get("temperature", self.kwargs.get("temperature")),
                 "top_p": kwargs.get("top_p", self.kwargs.get("top_p")),
                 "max_tokens": kwargs.get("max_tokens", self.kwargs.get("max_tokens")),
-                "deepseek_random_seed": kwargs.get("seed", self.kwargs.get("seed")),
+                "seed": kwargs.get("seed", self.kwargs.get("seed")),
+                "reasoning_effort": kwargs.get(
+                    "reasoning_effort", self.kwargs.get("reasoning_effort")
+                ),
                 "n": kwargs.get("n", self.kwargs.get("n", 1)),
                 "extra_body": kwargs.get("extra_body", self.kwargs.get("extra_body")),
             },
@@ -407,6 +431,12 @@ def _env_is_set(key: str) -> bool:
 
 def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
     """Configure DSPy's native LiteLLM planner backend."""
+    import litellm
+
+    # GPT reasoning models reject sampling parameters inherited by DSPy/provider
+    # configuration. Let LiteLLM remove only parameters unsupported by the
+    # selected model instead of turning an optimizer proposal into a silent miss.
+    litellm.drop_params = True
     api_key = None if context.planner_api_key.upper() == "EMPTY" else context.planner_api_key
     lm_kwargs: dict[str, Any] = {
         "model_type": "chat",
@@ -422,10 +452,12 @@ def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
         lm_kwargs["temperature"] = context.planner_temperature
     if _env_is_set("PLANNER_TOP_P"):
         lm_kwargs["top_p"] = context.planner_top_p
-    if (
-        context.planner_provider == PLANNER_PROVIDER_DEEPSEEK
-        and context.planner_deepseek_random_seed is not None
-    ):
+    if context.planner_provider == PLANNER_PROVIDER_ELM_GPT:
+        if context.planner_seed is not None:
+            lm_kwargs["seed"] = context.planner_seed
+        if context.planner_reasoning_effort is not None:
+            lm_kwargs["reasoning_effort"] = context.planner_reasoning_effort
+    elif context.planner_deepseek_random_seed is not None:
         lm_kwargs["seed"] = context.planner_deepseek_random_seed
     if context.planner_provider == PLANNER_PROVIDER_DEEPSEEK:
         extra_body = _planner_thinking_extra_body(context.planner_thinking_mode)
