@@ -70,7 +70,9 @@ def _load_runner():
 
 
 def test_gemini_api_new_maps_paths_and_rejects_outside_root(tmp_path):
-    module = _load_module("gemini_api_new_test", PACKAGE_DIR / "gemini_api_new.py")
+    _install_package_stubs()
+    _load_module("dspy_avqa.response_quality", PACKAGE_DIR / "response_quality.py")
+    module = _load_module("dspy_avqa.gemini_api_new_test", PACKAGE_DIR / "gemini_api_new.py")
     root = tmp_path / "dataset"
     media = root / "Videos" / "sample.mp4"
     media.parent.mkdir(parents=True)

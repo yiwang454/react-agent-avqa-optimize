@@ -34,6 +34,10 @@ def _install_context_import_stubs():
     dspy.configure = configure
     sys.modules["dspy"] = dspy
 
+    litellm = types.ModuleType("litellm")
+    litellm.drop_params = False
+    sys.modules["litellm"] = litellm
+
     deepseek_api = types.ModuleType("dspy_avqa.deepseek_api")
 
     class DeepSeekPlannerClient:
@@ -89,6 +93,8 @@ def test_elm_gpt_uses_planner_model_and_omits_api_base(monkeypatch):
     monkeypatch.setenv("PLANNER_PROVIDER", "elm_gpt")
     monkeypatch.setenv("PLANNER_MODEL", "gpt-5-mini")
     monkeypatch.setenv("PLANNER_API_KEY", "elm-key")
+    monkeypatch.setenv("PLANNER_REASONING_EFFORT", "high")
+    monkeypatch.setenv("PLANNER_SEED", "123")
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("DEEPSEEK_API_BASE", "https://unused.example/v1")
@@ -103,7 +109,10 @@ def test_elm_gpt_uses_planner_model_and_omits_api_base(monkeypatch):
     assert runtime.planner_model == "gpt-5-mini"
     assert lm.model == "openai/gpt-5-mini"
     assert lm.kwargs["api_key"] == "elm-key"
+    assert lm.kwargs["reasoning_effort"] == "high"
+    assert lm.kwargs["seed"] == 123
     assert "api_base" not in lm.kwargs
+    assert sys.modules["litellm"].drop_params is True
     assert state["configured_lm"] is lm
 
 

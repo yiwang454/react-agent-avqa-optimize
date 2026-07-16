@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -110,3 +111,115 @@ def test_gepa_reflection_returns_planner_lm_when_no_temperature_is_set(monkeypat
     monkeypatch.delenv("GEPA_REFLECTION_TEMPERATURE", raising=False)
 
     assert optimize.build_gepa_reflection_lm(planner_lm) is planner_lm
+
+
+def test_gepa_reflection_can_override_model_and_effort_while_omitting_temperature(monkeypatch):
+    optimize = _load_optimize_module()
+    planner_lm = _PlannerLM(
+        "openai/gpt-5.4",
+        {"api_key": "elm-key", "seed": 1234, "temperature": 0.0, "reasoning_effort": "none"},
+    )
+    monkeypatch.setenv("GEPA_REFLECTION_MODEL", "gpt-5.4")
+    monkeypatch.setenv("GEPA_REFLECTION_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("GEPA_REFLECTION_TEMPERATURE", raising=False)
+
+    reflection_lm = optimize.build_gepa_reflection_lm(planner_lm)
+
+    assert reflection_lm.model == "openai/gpt-5.4"
+    assert reflection_lm.kwargs == {
+        "api_key": "elm-key",
+        "seed": 1234,
+        "reasoning_effort": "medium",
+    }
+
+
+class _ModelDumpWrapper:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def model_dump(self):
+        return self.payload
+
+
+def test_json_safe_serializes_nested_model_dump_wrapper():
+    optimize = _load_optimize_module()
+
+    normalized = optimize._json_safe({"usage": [_ModelDumpWrapper({"reasoning_tokens": 17})]})
+
+    assert json.loads(json.dumps(normalized)) == {"usage": [{"reasoning_tokens": 17}]}
+
+
+def test_make_reflective_dataset_serializes_wrappers_in_turn_trace():
+    optimize = _load_optimize_module()
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    adapter.component_name = "prompt_component"
+    adapter.target_path = "planner.workflow_prompt"
+    adapter.failure_score = 0.0
+    adapter.metric_fn = lambda *args: types.SimpleNamespace(feedback="feedback")
+    example = types.SimpleNamespace(question="question", options_json='["A", "B"]', video_id="video")
+    prediction = types.SimpleNamespace(
+        answer="A",
+        reasoning_summary="reasoning",
+        turn_trace=[{"usage": _ModelDumpWrapper({"reasoning_tokens": 17})}],
+    )
+    eval_batch = types.SimpleNamespace(trajectories=[{
+        "example": example,
+        "prediction": prediction,
+        "score": 1.0,
+        "trace": None,
+    }])
+
+    dataset = adapter.make_reflective_dataset(
+        {"prompt_component": "current prompt"},
+        eval_batch,
+        ["prompt_component"],
+    )
+
+    turn_trace = dataset["prompt_component"][0]["Generated Outputs"]["turn_trace"]
+    assert json.loads(turn_trace) == [{"usage": {"reasoning_tokens": 17}}]
+
+
+def _reflective_dataset_event(iteration):
+    return {
+        "iteration": iteration,
+        "candidate_idx": 0,
+        "components": ["prompt_component"],
+        "dataset": {"prompt_component": [{"Feedback": f"feedback-{iteration}"}]},
+    }
+
+
+def test_reflective_dataset_snapshots_follow_cadence_and_resume(tmp_path):
+    optimize = _load_optimize_module()
+    callback = optimize.ReflectiveDatasetSnapshotCallback(tmp_path, save_interval=50)
+    for iteration in range(1, 50):
+        callback.on_reflective_dataset_built(_reflective_dataset_event(iteration))
+
+    resumed_callback = optimize.ReflectiveDatasetSnapshotCallback(tmp_path, save_interval=50)
+    assert resumed_callback.datasets_seen == 49
+    for iteration in range(50, 101):
+        resumed_callback.on_reflective_dataset_built(_reflective_dataset_event(iteration))
+
+    snapshot_dir = tmp_path / "reflective_datasets"
+    snapshots = sorted(snapshot_dir.glob("reflective_dataset_*.json"))
+    assert [json.loads(path.read_text())["reflective_dataset_index"] for path in snapshots] == [1, 50, 100]
+    assert json.loads((snapshot_dir / "capture_state.json").read_text()) == {"datasets_seen": 100}
+
+
+def test_reflective_dataset_snapshots_can_be_disabled(tmp_path):
+    optimize = _load_optimize_module()
+    callback = optimize.ReflectiveDatasetSnapshotCallback(tmp_path, save_interval=0)
+
+    callback.on_reflective_dataset_built(_reflective_dataset_event(1))
+
+    assert not (tmp_path / "reflective_datasets").exists()
+
+
+def test_reflective_dataset_snapshot_interval_must_be_nonnegative(tmp_path):
+    optimize = _load_optimize_module()
+
+    try:
+        optimize.ReflectiveDatasetSnapshotCallback(tmp_path, save_interval=-1)
+    except ValueError as exc:
+        assert "must be >= 0" in str(exc)
+    else:
+        raise AssertionError("negative save interval should fail")
