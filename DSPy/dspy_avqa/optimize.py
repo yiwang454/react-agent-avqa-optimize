@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import functools
 import json
 import logging
 import os
 import random
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +26,10 @@ from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_c
 from .runner import (
     add_gemini_backend_args,
     configure_gemini_api_backend,
+    cut_id,
     extract_error_info,
     gemini_backend_log_lines,
+    load_cached_row_from_question_json,
     load_captioner_config_yaml,
     load_perception_config_yaml,
 )
@@ -1110,6 +1114,14 @@ def parse_optimize_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimize DSPy AVQA ReAct with DSPy optimizers.")
     parser.add_argument("--algorithm", choices=("copro", "simba", "miprov2", "gepa"), default="copro")
     parser.add_argument(
+        "--inference-only",
+        action="store_true",
+        help=(
+            "Skip optimization, load --output-program, and run/resume final test inference. "
+            "Requires --final-eval-output-jsonl."
+        ),
+    )
+    parser.add_argument(
         "--optimize-target",
         action="append",
         dest="optimize_targets",
@@ -1163,7 +1175,10 @@ def parse_optimize_args() -> argparse.Namespace:
         "--final-eval-output-dir",
         type=Path,
         default=None,
-        help="Optional directory for per-sample JSON files from --final-eval-output-jsonl.",
+        help=(
+            "Optional directory for resumable per-sample JSON files from "
+            "--final-eval-output-jsonl. Defaults to the --output-program directory."
+        ),
     )
     parser.add_argument("--max-turns", type=int, default=int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     parser.add_argument("--train-limit", type=int, default=None)
@@ -1278,6 +1293,10 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--gepa-track-best-outputs", action="store_true")
     args = parser.parse_args()
     args.optimize_targets = tuple(args.optimize_targets or ("planner.workflow_prompt",))
+    if args.inference_only and args.final_eval_output_jsonl is None:
+        parser.error("--inference-only requires --final-eval-output-jsonl")
+    if args.final_eval_output_jsonl is not None and args.final_eval_output_dir is None:
+        args.final_eval_output_dir = args.output_program.parent
     return args
 
 
@@ -1757,6 +1776,25 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         "valset_is_trainset": valset_is_trainset,
     }
 
+
+@contextmanager
+def _final_eval_directory_lock(output_dir: Path):
+    """Prevent concurrent final-eval writers from sharing one cache directory."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir / ".final_eval.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"Final test inference is already running in {output_dir}"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def write_batch_style_program_outputs(
     program: dspy.Module,
     cuts: list[dict[str, Any]],
@@ -1767,26 +1805,61 @@ def write_batch_style_program_outputs(
     max_turns: int,
     skip_bad_examples: bool = False,
 ) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
+    """Run final test inference, resuming from valid per-sample JSON files."""
+    cache_dir = output_dir or output_jsonl.parent
+    rows_by_sample_id: dict[str, dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
-    for idx, cut in enumerate(cuts):
-        try:
-            row = _run_program_on_cut(program, cut, audio_caption_dir, max_turns)
-        except Exception as exc:
-            if not skip_bad_examples:
-                raise
-            skipped.append({"example_index": idx, "cut_id": str(cut.get("id") or ""), "error": str(exc)})
-            continue
-        maybe_dump_question_data(output_dir, row)
-        rows.append(row)
-    write_results_jsonl(rows, output_jsonl)
+    cached_samples = 0
+    new_samples = 0
+
+    with _final_eval_directory_lock(cache_dir):
+        remaining: list[tuple[int, dict[str, Any]]] = []
+        for idx, cut in enumerate(cuts):
+            cached_row = load_cached_row_from_question_json(cache_dir, cut)
+            if cached_row is None:
+                remaining.append((idx, cut))
+                continue
+            rows_by_sample_id[cut_id(cut)] = cached_row
+            cached_samples += 1
+
+        print(f"Cached final-test samples: {cached_samples}")
+        print(f"Remaining final-test samples: {len(remaining)}")
+
+        for idx, cut in remaining:
+            try:
+                row = _run_program_on_cut(program, cut, audio_caption_dir, max_turns)
+            except Exception as exc:
+                if not skip_bad_examples:
+                    raise
+                skipped.append({
+                    "example_index": idx,
+                    "cut_id": str(cut.get("id") or ""),
+                    "error": str(exc),
+                })
+                continue
+            maybe_dump_question_data(cache_dir, row)
+            rows_by_sample_id[cut_id(cut)] = row
+            new_samples += 1
+
+        rows = [
+            rows_by_sample_id[cut_id(cut)]
+            for cut in cuts
+            if cut_id(cut) in rows_by_sample_id
+        ]
+        write_results_jsonl(rows, output_jsonl)
+
     print(f"Wrote {len(rows)} optimized-program rows to {output_jsonl}")
     return {
         "final_eval_output_jsonl": str(output_jsonl),
-        "final_eval_output_dir": str(output_dir) if output_dir else None,
+        "final_eval_output_dir": str(cache_dir),
+        "final_eval_total_samples": len(cuts),
+        "final_eval_cached_samples": cached_samples,
+        "final_eval_new_samples": new_samples,
         "final_eval_rows": len(rows),
         "final_eval_skipped_examples": skipped,
+        "final_eval_complete": len(rows) + len(skipped) == len(cuts),
     }
+
 
 def _optimized_prompt_config(program: dspy.Module, target_paths: tuple[str, ...]) -> dict[str, Any]:
     config = copy.deepcopy(prompt_config())
@@ -1884,10 +1957,94 @@ def write_prompt_target_artifacts(
     }
 
 
+def _load_optimized_program(program: dspy.Module, output_program: Path) -> None:
+    """Load a completed optimizer output into an equivalent program instance."""
+    if not output_program.is_file():
+        raise RuntimeError(
+            f"Optimization is not complete: compiled program does not exist at {output_program}"
+        )
+    load_method = getattr(program, "load", None)
+    if load_method is None:
+        raise RuntimeError(f"{program.__class__.__name__} does not expose a load() method")
+    try:
+        load_method(str(output_program))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Optimization output at {output_program} could not be loaded; "
+            "the optimization may be incomplete or the file may be corrupt"
+        ) from exc
+
+
+def _update_inference_only_metadata(
+    metadata_path: Path | None,
+    *,
+    args: argparse.Namespace,
+    final_eval: dict[str, Any],
+    elapsed_seconds: float,
+) -> None:
+    if metadata_path is None:
+        return
+
+    payload: dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise RuntimeError(f"Cannot update unreadable metadata file {metadata_path}") from exc
+        if not isinstance(loaded, dict):
+            raise RuntimeError(f"Metadata file must contain a JSON object: {metadata_path}")
+        payload = loaded
+
+    payload.setdefault("algorithm", args.algorithm)
+    payload.setdefault("output_program", str(args.output_program))
+    payload["final_eval"] = final_eval
+    payload["inference_only_elapsed_seconds"] = elapsed_seconds
+    _write_json_atomic(metadata_path, payload)
+    print(f"Updated final-eval metadata in {metadata_path}")
+
+
+def _run_inference_only(
+    args: argparse.Namespace,
+    program: dspy.Module,
+    context: AVQARuntimeContext,
+    *,
+    started: float,
+) -> None:
+    _load_optimized_program(program, args.output_program)
+    cuts = read_jsonl(args.input_jsonl)
+    print(f"Inference-only mode: loaded optimized program from {args.output_program}")
+    print(f"Loaded final-test cuts: {len(cuts)}")
+    print(f"Final-test cache directory: {args.final_eval_output_dir}")
+    print(f"Planner model: {context.planner_model}")
+
+    final_eval = write_batch_style_program_outputs(
+        program,
+        cuts,
+        args.audio_caption_dir,
+        args.final_eval_output_jsonl,
+        output_dir=args.final_eval_output_dir,
+        max_turns=args.max_turns,
+        skip_bad_examples=args.skip_bad_examples,
+    )
+    elapsed = time.perf_counter() - started
+    _update_inference_only_metadata(
+        args.metadata_json,
+        args=args,
+        final_eval=final_eval,
+        elapsed_seconds=elapsed,
+    )
+    print(f"Inference-only elapsed time: {elapsed:.2f}s")
+
+
 def run_optimization() -> None:
     """Entrypoint for DSPy AVQA optimization."""
     args = parse_optimize_args()
     started = time.perf_counter()
+
+    if args.inference_only and not args.output_program.is_file():
+        raise RuntimeError(
+            f"Optimization is not complete: compiled program does not exist at {args.output_program}"
+        )
 
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
@@ -1899,6 +2056,22 @@ def run_optimization() -> None:
     validate_optimize_targets(args.optimize_targets)
     apply_prompt_config_to_signatures(apply_instructions=False)
 
+    allowed_tools = resolve_allowed_tools(args.allowed_tools)
+    context = AVQARuntimeContext(
+        max_turns=args.max_turns,
+        allowed_tools=allowed_tools,
+        caption_placement=args.caption_placement,
+    )
+    base_program = AVQADSPyReActProgram(context=context)
+    program: dspy.Module = PromptTargetProgram(
+        base_program,
+        args.optimize_targets,
+    )
+
+    if args.inference_only:
+        _run_inference_only(args, program, context, started=started)
+        return
+
     dataset_info = resolve_optimization_datasets(args)
     cuts = dataset_info["input_cuts"]
     selected = dataset_info["train_cuts"]
@@ -1907,19 +2080,8 @@ def run_optimization() -> None:
     skipped = dataset_info["skipped_train"]
     skipped_val = dataset_info["skipped_val"]
 
-    allowed_tools = resolve_allowed_tools(args.allowed_tools)
-    context = AVQARuntimeContext(
-        max_turns=args.max_turns,
-        allowed_tools=allowed_tools,
-        caption_placement=args.caption_placement,
-    )
-    base_program = AVQADSPyReActProgram(context=context)
     planner_lm = dspy.settings.lm
     gepa_reflection_lm = build_gepa_reflection_lm(planner_lm) if args.algorithm == "gepa" else planner_lm
-    program: dspy.Module = PromptTargetProgram(
-        base_program,
-        args.optimize_targets,
-    )
     initial_program_signatures = _program_signature_summary(program)
 
     if args.initial_program is not None:

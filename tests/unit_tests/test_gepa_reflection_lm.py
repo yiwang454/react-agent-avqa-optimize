@@ -56,9 +56,11 @@ def _load_optimize_module():
     for name in (
         "add_gemini_backend_args",
         "configure_gemini_api_backend",
+        "cut_id",
         "extract_error_info",
         "gemini_backend_log_lines",
         "load_captioner_config_yaml",
+        "load_cached_row_from_question_json",
         "load_perception_config_yaml",
     ):
         setattr(runner, name, lambda *args, **kwargs: None)
@@ -346,3 +348,220 @@ def test_reflective_dataset_snapshot_interval_must_be_nonnegative(tmp_path):
         assert "must be >= 0" in str(exc)
     else:
         raise AssertionError("negative save interval should fail")
+
+
+def _install_final_eval_test_io(optimize):
+    optimize.cut_id = lambda cut: str(cut.get("id") or "")
+
+    def load_cached(output_dir, cut):
+        sample_id = optimize.cut_id(cut)
+        path = output_dir / f"{sample_id}.json"
+        if not path.exists():
+            return None
+        try:
+            question_data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(question_data, dict) or not str(question_data.get("response") or "").strip():
+            return None
+        return {
+            "video_id": sample_id,
+            "metadata": {"video_id": sample_id},
+            "question_data": question_data,
+        }
+
+    def dump_sample(output_dir, row):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / f"{row['video_id']}.json").write_text(
+            json.dumps(row["question_data"]),
+            encoding="utf-8",
+        )
+
+    def write_rows(rows, output_jsonl):
+        output_jsonl.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
+    optimize.load_cached_row_from_question_json = load_cached
+    optimize.maybe_dump_question_data = dump_sample
+    optimize.write_results_jsonl = write_rows
+
+
+def _final_eval_row(sample_id):
+    return {
+        "video_id": sample_id,
+        "metadata": {"video_id": sample_id},
+        "question_data": {"response": f"answer-{sample_id}"},
+    }
+
+
+def test_final_eval_resumes_after_interruption_and_preserves_input_order(tmp_path):
+    optimize = _load_optimize_module()
+    _install_final_eval_test_io(optimize)
+    cuts = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    first_calls = []
+
+    def interrupted_run(program, cut, audio_caption_dir, max_turns):
+        sample_id = cut["id"]
+        first_calls.append(sample_id)
+        if sample_id == "c":
+            raise KeyboardInterrupt
+        return _final_eval_row(sample_id)
+
+    optimize._run_program_on_cut = interrupted_run
+    try:
+        optimize.write_batch_style_program_outputs(
+            object(), cuts, tmp_path, tmp_path / "output.jsonl", output_dir=tmp_path, max_turns=3
+        )
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("the simulated final eval should be interrupted")
+
+    assert first_calls == ["a", "b", "c"]
+    assert (tmp_path / "a.json").exists()
+    assert (tmp_path / "b.json").exists()
+    assert not (tmp_path / "c.json").exists()
+
+    resumed_calls = []
+
+    def resumed_run(program, cut, audio_caption_dir, max_turns):
+        resumed_calls.append(cut["id"])
+        return _final_eval_row(cut["id"])
+
+    optimize._run_program_on_cut = resumed_run
+    result = optimize.write_batch_style_program_outputs(
+        object(), cuts, tmp_path, tmp_path / "output.jsonl", output_dir=tmp_path, max_turns=3
+    )
+
+    assert resumed_calls == ["c"]
+    assert result["final_eval_cached_samples"] == 2
+    assert result["final_eval_new_samples"] == 1
+    assert result["final_eval_complete"] is True
+    output_rows = [json.loads(line) for line in (tmp_path / "output.jsonl").read_text().splitlines()]
+    assert [row["video_id"] for row in output_rows] == ["a", "b", "c"]
+
+
+def test_final_eval_regenerates_unreadable_or_empty_cache(tmp_path):
+    optimize = _load_optimize_module()
+    _install_final_eval_test_io(optimize)
+    (tmp_path / "a.json").write_text("{broken", encoding="utf-8")
+    (tmp_path / "b.json").write_text(json.dumps({"response": ""}), encoding="utf-8")
+    (tmp_path / "c.json").write_text(json.dumps({"response": "cached-c"}), encoding="utf-8")
+    calls = []
+    optimize._run_program_on_cut = lambda program, cut, audio_caption_dir, max_turns: (
+        calls.append(cut["id"]) or _final_eval_row(cut["id"])
+    )
+
+    result = optimize.write_batch_style_program_outputs(
+        object(),
+        [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+        tmp_path,
+        tmp_path / "output.jsonl",
+        output_dir=tmp_path,
+        max_turns=3,
+    )
+
+    assert calls == ["a", "b"]
+    assert result["final_eval_cached_samples"] == 1
+    assert result["final_eval_new_samples"] == 2
+
+
+def test_final_eval_lock_rejects_a_second_writer(tmp_path):
+    optimize = _load_optimize_module()
+
+    with optimize._final_eval_directory_lock(tmp_path):
+        try:
+            with optimize._final_eval_directory_lock(tmp_path):
+                raise AssertionError("second writer unexpectedly acquired the lock")
+        except RuntimeError as exc:
+            assert "already running" in str(exc)
+
+
+def test_load_optimized_program_rejects_missing_or_corrupt_output(tmp_path):
+    optimize = _load_optimize_module()
+
+    try:
+        optimize._load_optimized_program(object(), tmp_path / "missing.json")
+    except RuntimeError as exc:
+        assert "does not exist" in str(exc)
+    else:
+        raise AssertionError("missing compiled program should fail")
+
+    corrupt_path = tmp_path / "compiled.json"
+    corrupt_path.write_text("not a program", encoding="utf-8")
+
+    class BrokenProgram:
+        def load(self, path):
+            raise ValueError("corrupt")
+
+    try:
+        optimize._load_optimized_program(BrokenProgram(), corrupt_path)
+    except RuntimeError as exc:
+        assert "could not be loaded" in str(exc)
+    else:
+        raise AssertionError("corrupt compiled program should fail")
+
+
+def test_inference_only_skips_optimization_dataset_resolution(tmp_path):
+    optimize = _load_optimize_module()
+    output_program = tmp_path / "compiled.json"
+    output_program.write_text("placeholder", encoding="utf-8")
+    args = types.SimpleNamespace(
+        inference_only=True,
+        output_program=output_program,
+        perception_model="qwen",
+        signature_in_system_prompt=False,
+        caption_placement="conversation_state",
+        perception_config_yaml=None,
+        captioner_config_yaml=None,
+        prompt_yaml=None,
+        optimize_targets=("planner.workflow_prompt",),
+        allowed_tools="ask_perception",
+        max_turns=3,
+    )
+    optimize.parse_optimize_args = lambda: args
+    optimize.load_perception_config_yaml = lambda path: None
+    optimize.load_captioner_config_yaml = lambda path: None
+    optimize.configure_gemini_api_backend = lambda parsed_args: None
+    optimize.load_prompt_config = lambda path: None
+    optimize.validate_optimize_targets = lambda targets: None
+    optimize.apply_prompt_config_to_signatures = lambda **kwargs: None
+    optimize.resolve_allowed_tools = lambda tools: ("ask_perception",)
+    optimize.AVQARuntimeContext = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    optimize.AVQADSPyReActProgram = lambda context: object()
+    optimize.PromptTargetProgram = lambda base, targets: object()
+    optimize.resolve_optimization_datasets = lambda parsed_args: (_ for _ in ()).throw(
+        AssertionError("optimization datasets must not be resolved")
+    )
+    inference_calls = []
+    optimize._run_inference_only = lambda parsed_args, program, context, started: inference_calls.append(
+        (parsed_args, program, context)
+    )
+
+    optimize.run_optimization()
+
+    assert len(inference_calls) == 1
+
+
+def test_inference_only_updates_existing_metadata(tmp_path):
+    optimize = _load_optimize_module()
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text(json.dumps({"keep": "value"}), encoding="utf-8")
+    args = types.SimpleNamespace(algorithm="gepa", output_program=tmp_path / "compiled.json")
+    final_eval = {"final_eval_rows": 3, "final_eval_cached_samples": 2}
+
+    optimize._update_inference_only_metadata(
+        metadata_path,
+        args=args,
+        final_eval=final_eval,
+        elapsed_seconds=1.25,
+    )
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["keep"] == "value"
+    assert payload["algorithm"] == "gepa"
+    assert payload["output_program"] == str(args.output_program)
+    assert payload["final_eval"] == final_eval
+    assert payload["inference_only_elapsed_seconds"] == 1.25

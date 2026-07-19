@@ -140,6 +140,26 @@ python DSPy/avqa_dspy_impl.py ... \
 
 `--response-error-sensitive` 会仅对 Gemini 启用进程级熔断：空响应、`[ERROR]` 响应或最终 Gemini/LiteLLM 调用异常会立即停止当前运行，不再写成普通失败样本。默认关闭；可用 `--no-response-error-sensitive` 显式关闭。
 
+## Final test inference 断点续跑
+
+Optimization 结束后，可以在原命令后追加 `--inference-only`，直接加载
+`--output-program` 并运行或继续 final test，而不会重新执行 optimizer：
+
+```bash
+python DSPy/avqa_dspy_optimize.py \
+  <与原 optimization 相同的参数> \
+  --inference-only
+```
+
+该模式要求提供 `--final-eval-output-jsonl`。如果没有指定
+`--final-eval-output-dir`，默认使用 compiled program 所在目录。每个完成的样本会保存为
+`<sample_id>.json`；重新运行时会跳过其中包含非空 `response` 的样本，并在全部完成后按
+input JSONL 顺序重建汇总 JSONL。`[ERROR]` response 也视为已完成。一个 cache 目录只能对应
+一个 compiled program，不要在更换 program 后复用旧目录。
+
+`--inference-only` 会在开始前验证 compiled program 存在且能够加载。final test 使用目录锁，
+因此同一 output directory 不能被两个 inference 进程同时写入。
+
 ## Caveat:
 
 小 caveat：如果不是走 run_batch()，而是在别的 Python 代码里直接 new AVQARuntimeContext() / AVQADSPyReActProgram()，想用自定义 YAML，需要先调用 load_prompt_config(custom_path)，再创建 context/program；否则会用默认 v0。
