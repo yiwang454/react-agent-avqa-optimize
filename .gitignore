@@ -3,6 +3,7 @@ scripts/env_files
 scripts/logs/
 scripts/run_dspy_react_agent_daily_qwen_v2_dsthink.sh
 result_examples/
+scripts/analysis_results/
 old_scripts
 
 # smoke test / temporary tests for development

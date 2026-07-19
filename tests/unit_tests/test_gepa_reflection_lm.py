@@ -149,18 +149,63 @@ def test_json_safe_serializes_nested_model_dump_wrapper():
     assert json.loads(json.dumps(normalized)) == {"usage": [{"reasoning_tokens": 17}]}
 
 
-def test_make_reflective_dataset_serializes_wrappers_in_turn_trace():
+def test_make_reflective_dataset_keeps_only_reflection_relevant_trace_fields():
     optimize = _load_optimize_module()
+    full_reasoning = "reasoning " * 400
+    full_caption = "caption " * 400
+    full_planner_response = "planner response " * 200
+    full_planner_reasoning = "planner reasoning " * 200
+    full_observation = "observation " * 300
     adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
     adapter.component_name = "prompt_component"
     adapter.target_path = "planner.workflow_prompt"
     adapter.failure_score = 0.0
     adapter.metric_fn = lambda *args: types.SimpleNamespace(feedback="feedback")
-    example = types.SimpleNamespace(question="question", options_json='["A", "B"]', video_id="video")
+    example = types.SimpleNamespace(
+        question="question",
+        options_json='["A. first", "B. second"]',
+        answer="B",
+        video_id="video",
+        video_description=full_caption,
+    )
     prediction = types.SimpleNamespace(
         answer="A",
-        reasoning_summary="reasoning",
-        turn_trace=[{"usage": _ModelDumpWrapper({"reasoning_tokens": 17})}],
+        reasoning_summary=full_reasoning,
+        turn_trace=[
+            {
+                "turn_id": 1,
+                "planner_action": "tool",
+                "tool_name": "ask_perception",
+                "tool_args": {
+                    "video_path": "/private/video.mp4",
+                    "perceptual_question": "What sound is heard?",
+                },
+                "tool_observation": full_observation,
+                "planner_raw": "full raw action",
+                "planner_calls": {
+                    "action_decision": [{
+                        "messages": [{"role": "system", "content": "large system prompt"}],
+                        "response_text": full_planner_response,
+                        "reasoning_content": full_planner_reasoning,
+                        "usage": _ModelDumpWrapper({"reasoning_tokens": 17}),
+                    }],
+                },
+                "perception_system_prompt": "large perception prompt",
+                "perception_token_usage": _ModelDumpWrapper({"completion_tokens": 50}),
+                "planner_parse_error": None,
+            },
+            {
+                "turn_id": 2,
+                "planner_action": "final",
+                "final_answer": "A",
+                "planner_calls": {"final": [{
+                    "messages": ["full history"],
+                    "response_text": "complete final response",
+                    "reasoning_content": "complete final reasoning",
+                }]},
+                "planner_parse_error": "invalid final payload",
+            },
+        ],
     )
     eval_batch = types.SimpleNamespace(trajectories=[{
         "example": example,
@@ -175,8 +220,86 @@ def test_make_reflective_dataset_serializes_wrappers_in_turn_trace():
         ["prompt_component"],
     )
 
-    turn_trace = dataset["prompt_component"][0]["Generated Outputs"]["turn_trace"]
-    assert json.loads(turn_trace) == [{"usage": {"reasoning_tokens": 17}}]
+    item = dataset["prompt_component"][0]
+    assert item["Inputs"] == {
+        "Question": "question",
+        "Options": ["A. first", "B. second"],
+        "Gold answer": "B",
+        "Captioner response": full_caption.strip(),
+    }
+    assert item["Generated Outputs"] == {
+        "Predicted answer": "A",
+        "Score": 1.0,
+        "Reasoning": full_reasoning.strip(),
+        "Status": {
+            "state": "error",
+            "errors": ["turn 2: invalid final payload"],
+        },
+        "Reflection trace": [
+            {
+                "turn_id": 1,
+                "planner_action": "tool",
+                "tool_name": "ask_perception",
+                "planner_tool_question": "What sound is heard?",
+                "perception_observation": full_observation,
+                "planner_response": full_planner_response.strip(),
+                "planner_reasoning": full_planner_reasoning.strip(),
+            },
+            {
+                "turn_id": 2,
+                "planner_action": "final",
+                "final_answer": "A",
+                "planner_response": "complete final response",
+                "planner_reasoning": "complete final reasoning",
+                "parse_error": "invalid final payload",
+            },
+        ],
+    }
+    serialized = json.dumps(item)
+    for removed_text in (
+        "large system prompt",
+        "large perception prompt",
+        "reasoning_tokens",
+        "completion_tokens",
+        "full history",
+        "/private/video.mp4",
+        "current prompt",
+    ):
+        assert removed_text not in serialized
+
+
+def test_compact_reflection_trace_records_failed_prediction_status():
+    optimize = _load_optimize_module()
+    failed_prediction = types.SimpleNamespace(
+        completion_text="unparseable model completion",
+    )
+
+    turns, status = optimize._compact_reflection_trace(failed_prediction)
+
+    assert turns == []
+    assert status == {
+        "state": "error",
+        "errors": ["prediction parse failure: unparseable model completion"],
+    }
+
+
+def test_gepa_feedback_does_not_repeat_question_options_or_reasoning():
+    optimize = _load_optimize_module()
+    example = types.SimpleNamespace(
+        answer="B",
+        question="duplicate question",
+        options_json='["duplicate options"]',
+    )
+    prediction = types.SimpleNamespace(answer="A", reasoning_summary="duplicate reasoning")
+
+    result = optimize.avqa_gepa_feedback_metric(example, prediction)
+
+    feedback = result["feedback"]
+    assert "Incorrect (score=0)" in feedback
+    assert "gold=B, predicted=A" in feedback
+    assert "duplicate question" not in feedback
+    assert "duplicate options" not in feedback
+    assert "duplicate reasoning" not in feedback
 
 
 def _reflective_dataset_event(iteration):

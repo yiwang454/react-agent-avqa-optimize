@@ -34,7 +34,7 @@ def _qwen_completion(content: str, completion_tokens: int):
     )
 
 
-def test_qwen_retries_degenerate_response_and_keeps_final_attempt(monkeypatch):
+def test_qwen_retries_empty_response_and_keeps_final_attempt(monkeypatch):
     qwen = _load_api("perception_retry_qwen", "qwen3omni_api.py")
     responses = [
         _qwen_completion("\n\n", 4096),
@@ -65,10 +65,14 @@ def test_qwen_retries_degenerate_response_and_keeps_final_attempt(monkeypatch):
     assert usage["completion_tokens"] == 24
     assert len(calls) == 2
 
-    assert "text units" in qwen.degenerate_response_reason(
+    assert qwen.degenerate_response_reason(
         "ably",
         {"completion_tokens": 4096},
         max_tokens=4096,
+    ) is None
+    assert (
+        qwen.degenerate_response_reason(" \n", None, max_tokens=0)
+        == "response is empty after strip"
     )
 
     responses[:] = [_qwen_completion(" \n", 4096), _qwen_completion("\t", 4096)]
