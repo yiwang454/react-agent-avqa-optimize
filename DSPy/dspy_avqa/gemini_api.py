@@ -106,6 +106,11 @@ def _short_error(exc: Exception, limit: int = 500) -> str:
     return text
 
 
+def _retry_delay(retry_delay_s: float, attempt: int) -> float:
+    """Return exponential backoff after a failed 1-based attempt."""
+    return retry_delay_s * (2 ** (attempt - 1))
+
+
 
 def _env_flag(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default).strip().lower()
@@ -288,12 +293,13 @@ def call_gemini_messages(
                 else None
             )
             if degenerate_reason and attempt < max_retries:
+                delay_s = _retry_delay(retry_delay_s, attempt)
                 print(
                     f"[warn] Gemini API attempt {attempt}/{max_retries} returned a degenerate "
-                    f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
+                    f"perception response: {degenerate_reason}. Retrying in {delay_s}s.",
                     flush=True,
                 )
-                time.sleep(retry_delay_s)
+                time.sleep(delay_s)
                 continue
             if degenerate_reason:
                 print(
@@ -307,12 +313,13 @@ def call_gemini_messages(
         except Exception as exc:
             last_err = exc
             if attempt < max_retries:
+                delay_s = _retry_delay(retry_delay_s, attempt)
                 print(
                     f"[warn] Gemini API attempt {attempt}/{max_retries} failed: {_short_error(exc)}. "
-                    f"Retrying in {retry_delay_s}s.",
+                    f"Retrying in {delay_s}s.",
                     flush=True,
                 )
-                time.sleep(retry_delay_s)
+                time.sleep(delay_s)
 
     if last_err is not None:
         raise RuntimeError(f"Gemini API call failed: {_short_error(last_err, limit=2000)}") from last_err

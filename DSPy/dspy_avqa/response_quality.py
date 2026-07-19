@@ -44,34 +44,24 @@ def degenerate_response_reason(
     *,
     max_tokens: int,
 ) -> str | None:
-    """Return a reason when output is likely whitespace/repetition rather than text.
-
-    A blank response is retried only after it has exhausted the requested output
-    budget. A non-blank response is retried only when a substantial output
-    budget was consumed yet there is fewer than one text unit per 50 generated
-    tokens. These guards avoid retrying legitimate concise answers.
-    """
-    completion_tokens = completion_token_count(token_usage)
-    if completion_tokens is None or max_tokens <= 0:
-        return None
+    """Return a retry reason only when the response is empty after stripping."""
 
     stripped = str(response_text or "").strip()
-    if not stripped and completion_tokens >= max_tokens:
-        return (
-            "response is empty after strip while completion_tokens="
-            f"{completion_tokens} reached max_tokens={max_tokens}"
-        )
+    if not stripped:
+        return "response is empty after strip"
 
-    # Only scrutinize a response after it used enough of the budget for a
-    # whitespace/repetition failure to be plausible.
-    meaningful_output_floor = max(128, max_tokens // 4)
-    text_units = _text_unit_count(stripped)
-    if (
-        completion_tokens >= meaningful_output_floor
-        and text_units * 50 <= completion_tokens
-    ):
-        return (
-            f"response has only {text_units} text units for "
-            f"completion_tokens={completion_tokens}"
-        )
+    # Disabled: completion-token counts are not reliable enough to judge the
+    # amount of text in a non-empty response. Keep every non-empty response.
+    # completion_tokens = completion_token_count(token_usage)
+    # meaningful_output_floor = max(128, max_tokens // 4)
+    # text_units = _text_unit_count(stripped)
+    # if (
+    #     completion_tokens is not None
+    #     and completion_tokens >= meaningful_output_floor
+    #     and text_units * 50 <= completion_tokens
+    # ):
+    #     return (
+    #         f"response has only {text_units} text units for "
+    #         f"completion_tokens={completion_tokens}"
+    #     )
     return None
