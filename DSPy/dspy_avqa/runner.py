@@ -20,11 +20,46 @@ from .data import (
     write_results_jsonl,
 )
 from .program import AVQADSPyReActProgram, normalize_option_letter
-from .prompt_config import active_prompt_yaml_path, load_prompt_config
+from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config
 from .signatures import apply_prompt_config_to_signatures
 
 
 GEMINI_API_BACKENDS = ("legacy", "dspy")
+
+
+def planner_task_template_uses_video_description() -> bool:
+    """Return whether the active task template renders a seeded video description."""
+    planner_config = prompt_config().get("planner") or {}
+    if not isinstance(planner_config, dict):
+        return False
+    template = planner_config.get("task_prompt_template")
+    return isinstance(template, str) and "{video_description}" in template
+
+
+def resolve_preloaded_audio_caption_dir(
+    audio_caption_dir: Path | None,
+    *,
+    caption_placement: str,
+    ignore_audio_caption_dir: bool = False,
+) -> tuple[Path | None, str | None]:
+    """Determine whether a precomputed caption directory is relevant to this run.
+
+    The precomputed caption is only rendered into the initial task when caption
+    placement is ``task`` and the active task template references
+    ``{video_description}``.  In all other configurations, passing the directory
+    must not trigger caption loading or validation.  Callers may explicitly ignore
+    it when the initial description is merely a placeholder and ``ask_caption``
+    supplies the real caption in a later turn.
+    """
+    if audio_caption_dir is None:
+        return None, "not provided"
+    if ignore_audio_caption_dir:
+        return None, "explicitly ignored"
+    if caption_placement != "task":
+        return None, f"caption placement is {caption_placement}"
+    if not planner_task_template_uses_video_description():
+        return None, "planner.task_prompt_template has no {video_description}"
+    return audio_caption_dir, None
 
 
 def add_gemini_backend_args(parser: argparse.ArgumentParser) -> None:
@@ -77,6 +112,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--audio-caption-dir", type=Path, default=None)
+    parser.add_argument(
+        "--ignore-audio-caption-dir",
+        action="store_true",
+        help=(
+            "Do not load precomputed captions from --audio-caption-dir. "
+            "Use when video_description is only an initial placeholder and "
+            "ask_caption provides the actual caption."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--debug", action="store_true", help="Run only the first debug-limit samples.")
     parser.add_argument(
@@ -570,6 +614,11 @@ def run_batch() -> None:
     load_captioner_config_yaml(args.captioner_config_yaml)
     configure_gemini_api_backend(args)
     load_prompt_config(args.prompt_yaml)
+    audio_caption_dir, audio_caption_skip_reason = resolve_preloaded_audio_caption_dir(
+        args.audio_caption_dir,
+        caption_placement=args.caption_placement,
+        ignore_audio_caption_dir=args.ignore_audio_caption_dir,
+    )
     apply_prompt_config_to_signatures()
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
     cuts = read_jsonl(args.input_jsonl)
@@ -594,8 +643,10 @@ def run_batch() -> None:
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
     print(f"Signature in system prompt: {args.signature_in_system_prompt}")
     print(f"Caption placement: {context.caption_placement}")
-    if args.audio_caption_dir:
-        print(f"Audio caption dir: {args.audio_caption_dir}")
+    if audio_caption_dir:
+        print(f"Audio caption dir: {audio_caption_dir}")
+    elif args.audio_caption_dir:
+        print(f"Audio caption dir: <ignored; {audio_caption_skip_reason}>")
     else:
         print("Audio caption dir: <none; use captioner tool if needed>")
     if args.perception_config_yaml:
@@ -697,7 +748,7 @@ def run_batch() -> None:
         cut_item, response_text, turn_trace, payload, error, error_info = run_one(
             program=program,
             cut=cut,
-            audio_caption_dir=args.audio_caption_dir,
+            audio_caption_dir=audio_caption_dir,
             max_turns=args.max_turns,
         )
         row = build_result_row(cut_item, response_text)
@@ -730,4 +781,3 @@ def run_batch() -> None:
     rows = [rows_by_sample_id[cut_id(cut)] for cut in selected if cut_id(cut) in rows_by_sample_id]
     write_results_jsonl(rows, args.output_jsonl)
     print(f"Wrote {len(rows)} rows to {args.output_jsonl}")
-

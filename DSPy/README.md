@@ -160,6 +160,11 @@ input JSONL 顺序重建汇总 JSONL。`[ERROR]` response 也视为已完成。�
 `--inference-only` 会在开始前验证 compiled program 存在且能够加载。final test 使用目录锁，
 因此同一 output directory 不能被两个 inference 进程同时写入。
 
+预计算的 `--audio-caption-dir` 现在是可选的：只有当 `--caption-placement task` 且
+active `planner.task_prompt_template` 引用了 `{video_description}` 时才会读取它；其他情况
+即使传入也会忽略。对于首轮 `video_description` 只是占位、由 `ask_caption` 提供真实 caption
+的任务，可显式传入 `--ignore-audio-caption-dir`。
+
 ## Caveat:
 
 小 caveat：如果不是走 run_batch()，而是在别的 Python 代码里直接 new AVQARuntimeContext() / AVQADSPyReActProgram()，想用自定义 YAML，需要先调用 load_prompt_config(custom_path)，再创建 context/program；否则会用默认 v0。

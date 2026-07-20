@@ -32,6 +32,7 @@ from .runner import (
     load_cached_row_from_question_json,
     load_captioner_config_yaml,
     load_perception_config_yaml,
+    resolve_preloaded_audio_caption_dir,
 )
 from .signatures import apply_prompt_config_to_signatures
 
@@ -409,7 +410,7 @@ def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
 
 def make_trainset_from_cuts(
     cuts: list[dict[str, Any]],
-    audio_caption_dir: Path,
+    audio_caption_dir: Path | None,
     *,
     max_turns: int | None = None,
     skip_bad_examples: bool = False,
@@ -1132,7 +1133,16 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--trainset-jsonl", type=Path, default=None)
     parser.add_argument("--valset-jsonl", type=Path, default=None)
     parser.add_argument("--data-seed", type=int, default=int(os.environ.get("DSPY_AVQA_DATA_SEED", "0")))
-    parser.add_argument("--audio-caption-dir", type=Path, required=True)
+    parser.add_argument("--audio-caption-dir", type=Path, default=None)
+    parser.add_argument(
+        "--ignore-audio-caption-dir",
+        action="store_true",
+        help=(
+            "Do not load precomputed captions from --audio-caption-dir. "
+            "Use when video_description is only an initial placeholder and "
+            "ask_caption provides the actual caption."
+        ),
+    )
     parser.add_argument("--output-program", type=Path, required=True)
     parser.add_argument(
         "--initial-program",
@@ -1623,7 +1633,7 @@ def write_optimizer_candidate_logs(program: dspy.Module, algorithm: str, output_
 def _run_program_on_cut(
     program: dspy.Module,
     cut: dict[str, Any],
-    audio_caption_dir: Path,
+    audio_caption_dir: Path | None,
     max_turns: int,
 ) -> dict[str, Any]:
     payload = build_input_state(cut, audio_caption_dir)
@@ -1693,7 +1703,7 @@ def _select_fallback_train_cuts(
 
 def _build_examples_from_cuts(
     cuts: list[dict[str, Any]],
-    audio_caption_dir: Path,
+    audio_caption_dir: Path | None,
     *,
     max_turns: int,
     skip_bad_examples: bool,
@@ -1798,7 +1808,7 @@ def _final_eval_directory_lock(output_dir: Path):
 def write_batch_style_program_outputs(
     program: dspy.Module,
     cuts: list[dict[str, Any]],
-    audio_caption_dir: Path,
+    audio_caption_dir: Path | None,
     output_jsonl: Path,
     *,
     output_dir: Path | None = None,
@@ -2016,6 +2026,12 @@ def _run_inference_only(
     print(f"Loaded final-test cuts: {len(cuts)}")
     print(f"Final-test cache directory: {args.final_eval_output_dir}")
     print(f"Planner model: {context.planner_model}")
+    if args.audio_caption_dir:
+        print(f"Audio caption dir: {args.audio_caption_dir}")
+    elif args.requested_audio_caption_dir:
+        print(f"Audio caption dir: <ignored; {args.audio_caption_skip_reason}>")
+    else:
+        print("Audio caption dir: <none; use captioner tool if needed>")
 
     final_eval = write_batch_style_program_outputs(
         program,
@@ -2053,6 +2069,12 @@ def run_optimization() -> None:
     load_captioner_config_yaml(args.captioner_config_yaml)
     configure_gemini_api_backend(args)
     load_prompt_config(args.prompt_yaml)
+    args.requested_audio_caption_dir = args.audio_caption_dir
+    args.audio_caption_dir, args.audio_caption_skip_reason = resolve_preloaded_audio_caption_dir(
+        args.audio_caption_dir,
+        caption_placement=args.caption_placement,
+        ignore_audio_caption_dir=args.ignore_audio_caption_dir,
+    )
     validate_optimize_targets(args.optimize_targets)
     apply_prompt_config_to_signatures(apply_instructions=False)
 
@@ -2117,6 +2139,12 @@ def run_optimization() -> None:
     for line in gemini_backend_log_lines():
         print(line)
     print(f"Prompt yaml: {active_prompt_yaml_path()}")
+    if args.audio_caption_dir:
+        print(f"Audio caption dir: {args.audio_caption_dir}")
+    elif args.requested_audio_caption_dir:
+        print(f"Audio caption dir: <ignored; {args.audio_caption_skip_reason}>")
+    else:
+        print("Audio caption dir: <none; use captioner tool if needed>")
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
     print(f"Max turns: {context.max_turns}")
     if args.perception_config_yaml:
@@ -2280,7 +2308,11 @@ def run_optimization() -> None:
             "trainset_jsonl": str(args.trainset_jsonl) if args.trainset_jsonl else None,
             "valset_jsonl": str(args.valset_jsonl) if args.valset_jsonl else None,
             "data_seed": args.data_seed,
-            "audio_caption_dir": str(args.audio_caption_dir),
+            "audio_caption_dir": str(args.audio_caption_dir) if args.audio_caption_dir else None,
+            "requested_audio_caption_dir": (
+                str(args.requested_audio_caption_dir) if args.requested_audio_caption_dir else None
+            ),
+            "audio_caption_skip_reason": args.audio_caption_skip_reason,
             "output_program": str(args.output_program),
             "initial_program": str(args.initial_program) if args.initial_program else None,
             "signature_search_json": str(args.signature_search_json) if args.signature_search_json else None,

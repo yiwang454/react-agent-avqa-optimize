@@ -1,3 +1,19 @@
+# DSPy AVQA notes
+
+This repository also contains the DSPy AVQA optimizer and inference runner under
+[`DSPy/`](./DSPy/).  Its final-test workflow supports the following:
+
+- `--inference-only` skips optimization, loads `--output-program`, and resumes
+  full-test inference from per-sample output caches. Keep a separate output
+  directory for each compiled program.
+- `--audio-caption-dir` is optional. It is automatically ignored when the
+  active task does not render `{video_description}` or caption placement is not
+  `task`. Use `--ignore-audio-caption-dir` when the initial description is only
+  a placeholder and `ask_caption` produces the actual caption.
+
+See [`DSPy/README.md`](./DSPy/README.md) for the detailed DSPy invocation and
+resume behavior.
+
 # LangGraph ReAct Agent Template
 
 [![CI](https://github.com/langchain-ai/react-agent/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/langchain-ai/react-agent/actions/workflows/unit-tests.yml)
