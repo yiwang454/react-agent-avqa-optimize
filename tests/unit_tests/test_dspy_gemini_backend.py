@@ -30,6 +30,9 @@ def _install_package_stubs() -> None:
     sys.modules["dspy_avqa.gemini_api"] = legacy
 
     prompt_config = types.ModuleType("dspy_avqa.prompt_config")
+    prompt_config.active_prompt_yaml_path = lambda: None
+    prompt_config.load_prompt_config = lambda *args, **kwargs: {}
+    prompt_config.prompt_config = lambda: {}
     prompt_config.prompt_value = lambda *args: "default system prompt"
     prompt_config.render_prompt = lambda *args, **kwargs: kwargs.get("perceptual_question", "")
     sys.modules["dspy_avqa.prompt_config"] = prompt_config
@@ -155,6 +158,39 @@ def test_runner_dspy_validation_requires_roots_and_validates_captioner_top_k(mon
     monkeypatch.setenv("CAPTIONER_GEMINI_TOP_K", "64")
     assert runner.configure_gemini_api_backend(args) is True
     assert os.environ["GEMINI_API_BACKEND"] == "dspy"
+
+
+def test_precomputed_audio_caption_dir_is_ignored_when_not_rendered(tmp_path):
+    runner = _load_runner()
+    caption_dir = tmp_path / "captions"
+    runner.prompt_config = lambda: {
+        "planner": {"task_prompt_template": "Question: {question}"}
+    }
+
+    resolved, reason = runner.resolve_preloaded_audio_caption_dir(
+        caption_dir,
+        caption_placement="task",
+    )
+    assert resolved is None
+    assert reason == "planner.task_prompt_template has no {video_description}"
+
+    runner.prompt_config = lambda: {
+        "planner": {"task_prompt_template": "Description: {video_description}"}
+    }
+    resolved, reason = runner.resolve_preloaded_audio_caption_dir(
+        caption_dir,
+        caption_placement="conversation_state",
+    )
+    assert resolved is None
+    assert reason == "caption placement is conversation_state"
+
+    resolved, reason = runner.resolve_preloaded_audio_caption_dir(
+        caption_dir,
+        caption_placement="task",
+        ignore_audio_caption_dir=True,
+    )
+    assert resolved is None
+    assert reason == "explicitly ignored"
 
 
 def test_response_error_sensitive_trips_only_for_gemini(monkeypatch):

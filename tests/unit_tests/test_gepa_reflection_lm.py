@@ -62,6 +62,7 @@ def _load_optimize_module():
         "load_captioner_config_yaml",
         "load_cached_row_from_question_json",
         "load_perception_config_yaml",
+        "resolve_preloaded_audio_caption_dir",
     ):
         setattr(runner, name, lambda *args, **kwargs: None)
     sys.modules["dspy_avqa.runner"] = runner
