@@ -17,7 +17,27 @@ def _load_optimize_module():
     dspy = types.ModuleType("dspy")
     dspy.Module = type("Module", (), {})
     dspy.Prediction = type("Prediction", (dict,), {})
-    dspy.Example = type("Example", (), {})
+
+    class Example:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+            self._input_keys = ()
+
+        def with_inputs(self, *keys):
+            self._input_keys = keys
+            return self
+
+        def inputs(self):
+            return {key: getattr(self, key) for key in self._input_keys}
+
+        def labels(self):
+            return {
+                key: value
+                for key, value in self.__dict__.items()
+                if key not in self._input_keys and key != "_input_keys"
+            }
+
+    dspy.Example = Example
     dspy.Signature = type("Signature", (), {})
     dspy.InputField = lambda **kwargs: kwargs
     dspy.OutputField = lambda **kwargs: kwargs
@@ -160,8 +180,8 @@ def test_make_reflective_dataset_keeps_only_reflection_relevant_trace_fields():
     full_planner_reasoning = "planner reasoning " * 200
     full_observation = "observation " * 300
     adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
-    adapter.component_name = "prompt_component"
-    adapter.target_path = "planner.workflow_prompt"
+    adapter.component_names = ("prompt_component",)
+    adapter.student = types.SimpleNamespace(target_paths=("planner.workflow_prompt",))
     adapter.failure_score = 0.0
     adapter.metric_fn = lambda *args: types.SimpleNamespace(feedback="feedback")
     example = types.SimpleNamespace(
@@ -269,6 +289,129 @@ def test_make_reflective_dataset_keeps_only_reflection_relevant_trace_fields():
         "current prompt",
     ):
         assert removed_text not in serialized
+
+
+def test_gepa_caption_supervision_loads_full_files_caches_and_warns_for_missing(tmp_path, caplog):
+    optimize = _load_optimize_module()
+    video_dir = tmp_path / "Videos" / "video-1"
+    video_dir.mkdir(parents=True)
+    av_alignment = "audio one -- visual one\r\nsecond alignment\r\n"
+    visual_caption = "visual identity\nscene continuity\n"
+    (video_dir / "av_alignment_captions.txt").write_text(av_alignment, encoding="utf-8")
+    (video_dir / "video_consistent_captions.txt").write_text(visual_caption, encoding="utf-8")
+    cache = {}
+    stats = optimize._new_gepa_caption_supervision_stats()
+
+    first = optimize._load_gepa_caption_supervision(
+        daily_omni_root=tmp_path,
+        video_id="video-1",
+        cache=cache,
+        stats=stats,
+    )
+    second = optimize._load_gepa_caption_supervision(
+        daily_omni_root=tmp_path,
+        video_id="video-1",
+        cache=cache,
+        stats=stats,
+    )
+
+    assert second is first
+    assert first["gepa_privileged_av_alignment_captions"] == av_alignment
+    assert first["gepa_privileged_video_consistent_captions"] == visual_caption
+    assert first["gepa_privileged_audio_revised_captions"] == (
+        "[MISSING PRIVILEGED SUPERVISION FILE: audio_revised_captions.txt]"
+    )
+    assert stats == {
+        "videos_loaded": 1,
+        "cache_hits": 1,
+        "files_loaded": 2,
+        "missing_files": 1,
+        "unreadable_files": 0,
+    }
+    assert "audio_revised_captions.txt" in caplog.text
+
+
+def test_gepa_caption_supervision_is_a_label_not_a_runtime_input():
+    optimize = _load_optimize_module()
+    raw_item = {
+        "question": "question",
+        "options": ["A. first", "B. second"],
+        "video_path": "/video.mp4",
+        "video_id": "video",
+        "answer": "A",
+        "gepa_privileged_av_alignment_captions": "alignment gold",
+        "gepa_privileged_video_consistent_captions": "visual gold",
+        "gepa_privileged_audio_revised_captions": "audio gold",
+    }
+
+    example = optimize.make_trainset([raw_item])[0]
+
+    assert "gepa_privileged_av_alignment_captions" not in example.inputs()
+    assert example.labels()["gepa_privileged_av_alignment_captions"] == "alignment gold"
+    assert example.labels()["gepa_privileged_video_consistent_captions"] == "visual gold"
+    assert example.labels()["gepa_privileged_audio_revised_captions"] == "audio gold"
+
+
+def test_privileged_evidence_and_proposal_prompt_are_captioner_only():
+    optimize = _load_optimize_module()
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    adapter.component_names = ("planner_component", "captioner_component")
+    adapter.student = types.SimpleNamespace(
+        target_paths=("planner.workflow_prompt", "captioner.default_caption_instruction")
+    )
+    adapter.failure_score = 0.0
+    adapter.metric_fn = lambda *args: types.SimpleNamespace(feedback="feedback")
+    example = types.SimpleNamespace(
+        question="question",
+        options_json='["A. first", "B. second"]',
+        answer="B",
+        video_description="runtime caption",
+        gepa_privileged_av_alignment_captions="full alignment\nwith newline\n",
+        gepa_privileged_video_consistent_captions="full visual\n",
+        gepa_privileged_audio_revised_captions="full audio\n",
+    )
+    prediction = types.SimpleNamespace(answer="A", reasoning_summary="reasoning", turn_trace=[])
+    eval_batch = types.SimpleNamespace(trajectories=[{
+        "example": example,
+        "prediction": prediction,
+        "score": 0.0,
+        "trace": None,
+    }])
+
+    dataset = adapter.make_reflective_dataset(
+        {"planner_component": "planner prompt", "captioner_component": "caption prompt"},
+        eval_batch,
+        ["planner_component", "captioner_component"],
+    )
+
+    planner_inputs = dataset["planner_component"][0]["Inputs"]
+    captioner_inputs = dataset["captioner_component"][0]["Inputs"]
+    assert "Privileged dataset evidence (optimization only)" not in planner_inputs
+    evidence = captioner_inputs["Privileged dataset evidence (optimization only)"]
+    assert evidence == (
+        "=== PRIVILEGED DATASET EVIDENCE FOR OPTIMIZATION ONLY ===\n\n"
+        "[PRIMARY: AV ALIGNMENT]\nfull alignment\nwith newline\n\n"
+        "[AUXILIARY: VISUAL CAPTION]\nfull visual\n\n"
+        "[AUXILIARY: AUDIO CAPTION]\nfull audio\n\n\n"
+        "=== END PRIVILEGED EVIDENCE ==="
+    )
+
+    candidate = {"planner_component": "planner prompt", "captioner_component": "caption prompt"}
+    planner_proposal = adapter._proposal_input(
+        candidate=candidate,
+        reflective_dataset=dataset,
+        component_name="planner_component",
+    )
+    captioner_proposal = adapter._proposal_input(
+        candidate=candidate,
+        reflective_dataset=dataset,
+        component_name="captioner_component",
+    )
+    assert "prompt_template" not in planner_proposal
+    prompt_template = captioner_proposal["prompt_template"]
+    assert "generalize to unseen videos" in prompt_template
+    assert "Do not copy or encode any example-specific answer" in prompt_template
+    assert "ask_caption / ask_perception workflow" in prompt_template
 
 
 def test_compact_reflection_trace_records_failed_prediction_status():

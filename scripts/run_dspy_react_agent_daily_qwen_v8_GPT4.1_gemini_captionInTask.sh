@@ -21,7 +21,7 @@ export PLANNER_PROVIDER="elm_gpt"
 export PLANNER_MODEL="${PLANNER_MODEL_OVERRIDE:-gpt-4.1}"
 export PLANNER_REASONING_EFFORT="${PLANNER_REASONING_EFFORT_OVERRIDE:-none}"
 export PLANNER_SEED="${PLANNER_SEED_OVERRIDE:-1234}"
-export PLANNER_API_KEY="${PLANNER_API_KEY:-${ELM_API_KEY:-}}"
+export PLANNER_API_KEY="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"
 # Preserve the existing planner-key compatibility mapping while ensuring ELM
 # mode never inherits a DeepSeek endpoint from the sourced environment file.
 export DEEPSEEK_API_KEY="${PLANNER_API_KEY}"

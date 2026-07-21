@@ -45,6 +45,29 @@ DEFAULT_GEPA_REFLECTIVE_DATASET_SAVE_INTERVAL = 50
 MAX_GEPA_REFLECTION_FEEDBACK_CHARS = 2000
 MAX_GEPA_REFLECTION_ERROR_CHARS = 2000
 
+GEPA_PRIVILEGED_CAPTION_FILES = (
+    ("gepa_privileged_av_alignment_captions", "av_alignment_captions.txt"),
+    ("gepa_privileged_video_consistent_captions", "video_consistent_captions.txt"),
+    ("gepa_privileged_audio_revised_captions", "audio_revised_captions.txt"),
+)
+GEPA_CAPTIONER_TARGET_PREFIX = "captioner."
+
+GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE = """I provided an assistant with the following captioning instruction:
+```
+<curr_instructions>
+```
+
+Below are optimization examples containing runtime trajectories, evaluation feedback, and privileged dataset evidence:
+```
+<inputs_outputs_feedback>
+```
+
+Write an improved captioning instruction. Use the privileged evidence only to judge whether the caption instruction asked for the right kinds of audio, visual, identity, continuity, action, source, simultaneity, and audio-visual correspondence information. Infer reusable improvements that will generalize to unseen videos.
+
+The privileged evidence is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged evidence or assume access to it. The resulting ReAct workflow must continue to rely only on the normal question/options and ask_caption / ask_perception workflow available at runtime. Preserve the component's role and interface.
+
+Provide only the new instruction within ``` blocks."""
+
 GEPA_REFLECTION_TEMPERATURE_ENV = "GEPA_REFLECTION_TEMPERATURE"
 GEPA_REFLECTION_MODEL_ENV = "GEPA_REFLECTION_MODEL"
 GEPA_REFLECTION_REASONING_EFFORT_ENV = "GEPA_REFLECTION_REASONING_EFFORT"
@@ -382,20 +405,102 @@ def _compact_reflection_trace(prediction: Any) -> tuple[list[dict[str, Any]], di
     return turns, status
 
 
+def _new_gepa_caption_supervision_stats() -> dict[str, int]:
+    return {
+        "videos_loaded": 0,
+        "cache_hits": 0,
+        "files_loaded": 0,
+        "missing_files": 0,
+        "unreadable_files": 0,
+    }
+
+
+def _is_captioner_target(target_path: str) -> bool:
+    return str(target_path).startswith(GEPA_CAPTIONER_TARGET_PREFIX)
+
+
+def _missing_gepa_caption_marker(filename: str) -> str:
+    return f"[MISSING PRIVILEGED SUPERVISION FILE: {filename}]"
+
+
+def _load_gepa_caption_supervision(
+    *,
+    daily_omni_root: Path,
+    video_id: str,
+    cache: dict[str, dict[str, str]],
+    stats: dict[str, int],
+) -> dict[str, str]:
+    """Load full optimization-only captions once per DailyOmni video."""
+    normalized_video_id = str(video_id or "").strip()
+    if not normalized_video_id:
+        raise ValueError("Cannot load GEPA caption supervision without video_id")
+    if normalized_video_id in cache:
+        stats["cache_hits"] += 1
+        return cache[normalized_video_id]
+
+    video_dir = daily_omni_root / "Videos" / normalized_video_id
+    captions: dict[str, str] = {}
+    for label_name, filename in GEPA_PRIVILEGED_CAPTION_FILES:
+        caption_path = video_dir / filename
+        if not caption_path.is_file():
+            logger.warning(
+                "Missing GEPA optimization supervision for video_id=%s: %s",
+                normalized_video_id,
+                caption_path,
+            )
+            captions[label_name] = _missing_gepa_caption_marker(filename)
+            stats["missing_files"] += 1
+            continue
+        try:
+            with caption_path.open("r", encoding="utf-8", newline="") as caption_file:
+                captions[label_name] = caption_file.read()
+            stats["files_loaded"] += 1
+        except (OSError, UnicodeError) as exc:
+            logger.warning(
+                "Unreadable GEPA optimization supervision for video_id=%s: %s (%s)",
+                normalized_video_id,
+                caption_path,
+                exc,
+            )
+            captions[label_name] = _missing_gepa_caption_marker(filename)
+            stats["unreadable_files"] += 1
+
+    cache[normalized_video_id] = captions
+    stats["videos_loaded"] += 1
+    return captions
+
+
+def _format_gepa_privileged_caption_evidence(example: dspy.Example) -> str:
+    av_alignment = str(getattr(example, "gepa_privileged_av_alignment_captions", "") or "")
+    visual_caption = str(getattr(example, "gepa_privileged_video_consistent_captions", "") or "")
+    audio_caption = str(getattr(example, "gepa_privileged_audio_revised_captions", "") or "")
+    return (
+        "=== PRIVILEGED DATASET EVIDENCE FOR OPTIMIZATION ONLY ===\n\n"
+        f"[PRIMARY: AV ALIGNMENT]\n{av_alignment}\n"
+        f"[AUXILIARY: VISUAL CAPTION]\n{visual_caption}\n"
+        f"[AUXILIARY: AUDIO CAPTION]\n{audio_caption}\n\n"
+        "=== END PRIVILEGED EVIDENCE ==="
+    )
+
+
 def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
     """Convert raw rows to DSPy Example list."""
     trainset: list[dspy.Example] = []
     for item in raw_items:
-        ex = dspy.Example(
-            question=item["question"],
-            options_json=json.dumps(item["options"], ensure_ascii=False),
-            video_path=item["video_path"],
-            audio_path=item.get("audio_path"),
-            video_id=item.get("video_id"),
-            video_description=item.get("video_description", ""),
-            max_turns=item.get("max_turns"),
-            answer=item["answer"],
-        ).with_inputs(
+        example_fields = {
+            "question": item["question"],
+            "options_json": json.dumps(item["options"], ensure_ascii=False),
+            "video_path": item["video_path"],
+            "audio_path": item.get("audio_path"),
+            "video_id": item.get("video_id"),
+            "video_description": item.get("video_description", ""),
+            "max_turns": item.get("max_turns"),
+            "answer": item["answer"],
+        }
+        for label_name, _ in GEPA_PRIVILEGED_CAPTION_FILES:
+            if label_name in item:
+                example_fields[label_name] = item[label_name]
+        ex = dspy.Example(**example_fields).with_inputs(
             "question",
             "options_json",
             "video_path",
@@ -414,10 +519,19 @@ def make_trainset_from_cuts(
     *,
     max_turns: int | None = None,
     skip_bad_examples: bool = False,
+    gepa_caption_root: Path | None = None,
+    gepa_caption_cache: dict[str, dict[str, str]] | None = None,
+    gepa_caption_stats: dict[str, int] | None = None,
 ) -> tuple[list[dspy.Example], list[dict[str, Any]]]:
     """Convert Daily Omni cut rows into DSPy Examples."""
     raw_items: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    caption_cache = gepa_caption_cache if gepa_caption_cache is not None else {}
+    caption_stats = (
+        gepa_caption_stats
+        if gepa_caption_stats is not None
+        else _new_gepa_caption_supervision_stats()
+    )
     for cut in cuts:
         cut_id = str(cut.get("id") or "")
         try:
@@ -427,19 +541,28 @@ def make_trainset_from_cuts(
             answer = custom.get("answer") or custom.get("Answer")
             if answer is None:
                 raise ValueError(f"Missing answer in cut_id={cut_id}")
-            raw_items.append(
-                {
-                    "question": payload["question"],
-                    "options": payload["options"],
-                    "video_path": payload["video_path"],
-                    "audio_path": payload.get("audio_path"),
-                    "video_id": payload.get("video_id") or cut_id.rsplit("-", 1)[0],
-                    "video_description": payload.get("video_description", ""),
-                    "max_turns": max_turns,
-                    "answer": answer,
-                    "cut_id": cut_id,
-                }
-            )
+            video_id = payload.get("video_id") or cut_id.rsplit("-", 1)[0]
+            raw_item = {
+                "question": payload["question"],
+                "options": payload["options"],
+                "video_path": payload["video_path"],
+                "audio_path": payload.get("audio_path"),
+                "video_id": video_id,
+                "video_description": payload.get("video_description", ""),
+                "max_turns": max_turns,
+                "answer": answer,
+                "cut_id": cut_id,
+            }
+            if gepa_caption_root is not None:
+                raw_item.update(
+                    _load_gepa_caption_supervision(
+                        daily_omni_root=gepa_caption_root,
+                        video_id=str(video_id or ""),
+                        cache=caption_cache,
+                        stats=caption_stats,
+                    )
+                )
+            raw_items.append(raw_item)
         except Exception as exc:
             if not skip_bad_examples:
                 raise
@@ -757,52 +880,97 @@ class PromptTargetGEPAAdapter:
         scores = [score["score"] if hasattr(score, "score") else score for score in scores]
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=None)
 
+    def _target_path(self, component_name: str) -> str:
+        try:
+            component_index = self.component_names.index(component_name)
+        except ValueError as exc:
+            raise KeyError(f"Unknown prompt component: {component_name}") from exc
+        return self.student.target_paths[component_index]
+
+    def _proposal_input(
+        self,
+        *,
+        candidate: dict[str, str],
+        reflective_dataset: dict[str, list[dict[str, Any]]],
+        component_name: str,
+    ) -> dict[str, Any]:
+        input_dict: dict[str, Any] = {
+            "current_instruction_doc": candidate[component_name],
+            "dataset_with_feedback": reflective_dataset[component_name],
+        }
+        if _is_captioner_target(self._target_path(component_name)):
+            input_dict["prompt_template"] = GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE
+        return input_dict
+
+    def _make_reflective_item(
+        self,
+        data: dict[str, Any],
+        *,
+        component_name: str,
+        target_path: str,
+    ) -> dict[str, Any]:
+        example = data.get("example")
+        prediction = data.get("prediction")
+        score = data.get("score", self.failure_score)
+        if hasattr(score, "score"):
+            score = score["score"]
+        feedback = self.metric_fn(example, prediction, data.get("trace"), component_name, None)
+        if hasattr(feedback, "feedback"):
+            feedback_text = str(feedback.feedback)
+        elif hasattr(feedback, "get"):
+            feedback_text = str(feedback.get("feedback", ""))
+        else:
+            feedback_text = str(feedback)
+        gold_answer = normalize_option_letter(str(getattr(example, "answer", "") or ""))
+        predicted_answer = normalize_option_letter(str(getattr(prediction, "answer", "") or ""))
+        reflection_trace, status = _compact_reflection_trace(prediction)
+        inputs = {
+            "Question": str(getattr(example, "question", "") or ""),
+            "Options": _reflection_options(getattr(example, "options_json", "")),
+            "Gold answer": gold_answer,
+        }
+        captioner_response = str(getattr(example, "video_description", "") or "").strip()
+        if captioner_response:
+            inputs["Captioner response"] = captioner_response
+        if _is_captioner_target(target_path):
+            inputs["Optimization target"] = target_path
+            inputs["Privileged dataset evidence (optimization only)"] = (
+                _format_gepa_privileged_caption_evidence(example)
+            )
+        return {
+            "Inputs": inputs,
+            "Generated Outputs": {
+                "Predicted answer": predicted_answer,
+                "Score": _json_safe(score),
+                "Reasoning": str(getattr(prediction, "reasoning_summary", "") or "").strip(),
+                "Status": status,
+                "Reflection trace": reflection_trace,
+            },
+            "Feedback": _bounded_reflection_text(
+                feedback_text,
+                limit=MAX_GEPA_REFLECTION_FEEDBACK_CHARS,
+            ),
+        }
+
     @_log_gepa_stage_exceptions("reflective dataset construction")
     def make_reflective_dataset(self, candidate: dict[str, str], eval_batch: Any, components_to_update: list[str]) -> dict[str, list[dict[str, Any]]]:
-        """Convert trajectories to a compact, reflection-focused GEPA dataset."""
-        items: list[dict[str, Any]] = []
+        """Convert trajectories to component-specific, reflection-focused datasets."""
         trajectories = eval_batch.trajectories or []
-        for data in trajectories:
-            example = data.get("example")
-            prediction = data.get("prediction")
-            score = data.get("score", self.failure_score)
-            if hasattr(score, "score"):
-                score = score["score"]
-            feedback = self.metric_fn(example, prediction, data.get("trace"), components_to_update[0], None)
-            if hasattr(feedback, "feedback"):
-                feedback_text = str(feedback.feedback)
-            elif hasattr(feedback, "get"):
-                feedback_text = str(feedback.get("feedback", ""))
-            else:
-                feedback_text = str(feedback)
-            gold_answer = normalize_option_letter(str(getattr(example, "answer", "") or ""))
-            predicted_answer = normalize_option_letter(str(getattr(prediction, "answer", "") or ""))
-            reflection_trace, status = _compact_reflection_trace(prediction)
-            inputs = {
-                "Question": str(getattr(example, "question", "") or ""),
-                "Options": _reflection_options(getattr(example, "options_json", "")),
-                "Gold answer": gold_answer,
-            }
-            captioner_response = str(getattr(example, "video_description", "") or "").strip()
-            if captioner_response:
-                inputs["Captioner response"] = captioner_response
-            items.append({
-                "Inputs": inputs,
-                "Generated Outputs": {
-                    "Predicted answer": predicted_answer,
-                    "Score": _json_safe(score),
-                    "Reasoning": str(getattr(prediction, "reasoning_summary", "") or "").strip(),
-                    "Status": status,
-                    "Reflection trace": reflection_trace,
-                },
-                "Feedback": _bounded_reflection_text(
-                    feedback_text,
-                    limit=MAX_GEPA_REFLECTION_FEEDBACK_CHARS,
-                ),
-            })
-        if not items:
+        if not trajectories:
             raise Exception("No valid reflective examples found for prompt components")
-        return {component_name: items for component_name in components_to_update}
+
+        datasets: dict[str, list[dict[str, Any]]] = {}
+        for component_name in components_to_update:
+            target_path = self._target_path(component_name)
+            datasets[component_name] = [
+                self._make_reflective_item(
+                    data,
+                    component_name=component_name,
+                    target_path=target_path,
+                )
+                for data in trajectories
+            ]
+        return datasets
 
     @_log_gepa_stage_exceptions("instruction proposal")
     def propose_new_texts(self, candidate: dict[str, str], reflective_dataset: dict[str, list[dict[str, Any]]], components_to_update: list[str]) -> dict[str, str]:
@@ -814,10 +982,11 @@ class PromptTargetGEPAAdapter:
             for name in components_to_update:
                 results[name] = InstructionProposalSignature.run(
                     lm=(lambda x: self.stripped_lm_call(x)[0]),
-                    input_dict={
-                        "current_instruction_doc": candidate[name],
-                        "dataset_with_feedback": reflective_dataset[name],
-                    },
+                    input_dict=self._proposal_input(
+                        candidate=candidate,
+                        reflective_dataset=reflective_dataset,
+                        component_name=name,
+                    ),
                 )["new_instruction"]
         return results
 
@@ -1134,6 +1303,15 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--valset-jsonl", type=Path, default=None)
     parser.add_argument("--data-seed", type=int, default=int(os.environ.get("DSPY_AVQA_DATA_SEED", "0")))
     parser.add_argument("--audio-caption-dir", type=Path, default=None)
+    parser.add_argument(
+        "--daily-omni-root",
+        type=Path,
+        default=(Path(os.environ["DAILY_OMNI_ROOT"]) if os.environ.get("DAILY_OMNI_ROOT") else None),
+        help=(
+            "DailyOmni dataset root containing Videos/<video_id>/ caption annotations. "
+            "Required only when GEPA optimizes a captioner.* target; defaults to DAILY_OMNI_ROOT."
+        ),
+    )
     parser.add_argument(
         "--ignore-audio-caption-dir",
         action="store_true",
@@ -1707,18 +1885,45 @@ def _build_examples_from_cuts(
     *,
     max_turns: int,
     skip_bad_examples: bool,
+    gepa_caption_root: Path | None = None,
+    gepa_caption_cache: dict[str, dict[str, str]] | None = None,
+    gepa_caption_stats: dict[str, int] | None = None,
 ) -> tuple[list[dspy.Example], list[dict[str, Any]]]:
     return make_trainset_from_cuts(
         cuts,
         audio_caption_dir,
         max_turns=max_turns,
         skip_bad_examples=skip_bad_examples,
+        gepa_caption_root=gepa_caption_root,
+        gepa_caption_cache=gepa_caption_cache,
+        gepa_caption_stats=gepa_caption_stats,
     )
 
 
 def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
     """Resolve train/val examples while preserving legacy defaults."""
     input_cuts = read_jsonl(args.input_jsonl)
+    use_gepa_caption_supervision = (
+        args.algorithm == "gepa"
+        and any(_is_captioner_target(target) for target in args.optimize_targets)
+    )
+    gepa_caption_root = (
+        getattr(args, "daily_omni_root", None)
+        if use_gepa_caption_supervision
+        else None
+    )
+    if use_gepa_caption_supervision:
+        if gepa_caption_root is None:
+            raise ValueError(
+                "Captioner GEPA optimization requires --daily-omni-root or DAILY_OMNI_ROOT"
+            )
+        if not gepa_caption_root.is_dir() or not (gepa_caption_root / "Videos").is_dir():
+            raise ValueError(
+                "DailyOmni root must contain a Videos directory: "
+                f"{gepa_caption_root}"
+            )
+    gepa_caption_cache: dict[str, dict[str, str]] = {}
+    gepa_caption_stats = _new_gepa_caption_supervision_stats()
 
     if args.trainset_jsonl is not None:
         train_source_path = args.trainset_jsonl
@@ -1742,6 +1947,9 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         args.audio_caption_dir,
         max_turns=args.max_turns,
         skip_bad_examples=args.skip_bad_examples,
+        gepa_caption_root=gepa_caption_root,
+        gepa_caption_cache=gepa_caption_cache,
+        gepa_caption_stats=gepa_caption_stats,
     )
     if not trainset:
         raise ValueError("No train examples were built; check train/input JSONL and audio-caption-dir.")
@@ -1755,6 +1963,9 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
             args.audio_caption_dir,
             max_turns=args.max_turns,
             skip_bad_examples=args.skip_bad_examples,
+            gepa_caption_root=gepa_caption_root,
+            gepa_caption_cache=gepa_caption_cache,
+            gepa_caption_stats=gepa_caption_stats,
         )
         if not valset:
             raise ValueError("No val examples were built; check valset JSONL and audio-caption-dir.")
@@ -1784,6 +1995,12 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         "skipped_val": skipped_val,
         "val_selection": val_selection,
         "valset_is_trainset": valset_is_trainset,
+        "gepa_caption_supervision": {
+            "enabled": use_gepa_caption_supervision,
+            "daily_omni_root": str(gepa_caption_root) if gepa_caption_root else None,
+            "files": [filename for _, filename in GEPA_PRIVILEGED_CAPTION_FILES],
+            **gepa_caption_stats,
+        },
     }
 
 
@@ -2129,6 +2346,17 @@ def run_optimization() -> None:
     print(f"Val examples: {len(valset)}")
     print(f"Skipped train examples: {len(skipped)}")
     print(f"Skipped val examples: {len(skipped_val)}")
+    gepa_caption_supervision = dataset_info["gepa_caption_supervision"]
+    if gepa_caption_supervision["enabled"]:
+        print(
+            "GEPA caption supervision: "
+            f"root={gepa_caption_supervision['daily_omni_root']}, "
+            f"videos_loaded={gepa_caption_supervision['videos_loaded']}, "
+            f"cache_hits={gepa_caption_supervision['cache_hits']}, "
+            f"files_loaded={gepa_caption_supervision['files_loaded']}, "
+            f"missing_files={gepa_caption_supervision['missing_files']}, "
+            f"unreadable_files={gepa_caption_supervision['unreadable_files']}"
+        )
     print(f"Planner model: {context.planner_model}")
     print(f"Planner temperature: {planner_lm.kwargs.get('temperature')}")
     if args.algorithm == "gepa":
@@ -2309,6 +2537,12 @@ def run_optimization() -> None:
             "valset_jsonl": str(args.valset_jsonl) if args.valset_jsonl else None,
             "data_seed": args.data_seed,
             "audio_caption_dir": str(args.audio_caption_dir) if args.audio_caption_dir else None,
+            "daily_omni_root": (
+                str(args.daily_omni_root)
+                if getattr(args, "daily_omni_root", None)
+                else None
+            ),
+            "gepa_caption_supervision": dataset_info["gepa_caption_supervision"],
             "requested_audio_caption_dir": (
                 str(args.requested_audio_caption_dir) if args.requested_audio_caption_dir else None
             ),
