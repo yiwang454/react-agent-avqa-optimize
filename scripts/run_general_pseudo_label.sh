@@ -1,0 +1,3 @@
+export OPENAI_API_KEY="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"
+/mnt/ceph_rbd/applications/anaconda3/envs/react-avqa-dspy/bin/python \
+  DSPy/generate_dailyomni_densified_labels.py >> /mnt/ceph_rbd/workspace/avqa_project/general_scripts/react-agent-avqa-optimize/scripts/logs/run_general_pseudo_label.log 2>&1

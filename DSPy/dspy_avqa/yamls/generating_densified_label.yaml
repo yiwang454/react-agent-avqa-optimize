@@ -1,0 +1,33 @@
+densified_label_prompt: |-
+  Given the question, answer choices, gold answer, and privileged dataset annotations, identify the minimal evidence needed to justify the gold answer.
+
+  1. Select one or more directly relevant evidence spans from the provided annotations. Copy them verbatim. You may select from any of the three annotation sources and select multiple spans if needed.
+  2. Concatenate the selected evidence into a concise, coherent key_evidence statement. Make only minimal edits needed for coherence; do not add new information.
+  3. Describe the most important evidence that a targeted perception call should verify after an initial video caption has been obtained.
+
+  Do not produce a chain of thought.
+  Do not summarize the full video.
+  Use only evidence relevant to distinguishing the answer choices.
+
+  Return:
+  {
+  “key_evidence”: “…”,
+  “ideal_perception_target”: “…”
+  }
+  Question:
+  {question}
+
+  Options:
+  {options}
+
+  Gold answer:
+  {gold_answer}
+
+  AV alignment annotations:
+  {av_alignment_captions}
+
+  Visual captions:
+  {video_consistent_captions}
+
+  Audio captions:
+  {audio_revised_captions}

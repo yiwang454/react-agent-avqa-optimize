@@ -11,6 +11,40 @@ This repository also contains the DSPy AVQA optimizer and inference runner under
   `task`. Use `--ignore-audio-caption-dir` when the initial description is only
   a placeholder and `ask_caption` produces the actual caption.
 
+## GEPA prompt optimization updates
+
+Recent GEPA runs support optimizing explicit prompt targets such as
+`planner.workflow_prompt` and `captioner.default_caption_instruction` with
+target-aware reflection feedback.
+
+- Planner optimization still receives planner-oriented feedback, but now uses a
+  custom GEPA reflection prompt that improves the planning and tool-use policy
+  without learning facts from example videos. The reflection prompt asks GEPA to
+  turn example-specific feedback into general rules and avoid copying specific
+  answers, options, timestamps, people, objects, scenes, events, caption text, or
+  tool observations.
+- Captioner optimization receives captioner-oriented feedback. The captioner
+  reflection prompt specifies that `default_caption_instruction` is used by the
+  `ask_caption` tool to obtain factual audio-visual captions, and must not solve
+  the multiple-choice question, choose an option, output a final answer letter,
+  plan tool calls, or instruct another model.
+- Captioner GEPA supervision is controlled by
+  `--gepa-caption-supervision {auto,none,privileged}`:
+  - `none`: original mode; do not load privileged caption files. The supervision
+    signal is downstream answer correctness plus runtime trajectories/feedback.
+  - `privileged`: force loading DailyOmni caption supervision from
+    `--daily-omni-root` / `DAILY_OMNI_ROOT`.
+  - `auto`: default; use privileged supervision only when a DailyOmni root is
+    available, otherwise fall back to `none`.
+
+When using the existing GEPA wrapper scripts, `auto` usually resolves to
+`privileged` because the common wrapper passes `--daily-omni-root`. To rerun the
+original captioner-only mode, append:
+
+```bash
+--gepa-caption-supervision none
+```
+
 See [`DSPy/README.md`](./DSPy/README.md) for the detailed DSPy invocation and
 resume behavior.
 

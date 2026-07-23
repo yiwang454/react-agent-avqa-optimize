@@ -245,6 +245,9 @@ def test_make_reflective_dataset_keeps_only_reflection_relevant_trace_fields():
 
     item = dataset["prompt_component"][0]
     assert item["Inputs"] == {
+        "Optimization target": "planner.workflow_prompt",
+        "Component role": optimize._target_component_role("planner.workflow_prompt"),
+        "Output contract": optimize._target_output_contract("planner.workflow_prompt"),
         "Question": "question",
         "Options": ["A. first", "B. second"],
         "Gold answer": "B",
@@ -331,6 +334,41 @@ def test_gepa_caption_supervision_loads_full_files_caches_and_warns_for_missing(
     assert "audio_revised_captions.txt" in caplog.text
 
 
+def test_gepa_caption_supervision_mode_none_disables_privileged_loading():
+    optimize = _load_optimize_module()
+    args = types.SimpleNamespace(
+        algorithm="gepa",
+        gepa_caption_supervision="none",
+        daily_omni_root=None,
+    )
+
+    mode, root = optimize._resolve_gepa_caption_supervision(
+        args,
+        optimizes_captioner=True,
+    )
+
+    assert mode == "none"
+    assert root is None
+
+
+def test_gepa_caption_supervision_mode_auto_uses_root_when_available(tmp_path):
+    optimize = _load_optimize_module()
+    (tmp_path / "Videos").mkdir()
+    args = types.SimpleNamespace(
+        algorithm="gepa",
+        gepa_caption_supervision="auto",
+        daily_omni_root=tmp_path,
+    )
+
+    mode, root = optimize._resolve_gepa_caption_supervision(
+        args,
+        optimizes_captioner=True,
+    )
+
+    assert mode == "privileged"
+    assert root == tmp_path
+
+
 def test_gepa_caption_supervision_is_a_label_not_a_runtime_input():
     optimize = _load_optimize_module()
     raw_item = {
@@ -352,7 +390,7 @@ def test_gepa_caption_supervision_is_a_label_not_a_runtime_input():
     assert example.labels()["gepa_privileged_audio_revised_captions"] == "audio gold"
 
 
-def test_privileged_evidence_and_proposal_prompt_are_captioner_only():
+def test_reflective_dataset_and_proposal_prompts_are_target_specific():
     optimize = _load_optimize_module()
     adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
     adapter.component_names = ("planner_component", "captioner_component")
@@ -386,7 +424,13 @@ def test_privileged_evidence_and_proposal_prompt_are_captioner_only():
 
     planner_inputs = dataset["planner_component"][0]["Inputs"]
     captioner_inputs = dataset["captioner_component"][0]["Inputs"]
+    assert planner_inputs["Optimization target"] == "planner.workflow_prompt"
+    assert "AVQA ReAct planner" in planner_inputs["Component role"]
     assert "Privileged dataset evidence (optimization only)" not in planner_inputs
+    assert captioner_inputs["Optimization target"] == "captioner.default_caption_instruction"
+    assert "Captioner tool instruction" in captioner_inputs["Component role"]
+    assert "Never output an answer letter" in captioner_inputs["Output contract"]
+    assert "Caption quality rubric" in captioner_inputs
     evidence = captioner_inputs["Privileged dataset evidence (optimization only)"]
     assert evidence == (
         "=== PRIVILEGED DATASET EVIDENCE FOR OPTIMIZATION ONLY ===\n\n"
@@ -407,11 +451,55 @@ def test_privileged_evidence_and_proposal_prompt_are_captioner_only():
         reflective_dataset=dataset,
         component_name="captioner_component",
     )
-    assert "prompt_template" not in planner_proposal
+    planner_template = planner_proposal["prompt_template"]
+    assert "planner workflow instruction" in planner_template
+    assert "Infer the task format and the behavior required to solve it." in planner_template
+    assert "planning and tool-use policy" in planner_template
+    assert "not to learn facts from the example videos" in planner_template
+    assert "Turn example-specific feedback into general rules" in planner_template
+    assert "how to formulate one targeted perceptual question" in planner_template
+    assert "niche and domain specific factual information" not in planner_template
     prompt_template = captioner_proposal["prompt_template"]
+    assert "ask_caption tool to obtain" in prompt_template
+    assert "must not solve the multiple-choice question" in prompt_template
     assert "generalize to unseen videos" in prompt_template
     assert "Do not copy or encode any example-specific answer" in prompt_template
-    assert "ask_caption / ask_perception workflow" in prompt_template
+    assert "ask_caption / ask_perception workflow" not in prompt_template
+
+
+def test_captioner_reflective_dataset_omits_privileged_evidence_when_not_loaded():
+    optimize = _load_optimize_module()
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    adapter.component_names = ("captioner_component",)
+    adapter.student = types.SimpleNamespace(
+        target_paths=("captioner.default_caption_instruction",)
+    )
+    adapter.failure_score = 0.0
+    adapter.metric_fn = lambda *args: types.SimpleNamespace(feedback="feedback")
+    example = types.SimpleNamespace(
+        question="question",
+        options_json='["A. first", "B. second"]',
+        answer="B",
+        video_description="runtime caption",
+    )
+    prediction = types.SimpleNamespace(answer="A", reasoning_summary="reasoning", turn_trace=[])
+    eval_batch = types.SimpleNamespace(trajectories=[{
+        "example": example,
+        "prediction": prediction,
+        "score": 0.0,
+        "trace": None,
+    }])
+
+    dataset = adapter.make_reflective_dataset(
+        {"captioner_component": "caption prompt"},
+        eval_batch,
+        ["captioner_component"],
+    )
+
+    inputs = dataset["captioner_component"][0]["Inputs"]
+    assert inputs["Optimization target"] == "captioner.default_caption_instruction"
+    assert "Caption quality rubric" in inputs
+    assert "Privileged dataset evidence (optimization only)" not in inputs
 
 
 def test_compact_reflection_trace_records_failed_prediction_status():
@@ -446,6 +534,30 @@ def test_gepa_feedback_does_not_repeat_question_options_or_reasoning():
     assert "duplicate question" not in feedback
     assert "duplicate options" not in feedback
     assert "duplicate reasoning" not in feedback
+
+
+def test_gepa_feedback_is_target_aware_for_captioner_and_planner():
+    optimize = _load_optimize_module()
+    example = types.SimpleNamespace(answer="B")
+    prediction = types.SimpleNamespace(answer="A")
+
+    planner_feedback = optimize.avqa_gepa_feedback_metric(
+        example,
+        prediction,
+        pred_name="planner.workflow_prompt",
+    )["feedback"]
+    captioner_feedback = optimize.avqa_gepa_feedback_metric(
+        example,
+        prediction,
+        pred_name="captioner.default_caption_instruction",
+    )["feedback"]
+
+    assert "Revise the planner instruction" in planner_feedback
+    assert "returns exactly one option letter" in planner_feedback
+    assert "Revise only the captioner instruction" in captioner_feedback
+    assert "timestamped audio-visual caption" in captioner_feedback
+    assert "Revise the planner instruction" not in captioner_feedback
+    assert "output an option letter" in captioner_feedback
 
 
 def _reflective_dataset_event(iteration):

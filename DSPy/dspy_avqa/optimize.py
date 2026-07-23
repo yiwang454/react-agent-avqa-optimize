@@ -51,22 +51,55 @@ GEPA_PRIVILEGED_CAPTION_FILES = (
     ("gepa_privileged_audio_revised_captions", "audio_revised_captions.txt"),
 )
 GEPA_CAPTIONER_TARGET_PREFIX = "captioner."
+GEPA_PLANNER_TARGET_PREFIX = "planner."
+GEPA_CAPTION_SUPERVISION_CHOICES = ("auto", "none", "privileged")
 
 GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE = """I provided an assistant with the following captioning instruction:
 ```
 <curr_instructions>
 ```
 
-Below are optimization examples containing runtime trajectories, evaluation feedback, and privileged dataset evidence:
+Below are optimization examples containing runtime trajectories, evaluation feedback, and any privileged dataset evidence if enabled:
 ```
 <inputs_outputs_feedback>
 ```
 
-Write an improved captioning instruction. Use the privileged evidence only to judge whether the caption instruction asked for the right kinds of audio, visual, identity, continuity, action, source, simultaneity, and audio-visual correspondence information. Infer reusable improvements that will generalize to unseen videos.
+This instruction is used by the ask_caption tool to obtain a factual audio-visual caption. It must not solve the multiple-choice question, choose an option, output a final answer letter, plan tool calls, or instruct another model.
 
-The privileged evidence is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged evidence or assume access to it. The resulting ReAct workflow must continue to rely only on the normal question/options and ask_caption / ask_perception workflow available at runtime. Preserve the component's role and interface.
+Write an improved captioning instruction. If privileged evidence is present, use it only to judge whether the caption instruction asked for the right kinds of audio, visual, identity, continuity, action, source, simultaneity, and audio-visual correspondence information. Infer reusable improvements that will generalize to unseen videos.
 
-Provide only the new instruction within ``` blocks."""
+The privileged evidence is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged evidence or assume access to it.
+
+Provide only the new captioner instruction within ``` blocks."""
+
+GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE = """I provided an assistant with the following planner workflow instruction:
+```
+<curr_instructions>
+```
+
+Below are optimization examples containing runtime trajectories and evaluation feedback:
+```
+<inputs_outputs_feedback>
+```
+
+Your task is to write a new instruction for the assistant.
+
+Infer the task format and the behavior required to solve it.
+
+Read the assistant responses and feedback. Identify recurring mistakes and general strategies that could improve performance on unseen examples.
+
+The goal is to improve the assistant's planning and tool-use policy, not to learn facts from the example videos.
+
+Turn example-specific feedback into general rules. Do not copy or include any specific answer, option, timestamp, person, object, scene, event, caption text, tool observation, or other example-specific detail.
+
+Preserve useful task-level information, such as:
+- how to identify the most important missing evidence,
+- how to formulate one targeted perceptual question,
+- how to combine the caption and perceptual observation before answering,
+
+Only include strategies that are likely to help across different unseen inputs. Keep the new instruction concise, clear, and actionable.
+
+Provide only the new instruction within a single ``` block."""
 
 GEPA_REFLECTION_TEMPERATURE_ENV = "GEPA_REFLECTION_TEMPERATURE"
 GEPA_REFLECTION_MODEL_ENV = "GEPA_REFLECTION_MODEL"
@@ -267,23 +300,43 @@ def avqa_gepa_feedback_metric(
     pred_name: str | None = None,
     pred_trace: Any = None,
 ) -> dspy.Prediction:
-    """Exact-match metric with concise, non-duplicative GEPA feedback."""
+    """Exact-match metric with target-aware, non-duplicative GEPA feedback."""
     gold = normalize_option_letter(str(example.answer))
     got = normalize_option_letter(str(getattr(pred, "answer", "")))
     score = 1.0 if gold == got else 0.0
-    feedback_parts = [
-        f"{'Correct' if score == 1.0 else 'Incorrect'} (score={score:g}); "
-        f"gold={gold or '<empty>'}, predicted={got or '<empty>'}.",
-    ]
-    if score < 1.0:
-        feedback_parts.append(
-            "Revise the planner instruction so it gathers the right audio/video evidence, "
-            "uses tools only when helpful, and returns exactly one option letter."
-        )
+    target_path = str(pred_name or "")
+    result_label = "Correct" if score == 1.0 else "Incorrect"
+    if _is_captioner_target(target_path):
+        feedback_parts = [
+            f"Downstream QA {result_label.lower()} (score={score:g}); "
+            f"gold={gold or '<empty>'}, predicted={got or '<empty>'}.",
+        ]
+        if score < 1.0:
+            feedback_parts.append(
+                "Revise only the captioner instruction so ask_caption returns a factual, "
+                "timestamped audio-visual caption with the observable evidence needed by the "
+                "planner. Do not make the captioner solve the multiple-choice question, "
+                "plan tool calls, or output an option letter."
+            )
+        else:
+            feedback_parts.append(
+                "This trajectory is correct; preserve the captioning behavior that supplied "
+                "useful factual evidence, while keeping the captioner as a caption-only tool."
+            )
     else:
-        feedback_parts.append(
-            "This trajectory is correct; preserve the behavior that led to this answer."
-        )
+        feedback_parts = [
+            f"{result_label} (score={score:g}); "
+            f"gold={gold or '<empty>'}, predicted={got or '<empty>'}.",
+        ]
+        if score < 1.0:
+            feedback_parts.append(
+                "Revise the planner instruction so it gathers the right audio/video evidence, "
+                "uses tools only when helpful, and returns exactly one option letter."
+            )
+        else:
+            feedback_parts.append(
+                "This trajectory is correct; preserve the behavior that led to this answer."
+            )
     return dspy.Prediction(score=score, feedback="\n".join(feedback_parts))
 
 
@@ -419,6 +472,57 @@ def _is_captioner_target(target_path: str) -> bool:
     return str(target_path).startswith(GEPA_CAPTIONER_TARGET_PREFIX)
 
 
+def _is_planner_target(target_path: str) -> bool:
+    return str(target_path).startswith(GEPA_PLANNER_TARGET_PREFIX)
+
+
+def _target_component_role(target_path: str) -> str:
+    if _is_captioner_target(target_path):
+        return (
+            "Captioner tool instruction for ask_caption. Produce factual timestamped "
+            "audio-visual captions only; do not answer the multiple-choice question."
+        )
+    if _is_planner_target(target_path):
+        return (
+            "AVQA ReAct planner workflow instruction. Decide when to call tools and "
+            "return exactly one final option letter."
+        )
+    return "Prompt component under optimization. Preserve its existing runtime interface."
+
+
+def _target_output_contract(target_path: str) -> str:
+    if _is_captioner_target(target_path):
+        return (
+            "Output a timestamped shot list/caption with observable visual events, "
+            "audible events, speech when clear, identities/continuity/actions, sound "
+            "sources, simultaneity, and audio-visual correspondence. Never output an "
+            "answer letter or final QA decision."
+        )
+    if _is_planner_target(target_path):
+        return (
+            "Use question/options and tool observations to gather evidence, then return "
+            "one final answer label through the planner JSON interface."
+        )
+    return "Keep the component's original output format and runtime contract."
+
+
+def _caption_quality_rubric() -> str:
+    return (
+        "Evaluate the caption instruction by whether ask_caption supplies factual, "
+        "timestamped, non-decision-biased evidence that helps the planner answer later: "
+        "visual events, audio events, speech, identity/continuity, source attribution, "
+        "timing, simultaneity, and audio-visual alignment."
+    )
+
+
+def _reflection_prompt_template_for_target(target_path: str) -> str | None:
+    if _is_captioner_target(target_path):
+        return GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE
+    if _is_planner_target(target_path):
+        return GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE
+    return None
+
+
 def _missing_gepa_caption_marker(filename: str) -> str:
     return f"[MISSING PRIVILEGED SUPERVISION FILE: {filename}]"
 
@@ -468,6 +572,13 @@ def _load_gepa_caption_supervision(
     cache[normalized_video_id] = captions
     stats["videos_loaded"] += 1
     return captions
+
+
+def _has_gepa_privileged_caption_evidence(example: dspy.Example) -> bool:
+    return any(
+        bool(str(getattr(example, label_name, "") or "").strip())
+        for label_name, _ in GEPA_PRIVILEGED_CAPTION_FILES
+    )
 
 
 def _format_gepa_privileged_caption_evidence(example: dspy.Example) -> str:
@@ -596,6 +707,55 @@ def _load_optimizer_config(path: Path | None) -> dict[str, Any]:
 
 def _config_value(config: dict[str, Any], key: str, fallback: Any) -> Any:
     return config[key] if key in config else fallback
+
+
+def _normalize_gepa_caption_supervision_mode(value: Any) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in GEPA_CAPTION_SUPERVISION_CHOICES:
+        choices = ", ".join(GEPA_CAPTION_SUPERVISION_CHOICES)
+        raise ValueError(f"gepa_caption_supervision must be one of: {choices}; got {value!r}")
+    return mode
+
+
+def _validate_gepa_caption_root(root: Path | None, *, required: bool) -> Path | None:
+    if root is None:
+        if required:
+            raise ValueError(
+                "Captioner GEPA privileged supervision requires --daily-omni-root "
+                "or DAILY_OMNI_ROOT"
+            )
+        return None
+    if not root.is_dir() or not (root / "Videos").is_dir():
+        raise ValueError(
+            "DailyOmni root must contain a Videos directory: "
+            f"{root}"
+        )
+    return root
+
+
+def _resolve_gepa_caption_supervision(
+    args: argparse.Namespace,
+    *,
+    optimizes_captioner: bool,
+) -> tuple[str, Path | None]:
+    """Return the caption-supervision mode and optional DailyOmni root for GEPA."""
+    if args.algorithm != "gepa" or not optimizes_captioner:
+        return "none", None
+
+    requested_mode = _normalize_gepa_caption_supervision_mode(
+        getattr(args, "gepa_caption_supervision", "auto")
+    )
+    if requested_mode == "none":
+        return "none", None
+
+    root = getattr(args, "daily_omni_root", None)
+    if requested_mode == "privileged":
+        return "privileged", _validate_gepa_caption_root(root, required=True)
+
+    validated_root = _validate_gepa_caption_root(root, required=False)
+    if validated_root is None:
+        return "none", None
+    return "privileged", validated_root
 
 
 def _none_if_unset(value: Any) -> Any:
@@ -894,12 +1054,14 @@ class PromptTargetGEPAAdapter:
         reflective_dataset: dict[str, list[dict[str, Any]]],
         component_name: str,
     ) -> dict[str, Any]:
+        target_path = self._target_path(component_name)
         input_dict: dict[str, Any] = {
             "current_instruction_doc": candidate[component_name],
             "dataset_with_feedback": reflective_dataset[component_name],
         }
-        if _is_captioner_target(self._target_path(component_name)):
-            input_dict["prompt_template"] = GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE
+        prompt_template = _reflection_prompt_template_for_target(target_path)
+        if prompt_template is not None:
+            input_dict["prompt_template"] = prompt_template
         return input_dict
 
     def _make_reflective_item(
@@ -914,7 +1076,7 @@ class PromptTargetGEPAAdapter:
         score = data.get("score", self.failure_score)
         if hasattr(score, "score"):
             score = score["score"]
-        feedback = self.metric_fn(example, prediction, data.get("trace"), component_name, None)
+        feedback = self.metric_fn(example, prediction, data.get("trace"), target_path, None)
         if hasattr(feedback, "feedback"):
             feedback_text = str(feedback.feedback)
         elif hasattr(feedback, "get"):
@@ -925,6 +1087,9 @@ class PromptTargetGEPAAdapter:
         predicted_answer = normalize_option_letter(str(getattr(prediction, "answer", "") or ""))
         reflection_trace, status = _compact_reflection_trace(prediction)
         inputs = {
+            "Optimization target": target_path,
+            "Component role": _target_component_role(target_path),
+            "Output contract": _target_output_contract(target_path),
             "Question": str(getattr(example, "question", "") or ""),
             "Options": _reflection_options(getattr(example, "options_json", "")),
             "Gold answer": gold_answer,
@@ -933,10 +1098,11 @@ class PromptTargetGEPAAdapter:
         if captioner_response:
             inputs["Captioner response"] = captioner_response
         if _is_captioner_target(target_path):
-            inputs["Optimization target"] = target_path
-            inputs["Privileged dataset evidence (optimization only)"] = (
-                _format_gepa_privileged_caption_evidence(example)
-            )
+            inputs["Caption quality rubric"] = _caption_quality_rubric()
+            if _has_gepa_privileged_caption_evidence(example):
+                inputs["Privileged dataset evidence (optimization only)"] = (
+                    _format_gepa_privileged_caption_evidence(example)
+                )
         return {
             "Inputs": inputs,
             "Generated Outputs": {
@@ -1309,7 +1475,18 @@ def parse_optimize_args() -> argparse.Namespace:
         default=(Path(os.environ["DAILY_OMNI_ROOT"]) if os.environ.get("DAILY_OMNI_ROOT") else None),
         help=(
             "DailyOmni dataset root containing Videos/<video_id>/ caption annotations. "
-            "Required only when GEPA optimizes a captioner.* target; defaults to DAILY_OMNI_ROOT."
+            "Used only when GEPA caption supervision mode resolves to privileged; "
+            "defaults to DAILY_OMNI_ROOT."
+        ),
+    )
+    parser.add_argument(
+        "--gepa-caption-supervision",
+        choices=GEPA_CAPTION_SUPERVISION_CHOICES,
+        default=os.environ.get("GEPA_CAPTION_SUPERVISION", "auto"),
+        help=(
+            "Captioner GEPA supervision mode: none uses only downstream answer feedback; "
+            "privileged loads DailyOmni caption supervision; auto uses privileged only "
+            "when --daily-omni-root/DAILY_OMNI_ROOT is available."
         ),
     )
     parser.add_argument(
@@ -1903,25 +2080,12 @@ def _build_examples_from_cuts(
 def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
     """Resolve train/val examples while preserving legacy defaults."""
     input_cuts = read_jsonl(args.input_jsonl)
-    use_gepa_caption_supervision = (
-        args.algorithm == "gepa"
-        and any(_is_captioner_target(target) for target in args.optimize_targets)
+    optimizes_captioner = any(_is_captioner_target(target) for target in args.optimize_targets)
+    gepa_caption_supervision_mode, gepa_caption_root = _resolve_gepa_caption_supervision(
+        args,
+        optimizes_captioner=optimizes_captioner,
     )
-    gepa_caption_root = (
-        getattr(args, "daily_omni_root", None)
-        if use_gepa_caption_supervision
-        else None
-    )
-    if use_gepa_caption_supervision:
-        if gepa_caption_root is None:
-            raise ValueError(
-                "Captioner GEPA optimization requires --daily-omni-root or DAILY_OMNI_ROOT"
-            )
-        if not gepa_caption_root.is_dir() or not (gepa_caption_root / "Videos").is_dir():
-            raise ValueError(
-                "DailyOmni root must contain a Videos directory: "
-                f"{gepa_caption_root}"
-            )
+    use_gepa_caption_supervision = gepa_caption_supervision_mode == "privileged"
     gepa_caption_cache: dict[str, dict[str, str]] = {}
     gepa_caption_stats = _new_gepa_caption_supervision_stats()
 
@@ -1996,7 +2160,11 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         "val_selection": val_selection,
         "valset_is_trainset": valset_is_trainset,
         "gepa_caption_supervision": {
+            "mode": gepa_caption_supervision_mode,
             "enabled": use_gepa_caption_supervision,
+            "requested_mode": _normalize_gepa_caption_supervision_mode(
+                getattr(args, "gepa_caption_supervision", "auto")
+            ),
             "daily_omni_root": str(gepa_caption_root) if gepa_caption_root else None,
             "files": [filename for _, filename in GEPA_PRIVILEGED_CAPTION_FILES],
             **gepa_caption_stats,
@@ -2347,10 +2515,15 @@ def run_optimization() -> None:
     print(f"Skipped train examples: {len(skipped)}")
     print(f"Skipped val examples: {len(skipped_val)}")
     gepa_caption_supervision = dataset_info["gepa_caption_supervision"]
+    print(
+        "GEPA caption supervision: "
+        f"mode={gepa_caption_supervision['mode']}, "
+        f"requested={gepa_caption_supervision['requested_mode']}, "
+        f"root={gepa_caption_supervision['daily_omni_root']}"
+    )
     if gepa_caption_supervision["enabled"]:
         print(
-            "GEPA caption supervision: "
-            f"root={gepa_caption_supervision['daily_omni_root']}, "
+            "GEPA caption supervision stats: "
             f"videos_loaded={gepa_caption_supervision['videos_loaded']}, "
             f"cache_hits={gepa_caption_supervision['cache_hits']}, "
             f"files_loaded={gepa_caption_supervision['files_loaded']}, "
