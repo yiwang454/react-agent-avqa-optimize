@@ -35,6 +35,8 @@ if [ -z "${PLANNER_API_KEY}" ]; then
 fi
 
 export PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/daily_qa_prompt_v8_caption_in_task.yaml}"
+export GEPA_REFLECTION_TEMPLATE_YAML="${GEPA_REFLECTION_TEMPLATE_YAML:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/DSPy/reflection_template.yaml}"
+export GEPA_REFLECTION_TEMPLATE_VERSION="${GEPA_REFLECTION_TEMPLATE_VERSION:-auto}"
 export PERCEPTION_MODEL="${PERCEPTION_MODEL_OVERRIDE:-gemini}"
 export CAPTIONER_MODEL="${CAPTIONER_MODEL_OVERRIDE:-gemini}"
 GEMINI_RUNTIME_CONFIG_YAML="/mnt/ceph_rbd/workspace/avqa_project/demos/yamls/gemini_qa/daily_125_gemini2.5_cold_captioner.yaml"
@@ -55,6 +57,7 @@ GEPA_MAX_FULL_EVALS="${GEPA_MAX_FULL_EVALS:-8}"
 GEPA_REFLECTION_MINIBATCH_SIZE="${GEPA_REFLECTION_MINIBATCH_SIZE:-8}"
 DEBUG="${GEPA_DEBUG:-${DEBUG:-false}}"
 DEBUG_LIMIT="${GEPA_DEBUG_LIMIT:-${DEBUG_LIMIT:-4}}"
+OPTIMIZED_PROMPT_CONFIG_BASENAME="${GEPA_OPTIMIZED_PROMPT_CONFIG_BASENAME:-daily_qa_prompt_v8_caption_in_task.yaml}"
 IFS=, read -r -a OPTIMIZE_TARGETS <<< "${OPTIMIZE_TARGETS_CSV}"
 GEPA_SEEDS=(${GEPA_SEEDS_OVERRIDE:-18})
 
@@ -75,7 +78,7 @@ for gepa_seed in "${GEPA_SEEDS[@]}"; do
     --signature-search-json "${gepa_run_dir}/compiled_gepa_signature_search.json"
     --trajectory-jsonl "${gepa_run_dir}/optimized_trainset_trajectories.jsonl"
     --optimizer-log-dir "${gepa_run_dir}/optimizer_logs"
-    --optimized-prompt-config-yaml "${gepa_run_dir}/${safe_targets}_GEPA_daily_qa_prompt_v8_caption_in_task.yaml"
+    --optimized-prompt-config-yaml "${gepa_run_dir}/${safe_targets}_GEPA_${OPTIMIZED_PROMPT_CONFIG_BASENAME}"
     --final-eval-output-jsonl "${gepa_run_dir}/output_test.jsonl"
     --final-eval-output-dir "${gepa_run_dir}"
     --max-turns "${MAX_TURNS}"
@@ -93,6 +96,8 @@ for gepa_seed in "${GEPA_SEEDS[@]}"; do
     --gepa-candidate-selection-strategy pareto
     --gepa-max-merge-invocations 5
     --gepa-seed "${gepa_seed}"
+    --gepa-reflection-template-yaml "${GEPA_REFLECTION_TEMPLATE_YAML}"
+    --gepa-reflection-template-version "${GEPA_REFLECTION_TEMPLATE_VERSION}"
     --gepa-log-dir "${gepa_run_dir}/gepa_logs"
     --gepa-track-stats
     --gepa-track-best-outputs

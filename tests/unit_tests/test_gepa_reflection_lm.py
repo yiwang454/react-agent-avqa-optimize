@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 OPTIMIZE_PATH = Path(__file__).resolve().parents[2] / "DSPy" / "dspy_avqa" / "optimize.py"
 
@@ -154,6 +156,79 @@ def test_gepa_reflection_can_override_model_and_effort_while_omitting_temperatur
         "seed": 1234,
         "reasoning_effort": "medium",
     }
+
+
+def test_gepa_reflection_model_override_does_not_inherit_deepseek_connection(monkeypatch):
+    optimize = _load_optimize_module()
+    planner_lm = _PlannerLM(
+        "openai/deepseek-v4-pro",
+        {
+            "api_key": "deepseek-key",
+            "api_base": "https://api.deepseek.com",
+            "seed": 7,
+            "temperature": 0.0,
+        },
+    )
+    monkeypatch.setenv("GEPA_REFLECTION_MODEL", "gpt-5.4")
+    monkeypatch.setenv("GEPA_REFLECTION_REASONING_EFFORT", "medium")
+    monkeypatch.delenv("GEPA_REFLECTION_TEMPERATURE", raising=False)
+
+    reflection_lm = optimize.build_gepa_reflection_lm(planner_lm)
+
+    assert reflection_lm.model == "openai/gpt-5.4"
+    assert reflection_lm.kwargs == {
+        "seed": 7,
+        "reasoning_effort": "medium",
+    }
+
+
+def _reflection_template_yaml_path():
+    return OPTIMIZE_PATH.parent / "yamls" / "DSPy" / "reflection_template.yaml"
+
+
+def test_gepa_reflection_template_auto_uses_original_without_densified_labels():
+    optimize = _load_optimize_module()
+    args = types.SimpleNamespace(
+        gepa_reflection_template_yaml=_reflection_template_yaml_path(),
+        gepa_reflection_template_version="auto",
+    )
+
+    info = optimize.configure_gepa_reflection_prompt_templates(
+        args,
+        densified_enabled=False,
+    )
+
+    assert info["resolved_version"] == "original"
+    planner_template = optimize.GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE
+    captioner_template = optimize.GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE
+    assert "Below are optimization examples containing runtime trajectories and evaluation feedback" in planner_template
+    assert "For each example with densified supervision" not in planner_template
+    assert "matching Key evidence" not in planner_template
+    assert "any privileged dataset evidence if enabled" in captioner_template
+    assert "For each example with densified supervision" not in captioner_template
+
+
+def test_gepa_reflection_template_auto_uses_key_evidence_with_densified_labels():
+    optimize = _load_optimize_module()
+    args = types.SimpleNamespace(
+        gepa_reflection_template_yaml=_reflection_template_yaml_path(),
+        gepa_reflection_template_version="auto",
+    )
+
+    info = optimize.configure_gepa_reflection_prompt_templates(
+        args,
+        densified_enabled=True,
+    )
+
+    assert info["resolved_version"] == "densified_key_evidence"
+    planner_template = optimize.GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE
+    captioner_template = optimize.GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE
+    assert "For each example with densified supervision" in planner_template
+    assert "matching Key evidence" in planner_template
+    assert "Ideal perception target" not in planner_template
+    assert "For each example with densified supervision" in captioner_template
+    assert "matching Key evidence" in captioner_template
+    assert "Ideal perception target" not in captioner_template
 
 
 class _ModelDumpWrapper:
@@ -351,6 +426,98 @@ def test_gepa_caption_supervision_mode_none_disables_privileged_loading():
     assert root is None
 
 
+def test_gepa_densified_supervision_loads_key_evidence_from_current_and_legacy_schemas(tmp_path):
+    optimize = _load_optimize_module()
+    label_path = tmp_path / "video-1-2.json"
+    label_path.write_text(
+        json.dumps({
+            "key_evidence": "  decisive visible action  ",
+            "ideal_perception_target": "  legacy field is ignored  ",
+        }),
+        encoding="utf-8",
+    )
+
+    loaded = optimize._load_gepa_densified_supervision(
+        label_dir=tmp_path,
+        cut_id="video-1-2",
+    )
+
+    assert loaded == {
+        "gepa_privileged_key_evidence": "decisive visible action",
+    }
+
+    label_path.write_text(
+        json.dumps({"key_evidence": "  key-only evidence  "}),
+        encoding="utf-8",
+    )
+    assert optimize._load_gepa_densified_supervision(
+        label_dir=tmp_path,
+        cut_id="video-1-2",
+    ) == {
+        "gepa_privileged_key_evidence": "key-only evidence",
+    }
+
+    label_path.write_text(
+        json.dumps({"ideal_perception_target": "missing required key"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="required fields"):
+        optimize._load_gepa_densified_supervision(
+            label_dir=tmp_path,
+            cut_id="video-1-2",
+        )
+
+    label_path.write_text(
+        json.dumps({"key_evidence": "evidence", "metadata": "unsupported"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="only supported fields"):
+        optimize._load_gepa_densified_supervision(
+            label_dir=tmp_path,
+            cut_id="video-1-2",
+        )
+
+    label_path.write_text(
+        json.dumps({"key_evidence": "  "}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        optimize._load_gepa_densified_supervision(
+            label_dir=tmp_path,
+            cut_id="video-1-2",
+        )
+
+
+def test_make_trainset_from_cuts_attaches_densified_labels_by_question_id(tmp_path, monkeypatch):
+    optimize = _load_optimize_module()
+    (tmp_path / "question-2.json").write_text(
+        json.dumps({
+            "key_evidence": "matching evidence",
+            "ideal_perception_target": "matching perception target",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(optimize, "build_input_state", lambda *args: {
+        "question": "question",
+        "options": ["A. first", "B. second"],
+        "video_path": "/video.mp4",
+        "audio_path": "/audio.wav",
+        "video_id": "shared-video",
+        "video_description": "runtime caption",
+    })
+    cuts = [{"id": "question-2", "supervisions": [{"custom": {"answer": "B"}}]}]
+
+    examples, skipped = optimize.make_trainset_from_cuts(
+        cuts,
+        None,
+        gepa_densified_label_dir=tmp_path,
+    )
+
+    assert skipped == []
+    assert examples[0].labels()["gepa_privileged_key_evidence"] == "matching evidence"
+    assert "gepa_privileged_ideal_perception_target" not in examples[0].labels()
+
+
 def test_gepa_caption_supervision_mode_auto_uses_root_when_available(tmp_path):
     optimize = _load_optimize_module()
     (tmp_path / "Videos").mkdir()
@@ -380,6 +547,8 @@ def test_gepa_caption_supervision_is_a_label_not_a_runtime_input():
         "gepa_privileged_av_alignment_captions": "alignment gold",
         "gepa_privileged_video_consistent_captions": "visual gold",
         "gepa_privileged_audio_revised_captions": "audio gold",
+        "gepa_privileged_key_evidence": "decisive evidence",
+        "gepa_privileged_ideal_perception_target": "ideal target",
     }
 
     example = optimize.make_trainset([raw_item])[0]
@@ -388,10 +557,21 @@ def test_gepa_caption_supervision_is_a_label_not_a_runtime_input():
     assert example.labels()["gepa_privileged_av_alignment_captions"] == "alignment gold"
     assert example.labels()["gepa_privileged_video_consistent_captions"] == "visual gold"
     assert example.labels()["gepa_privileged_audio_revised_captions"] == "audio gold"
+    assert "gepa_privileged_key_evidence" not in example.inputs()
+    assert "gepa_privileged_ideal_perception_target" not in example.inputs()
+    assert example.labels()["gepa_privileged_key_evidence"] == "decisive evidence"
+    assert "gepa_privileged_ideal_perception_target" not in example.labels()
 
 
 def test_reflective_dataset_and_proposal_prompts_are_target_specific():
     optimize = _load_optimize_module()
+    optimize.configure_gepa_reflection_prompt_templates(
+        types.SimpleNamespace(
+            gepa_reflection_template_yaml=_reflection_template_yaml_path(),
+            gepa_reflection_template_version="densified_key_evidence",
+        ),
+        densified_enabled=True,
+    )
     adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
     adapter.component_names = ("planner_component", "captioner_component")
     adapter.student = types.SimpleNamespace(
@@ -407,6 +587,8 @@ def test_reflective_dataset_and_proposal_prompts_are_target_specific():
         gepa_privileged_av_alignment_captions="full alignment\nwith newline\n",
         gepa_privileged_video_consistent_captions="full visual\n",
         gepa_privileged_audio_revised_captions="full audio\n",
+        gepa_privileged_key_evidence="question-matched key evidence",
+        gepa_privileged_ideal_perception_target="question-matched perception target",
     )
     prediction = types.SimpleNamespace(answer="A", reasoning_summary="reasoning", turn_trace=[])
     eval_batch = types.SimpleNamespace(trajectories=[{
@@ -431,6 +613,17 @@ def test_reflective_dataset_and_proposal_prompts_are_target_specific():
     assert "Captioner tool instruction" in captioner_inputs["Component role"]
     assert "Never output an answer letter" in captioner_inputs["Output contract"]
     assert "Caption quality rubric" in captioner_inputs
+    expected_densified = {
+        "Key evidence": "question-matched key evidence",
+    }
+    assert (
+        planner_inputs["Privileged densified supervision (optimization only)"]
+        == expected_densified
+    )
+    assert (
+        captioner_inputs["Privileged densified supervision (optimization only)"]
+        == expected_densified
+    )
     evidence = captioner_inputs["Privileged dataset evidence (optimization only)"]
     assert evidence == (
         "=== PRIVILEGED DATASET EVIDENCE FOR OPTIMIZATION ONLY ===\n\n"
@@ -458,12 +651,18 @@ def test_reflective_dataset_and_proposal_prompts_are_target_specific():
     assert "not to learn facts from the example videos" in planner_template
     assert "Turn example-specific feedback into general rules" in planner_template
     assert "how to formulate one targeted perceptual question" in planner_template
+    assert "matching Key evidence" in planner_template
+    assert "Ideal perception target" not in planner_template
+    assert "privileged supervision is unavailable at runtime" in planner_template
     assert "niche and domain specific factual information" not in planner_template
     prompt_template = captioner_proposal["prompt_template"]
     assert "ask_caption tool to obtain" in prompt_template
     assert "must not solve the multiple-choice question" in prompt_template
     assert "generalize to unseen videos" in prompt_template
     assert "Do not copy or encode any example-specific answer" in prompt_template
+    assert "matching Key evidence" in prompt_template
+    assert "Ideal perception target" not in prompt_template
+    assert "All privileged supervision is unavailable at runtime" in prompt_template
     assert "ask_caption / ask_perception workflow" not in prompt_template
 
 
@@ -500,6 +699,7 @@ def test_captioner_reflective_dataset_omits_privileged_evidence_when_not_loaded(
     assert inputs["Optimization target"] == "captioner.default_caption_instruction"
     assert "Caption quality rubric" in inputs
     assert "Privileged dataset evidence (optimization only)" not in inputs
+    assert "Privileged densified supervision (optimization only)" not in inputs
 
 
 def test_compact_reflection_trace_records_failed_prediction_status():
@@ -775,6 +975,8 @@ def test_inference_only_skips_optimization_dataset_resolution(tmp_path):
         prompt_yaml=None,
         optimize_targets=("planner.workflow_prompt",),
         allowed_tools="ask_perception",
+        audio_caption_dir=None,
+        ignore_audio_caption_dir=False,
         max_turns=3,
     )
     optimize.parse_optimize_args = lambda: args
@@ -782,6 +984,7 @@ def test_inference_only_skips_optimization_dataset_resolution(tmp_path):
     optimize.load_captioner_config_yaml = lambda path: None
     optimize.configure_gemini_api_backend = lambda parsed_args: None
     optimize.load_prompt_config = lambda path: None
+    optimize.resolve_preloaded_audio_caption_dir = lambda *args, **kwargs: (None, "not provided")
     optimize.validate_optimize_targets = lambda targets: None
     optimize.apply_prompt_config_to_signatures = lambda **kwargs: None
     optimize.resolve_allowed_tools = lambda tools: ("ask_perception",)

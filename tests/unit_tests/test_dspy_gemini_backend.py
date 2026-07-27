@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -139,6 +140,124 @@ def test_legacy_gemini_keeps_native_contents(monkeypatch):
     assert captured["contents"][0]["parts"] == [{"inline": "audio.wav"}, {"inline": "video.mp4"}, {"text": "question"}]
     assert "retry_delay_s" in captured["kwargs"]
     assert tools.consume_last_perception_metadata()["api_backend"] == "legacy"
+
+
+def test_qwen_split_audio_keeps_standalone_audio_and_retry_fallback(monkeypatch):
+    tools = _load_tools()
+    captured = {}
+    qwen_api = types.ModuleType("dspy_avqa.qwen3omni_api")
+    qwen_api.to_data_url = lambda path: f"data:{path}"
+
+    def call(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return "qwen response", {}, ""
+
+    qwen_api.call_qwen_messages = call
+    sys.modules["dspy_avqa.qwen3omni_api"] = qwen_api
+    monkeypatch.setenv("QWEN_USE_AUDIO_IN_VIDEO", "false")
+    monkeypatch.setenv("QWEN_VIDEO_ONLY", "false")
+
+    tools.call_qwen_perception(
+        "video.mp4",
+        "audio.wav",
+        "question",
+        system_prompt="",
+    )
+
+    content = captured["messages"][0]["content"]
+    assert [item["type"] for item in content] == [
+        "audio_url",
+        "video_url",
+        "text",
+    ]
+    assert captured["kwargs"]["use_audio_in_video"] is False
+    assert captured["kwargs"]["empty_response_retry_video_first"] is True
+
+
+def test_qwen_audio_in_video_omits_duplicate_standalone_audio(monkeypatch):
+    tools = _load_tools()
+    captured = {}
+    qwen_api = types.ModuleType("dspy_avqa.qwen3omni_api")
+    qwen_api.to_data_url = lambda path: f"data:{path}"
+
+    def call(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return "qwen response", {"total_tokens": 3}, ""
+
+    qwen_api.call_qwen_messages = call
+    sys.modules["dspy_avqa.qwen3omni_api"] = qwen_api
+    monkeypatch.setenv("QWEN_USE_AUDIO_IN_VIDEO", "true")
+    monkeypatch.setenv("QWEN_VIDEO_ONLY", "false")
+
+    assert (
+        tools.call_qwen_perception(
+            "video.mp4",
+            "audio.wav",
+            "question",
+            system_prompt="system",
+        )
+        == "qwen response"
+    )
+    content = captured["messages"][1]["content"]
+    assert [item["type"] for item in content] == ["video_url", "text"]
+    assert captured["kwargs"]["use_audio_in_video"] is True
+    metadata = tools.consume_last_perception_metadata()
+    assert metadata["use_audio_in_video"] is True
+
+
+def test_qwen_video_only_takes_precedence_over_audio_in_video(monkeypatch):
+    tools = _load_tools()
+    captured = {}
+    qwen_api = types.ModuleType("dspy_avqa.qwen3omni_api")
+    qwen_api.to_data_url = lambda path: f"data:{path}"
+
+    def call(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return "qwen response", {}, ""
+
+    qwen_api.call_qwen_messages = call
+    sys.modules["dspy_avqa.qwen3omni_api"] = qwen_api
+    monkeypatch.setenv("QWEN_USE_AUDIO_IN_VIDEO", "true")
+    monkeypatch.setenv("QWEN_VIDEO_ONLY", "true")
+
+    tools.call_qwen_perception(
+        "video.mp4",
+        "audio.wav",
+        "question",
+        system_prompt="",
+    )
+    content = captured["messages"][0]["content"]
+    assert [item["type"] for item in content] == ["video_url", "text"]
+    assert captured["kwargs"]["use_audio_in_video"] is False
+
+
+def test_runner_invalidates_cached_empty_qwen_observations(tmp_path):
+    runner = _load_runner()
+    cut = {"id": "sample-1"}
+    cache_path = tmp_path / "sample-1.json"
+    question_data = {
+        "response": "A. answer",
+        "turn_trace": [
+            {
+                "planner_action": "tool",
+                "perception_backend": "qwen",
+                "tool_observation": "",
+            }
+        ],
+    }
+    cache_path.write_text(json.dumps(question_data), encoding="utf-8")
+    assert runner.load_cached_row_from_question_json(tmp_path, cut) is None
+
+    question_data["turn_trace"][0]["tool_observation"] = "visible evidence"
+    cache_path.write_text(json.dumps(question_data), encoding="utf-8")
+    assert runner.load_cached_row_from_question_json(tmp_path, cut) is not None
+
+    question_data["response"] = "[ERROR] Qwen API call failed"
+    cache_path.write_text(json.dumps(question_data), encoding="utf-8")
+    assert runner.load_cached_row_from_question_json(tmp_path, cut) is None
 
 
 def test_runner_dspy_validation_requires_roots_and_validates_captioner_top_k(monkeypatch):

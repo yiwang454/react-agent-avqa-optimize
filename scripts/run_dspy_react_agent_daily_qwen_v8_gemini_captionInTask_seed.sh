@@ -10,7 +10,12 @@ set -a
 source "${ENV_FILE}"
 set +a
 
-# conda activate "${ENV_PREFIX}"
+export PYTHON_BIN="${PYTHON_BIN_OVERRIDE:-${ENV_PREFIX}/bin/python}"
+if [ ! -x "${PYTHON_BIN}" ]; then
+  echo "Python interpreter is not executable: ${PYTHON_BIN}" >&2
+  exit 1
+fi
+
 export PROJECT_DIR="${PROJECT_DIR_OVERRIDE:-${REPO_DIR}}"
 cd "${PROJECT_DIR}"
 
@@ -29,7 +34,7 @@ export AUDIO_CAPTION_DIR="${AUDIO_CAPTION_DIR_OVERRIDE:-}"
 BASE_ENV_OUTPUT_DIR=/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_qwen_v8GeminiCaptionInTask
 export OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-${BASE_ENV_OUTPUT_DIR}_qwen_seed_${QWEN_SEED}_deepseek_seed_${DEEPSEEK_SEED}}"
 export OUTPUT_JSONL="${OUTPUT_DIR}/output_test.jsonl"
-export QWEN_BASE_URL="http://10.62.187.92:8000/v1"
+export QWEN_BASE_URL="${QWEN_BASE_URL_OVERRIDE:-http://10.62.186.8:8000/v1}"
 
 # Print related settings to verify env loading without leaking secrets.
 echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:+***set***}"
@@ -51,6 +56,7 @@ echo "CAPTIONER_CONFIG_YAML=${CAPTIONER_CONFIG_YAML:-}"
 echo "PROMPT_YAML=${PROMPT_YAML:-}"
 echo "DSPY_AVQA_ALLOWED_TOOLS=${DSPY_AVQA_ALLOWED_TOOLS:-}"
 echo "PERCEPTION_MODEL=${PERCEPTION_MODEL}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
 echo "INPUT_JSONL=${INPUT_JSONL}"
 echo "AUDIO_CAPTION_DIR=${AUDIO_CAPTION_DIR:-<none>}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
@@ -60,6 +66,7 @@ echo "DEBUG=${DEBUG}"
 echo "DEBUG_LIMIT=${DEBUG_LIMIT}"
 
 RUN_REPEATS="${RUN_REPEATS:-3}"
+PARALLEL_REPEATS="${PARALLEL_REPEATS:-false}"
 BASE_OUTPUT_DIR="${OUTPUT_DIR%/}"
 child_pids=()
 
@@ -79,6 +86,7 @@ trap 'cleanup_children SIGTERM; exit 143' TERM
 trap 'cleanup_children EXIT' EXIT
 
 echo "RUN_REPEATS=${RUN_REPEATS}"
+echo "PARALLEL_REPEATS=${PARALLEL_REPEATS}"
 echo "BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR}"
 
 for run_idx in $(seq 1 $RUN_REPEATS); do
@@ -90,7 +98,7 @@ for run_idx in $(seq 1 $RUN_REPEATS); do
   echo "RUN_OUTPUT_JSONL=${run_output_jsonl}"
 
   cmd=(
-    python DSPy/avqa_dspy_impl.py
+    "${PYTHON_BIN}" DSPy/avqa_dspy_impl.py
     --input-jsonl "${INPUT_JSONL}"
     --output-jsonl "${run_output_jsonl}"
     --output-dir "${run_output_dir}"
@@ -125,10 +133,16 @@ for run_idx in $(seq 1 $RUN_REPEATS); do
   fi
 
   cmd+=("$@")
-  "${cmd[@]}" &
-  child_pids+=("$!")
+  if [ "${PARALLEL_REPEATS}" = "true" ]; then
+    "${cmd[@]}" &
+    child_pids+=("$!")
+  else
+    "${cmd[@]}"
+  fi
 done
 
-wait
+if [ "${#child_pids[@]}" -gt 0 ]; then
+  wait
+fi
 child_pids=()
 trap - INT TERM EXIT
