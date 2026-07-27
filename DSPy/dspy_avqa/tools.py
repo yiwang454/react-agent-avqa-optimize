@@ -219,14 +219,18 @@ def call_qwen_perception(
     from .qwen3omni_api import call_qwen_messages, to_data_url
 
     qwen_video_only = _env_flag_prefixed(env_prefix, "VIDEO_ONLY", "false")
-    if not audio_path and not qwen_video_only:
+    qwen_use_audio_in_video = (
+        not qwen_video_only
+        and _env_flag_prefixed(env_prefix, "USE_AUDIO_IN_VIDEO", "false")
+    )
+    if not audio_path and not qwen_video_only and not qwen_use_audio_in_video:
         raise ValueError("audio_path is required for Qwen3-omni calls")
 
     content: list[dict[str, Any]] = []
     video_content = {"type": "video_url", "video_url": {"url": to_data_url(video_path)}}
     audio_content = (
         {"type": "audio_url", "audio_url": {"url": to_data_url(audio_path)}}
-        if audio_path and not qwen_video_only
+        if audio_path and not qwen_video_only and not qwen_use_audio_in_video
         else None
     )
     if _env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false"):
@@ -259,10 +263,26 @@ def call_qwen_perception(
         max_tokens=int(_env_value_prefixed(env_prefix, "MAX_TOKENS", "1024")),
         fps=float(_env_value_prefixed(env_prefix, "FPS", "2.0")),
         max_frames=int(_env_value_prefixed(env_prefix, "MAX_FRAMES", "128")),
+        use_audio_in_video=qwen_use_audio_in_video,
         repetition_penalty=_env_optional_float_prefixed(env_prefix, "REPETITION_PENALTY"),
         enable_thinking=_env_optional_bool_prefixed(env_prefix, "ENABLE_THINKING"),
         return_thinking=True,
         retry_degenerate_response=True,
+        empty_response_retry_min_tokens=int(
+            _env_value_prefixed(env_prefix, "EMPTY_RESPONSE_RETRY_MIN_TOKENS", "0")
+        ),
+        empty_response_retry_temperature=_env_optional_float_prefixed(
+            env_prefix, "EMPTY_RESPONSE_RETRY_TEMPERATURE"
+        ),
+        empty_response_retry_seed_step=int(
+            _env_value_prefixed(env_prefix, "EMPTY_RESPONSE_RETRY_SEED_STEP", "0")
+        ),
+        empty_response_retry_video_first=_env_flag_prefixed(
+            env_prefix, "EMPTY_RESPONSE_RETRY_VIDEO_FIRST", "true"
+        ),
+        raise_on_empty_response=_env_flag_prefixed(
+            env_prefix, "RAISE_ON_EMPTY_RESPONSE", "true"
+        ),
     )
     _set_last_perception_metadata(
         backend="qwen",
@@ -271,6 +291,7 @@ def call_qwen_perception(
         model=_env_value_prefixed(env_prefix, "MODEL", "qwen3-omni") or "qwen3-omni",
         base_url=_env_optional_value_prefixed(env_prefix, "BASE_URL"),
         video_first=_env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false"),
+        use_audio_in_video=qwen_use_audio_in_video,
         env_prefix=env_prefix,
         token_usage=token_usage,
         thinking_text=thinking_text,

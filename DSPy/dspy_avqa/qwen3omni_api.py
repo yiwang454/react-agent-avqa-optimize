@@ -17,6 +17,15 @@ BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compa
 MODEL = os.getenv("QWEN_MODEL", "qwen3-omni-flash")
 
 
+class EmptyQwenResponseError(RuntimeError):
+    """Raised when every Qwen attempt returns empty visible content."""
+
+    def __init__(self, message: str, response_attempts: list[dict[str, Any]]) -> None:
+        """Initialize the error with structured response-attempt diagnostics."""
+        super().__init__(message)
+        self.response_attempts = response_attempts
+
+
 def _env_flag(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -165,6 +174,40 @@ def _extract_message_reasoning(message: Any) -> str:
     return _extract_text_content(message_data.get("reasoning_content"))
 
 
+def _extract_finish_reason(response: Any) -> str | None:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None
+    finish_reason = getattr(choices[0], "finish_reason", None)
+    return str(finish_reason) if finish_reason is not None else None
+
+
+def _messages_with_video_first(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Place video items before audio items without moving non-media content."""
+    reordered_messages: List[Dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            reordered_messages.append(message)
+            continue
+
+        media_positions = [
+            index
+            for index, item in enumerate(content)
+            if isinstance(item, dict)
+            and item.get("type") in {"audio_url", "video_url"}
+        ]
+        media_items = [content[index] for index in media_positions]
+        media_items.sort(key=lambda item: item.get("type") != "video_url")
+        reordered_content = list(content)
+        for index, item in zip(media_positions, media_items):
+            reordered_content[index] = item
+        reordered_messages.append({**message, "content": reordered_content})
+    return reordered_messages
+
+
 def call_qwen_messages(
     messages: List[Dict[str, Any]],
     *,
@@ -181,42 +224,78 @@ def call_qwen_messages(
     max_tokens: int = 1024,
     fps: float = 2.0,
     max_frames: int = 128,
+    use_audio_in_video: Optional[bool] = None,
     repetition_penalty: Optional[float] = None,
     enable_thinking: Optional[bool] = None,
     stream: Optional[bool] = None,
     return_thinking: bool = False,
     retry_degenerate_response: bool = False,
+    empty_response_retry_min_tokens: int = 0,
+    empty_response_retry_temperature: Optional[float] = None,
+    empty_response_retry_seed_step: int = 0,
+    empty_response_retry_video_first: bool = False,
+    raise_on_empty_response: bool = False,
 ) -> Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], str]:
     last_err: Exception | None = None
     resolved_stream = _env_flag("QWEN_STREAM", True) if stream is None else stream
+    response_attempts: list[dict[str, Any]] = []
+    empty_response_retry_count = 0
     for attempt in range(1, max_retries + 1):
         try:
+            is_empty_response_retry = (
+                retry_degenerate_response and empty_response_retry_count > 0
+            )
+            effective_temperature = temperature
+            effective_seed = qwen_seed
+            effective_min_tokens = 0
+            if is_empty_response_retry:
+                if empty_response_retry_temperature is not None:
+                    effective_temperature = empty_response_retry_temperature
+                if effective_seed is not None:
+                    effective_seed += empty_response_retry_seed_step * empty_response_retry_count
+                effective_min_tokens = min(
+                    max(0, empty_response_retry_min_tokens),
+                    max_tokens,
+                )
+
+            use_video_first_retry = (
+                is_empty_response_retry and empty_response_retry_video_first
+            )
+            effective_messages = (
+                _messages_with_video_first(messages)
+                if use_video_first_retry
+                else messages
+            )
+
             extra_body: Dict[str, Any] = {
                 "top_k": top_k,
             }
+            if effective_min_tokens:
+                extra_body["min_tokens"] = effective_min_tokens
             if repetition_penalty is not None:
                 extra_body["repetition_penalty"] = repetition_penalty
-            # if _env_flag("QWEN_INCLUDE_MM_PROCESSOR_KWARGS", True):
-            extra_body["mm_processor_kwargs"] = {
+            mm_processor_kwargs: Dict[str, Any] = {
                 "fps": fps,
                 "max_frames": max_frames,
             }
+            if use_audio_in_video is not None:
+                mm_processor_kwargs["use_audio_in_video"] = use_audio_in_video
+            extra_body["mm_processor_kwargs"] = mm_processor_kwargs
             if enable_thinking is not None and _env_flag("QWEN_INCLUDE_ENABLE_THINKING", True):
-                # extra_body["enable_thinking"] = enable_thinking
                 extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = enable_thinking
 
             request_kwargs: Dict[str, Any] = {
                 "model": model,
-                "messages": messages,
+                "messages": effective_messages,
                 "stream": resolved_stream,
-                "temperature": temperature,
+                "temperature": effective_temperature,
                 "top_p": top_p,
                 "max_tokens": max_tokens,
                 "timeout": timeout,
                 "extra_body": extra_body,
             }
-            if qwen_seed is not None:
-                request_kwargs["seed"] = qwen_seed
+            if effective_seed is not None:
+                request_kwargs["seed"] = effective_seed
             if resolved_stream:
                 request_kwargs["stream_options"] = {"include_usage": True}
 
@@ -228,6 +307,7 @@ def call_qwen_messages(
                 content_chunks: list[str] = []
                 reasoning_chunks: list[str] = []
                 token_usage: Dict[str, Any] = {}
+                finish_reason: str | None = None
                 for chunk in completion:
                     content = _extract_stream_delta(chunk)
                     if content:
@@ -238,6 +318,7 @@ def call_qwen_messages(
                     usage = _extract_usage(chunk)
                     if usage:
                         token_usage = usage
+                    finish_reason = _extract_finish_reason(chunk) or finish_reason
                 response_text = "".join(content_chunks)
                 reasoning_text = "".join(reasoning_chunks).strip()
                 if not response_text.strip() and not reasoning_text:
@@ -251,16 +332,37 @@ def call_qwen_messages(
                     response_text = _extract_text_content(getattr(message, "content", None))
                     reasoning_text = _extract_message_reasoning(message).strip()
                     token_usage = _extract_usage(retry_completion) or token_usage
+                    finish_reason = _extract_finish_reason(retry_completion) or finish_reason
             else:
                 message = completion.choices[0].message
                 response_text = _extract_text_content(getattr(message, "content", None))
                 reasoning_text = _extract_message_reasoning(message).strip()
                 token_usage = _extract_usage(completion)
+                finish_reason = _extract_finish_reason(completion)
 
             degenerate_reason = (
-                degenerate_response_reason(response_text, token_usage, max_tokens=max_tokens)
+                degenerate_response_reason(
+                    response_text,
+                    token_usage,
+                    max_tokens=max_tokens,
+                )
                 if retry_degenerate_response
                 else None
+            )
+            response_attempts.append(
+                {
+                    "attempt": attempt,
+                    "seed": effective_seed,
+                    "temperature": effective_temperature,
+                    "max_tokens": max_tokens,
+                    "min_tokens": effective_min_tokens,
+                    "video_first_retry": use_video_first_retry,
+                    "completion_tokens": token_usage.get("completion_tokens"),
+                    "content_chars": len(response_text),
+                    "reasoning_chars": len(reasoning_text),
+                    "finish_reason": finish_reason,
+                    "degenerate_reason": degenerate_reason,
+                }
             )
             if degenerate_reason and attempt < max_retries:
                 print(
@@ -268,18 +370,27 @@ def call_qwen_messages(
                     f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
                     flush=True,
                 )
+                empty_response_retry_count += 1
                 time.sleep(retry_delay_s)
                 continue
             if degenerate_reason:
-                print(
-                    f"[warn] Qwen API exhausted {max_retries} attempts after a degenerate "
-                    f"perception response: {degenerate_reason}. Keeping the final response.",
-                    flush=True,
+                message = (
+                    f"Qwen API exhausted {max_retries} attempts after a degenerate "
+                    f"perception response: {degenerate_reason}"
                 )
+                print(f"[warn] {message}.", flush=True)
+                if raise_on_empty_response:
+                    raise EmptyQwenResponseError(message, response_attempts)
+
+            if len(response_attempts) > 1:
+                token_usage = dict(token_usage)
+                token_usage["qwen_response_attempts"] = response_attempts
 
             if return_thinking:
                 return response_text, token_usage, reasoning_text
             return response_text, token_usage
+        except EmptyQwenResponseError:
+            raise
         except Exception as exc:
             last_err = exc
             if attempt < max_retries:

@@ -111,6 +111,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch run DSPy AVQA ReAct over cut JSONL.")
     parser.add_argument("--input-jsonl", type=Path, required=True)
     parser.add_argument("--output-jsonl", type=Path, required=True)
+    parser.add_argument(
+        "--sample-ids",
+        nargs="+",
+        default=None,
+        help="Run only these cut/question IDs. Comma-separated values are also accepted.",
+    )
     parser.add_argument("--audio-caption-dir", type=Path, default=None)
     parser.add_argument(
         "--ignore-audio-caption-dir",
@@ -326,8 +332,16 @@ def _load_qwen_config_yaml(path: Path | None, *, prefix: str, preserve_base_url_
             "timeout": f"{prefix}_TIMEOUT",
             "max_retries": f"{prefix}_MAX_RETRIES",
             "qwen_delay_s": f"{prefix}_DELAY_S",
+            "empty_response_retry_min_tokens": f"{prefix}_EMPTY_RESPONSE_RETRY_MIN_TOKENS",
+            "empty_response_retry_temperature": f"{prefix}_EMPTY_RESPONSE_RETRY_TEMPERATURE",
+            "empty_response_retry_seed_step": f"{prefix}_EMPTY_RESPONSE_RETRY_SEED_STEP",
+            "empty_response_retry_video_first": f"{prefix}_EMPTY_RESPONSE_RETRY_VIDEO_FIRST",
         },
     )
+    if task.get("raise_on_empty_response") is not None:
+        os.environ[f"{prefix}_RAISE_ON_EMPTY_RESPONSE"] = _env_bool(
+            task["raise_on_empty_response"]
+        )
     _set_env_from_mapping(
         model,
         {
@@ -453,6 +467,10 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
         os.environ["QWEN_ENABLE_THINKING"] = _env_bool(task["enable_thinking"])
     if task.get("video_first") is not None:
         os.environ["QWEN_VIDEO_FIRST"] = _env_bool(task["video_first"])
+    if task.get("use_audio_in_video") is not None:
+        os.environ["QWEN_USE_AUDIO_IN_VIDEO"] = _env_bool(
+            task["use_audio_in_video"]
+        )
 
     _set_env_from_mapping(
         task,
@@ -471,8 +489,16 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "timeout": "QWEN_TIMEOUT",
             "max_retries": "QWEN_MAX_RETRIES",
             "qwen_delay_s": "QWEN_DELAY_S",
+            "empty_response_retry_min_tokens": "QWEN_EMPTY_RESPONSE_RETRY_MIN_TOKENS",
+            "empty_response_retry_temperature": "QWEN_EMPTY_RESPONSE_RETRY_TEMPERATURE",
+            "empty_response_retry_seed_step": "QWEN_EMPTY_RESPONSE_RETRY_SEED_STEP",
+            "empty_response_retry_video_first": "QWEN_EMPTY_RESPONSE_RETRY_VIDEO_FIRST",
         },
     )
+    if task.get("raise_on_empty_response") is not None:
+        os.environ["QWEN_RAISE_ON_EMPTY_RESPONSE"] = _env_bool(
+            task["raise_on_empty_response"]
+        )
     if task.get("print_first_prompt") is not None:
         os.environ["GEMINI_PRINT_FIRST_PROMPT"] = _env_bool(task["print_first_prompt"])
 
@@ -535,6 +561,10 @@ def extract_error_info(exc: Exception) -> dict[str, Any]:
         info["parsed_output_fields"] = list(parsed_result.keys())
         info["parsed_result"] = parsed_result
 
+    response_attempts = getattr(exc, "response_attempts", None)
+    if isinstance(response_attempts, list):
+        info["qwen_response_attempts"] = response_attempts
+
     signature = getattr(exc, "signature", None)
     output_fields = getattr(signature, "output_fields", None)
     if isinstance(output_fields, dict):
@@ -546,6 +576,22 @@ def cut_id(cut: dict[str, Any]) -> str:
     """Return the per-question sample id used for cache files and output rows."""
     value = cut.get("id")
     return str(value) if value is not None else ""
+
+
+def _has_empty_qwen_tool_observation(question_data: dict[str, Any]) -> bool:
+    for turn in question_data.get("turn_trace") or []:
+        if not isinstance(turn, dict):
+            continue
+        observation = turn.get("tool_observation")
+        if (
+            turn.get("planner_action") == "tool"
+            and str(turn.get("perception_backend") or "").strip().lower() == "qwen"
+            and isinstance(observation, str)
+            and not observation.strip()
+        ):
+            return True
+    return False
+
 
 def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, Any]) -> dict[str, Any] | None:
     """Load one completed per-sample JSON cache and wrap it as a result row."""
@@ -563,11 +609,25 @@ def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, A
         print(f"Cached DSPy sample at {path} is unreadable, regenerating: {exc}")
         return None
 
-    if not isinstance(question_data, dict) or not str(question_data.get("response") or "").strip():
-        print(f"Cached DSPy sample at {path} missing response, regenerating.")
+    if not isinstance(question_data, dict):
+        print(f"Cached DSPy sample at {path} is not a JSON object, regenerating.")
         return None
 
-    row = build_result_row(cut, str(question_data.get("response") or ""))
+    response = str(question_data.get("response") or "").strip()
+    if not response:
+        print(f"Cached DSPy sample at {path} missing response, regenerating.")
+        return None
+    if response.startswith("[ERROR]"):
+        print(f"Cached DSPy sample at {path} contains an error response, regenerating.")
+        return None
+    if _has_empty_qwen_tool_observation(question_data):
+        print(
+            f"Cached DSPy sample at {path} contains an empty Qwen tool observation, "
+            "regenerating."
+        )
+        return None
+
+    row = build_result_row(cut, response)
     row["question_data"] = question_data
     return row
 
@@ -622,7 +682,27 @@ def run_batch() -> None:
     apply_prompt_config_to_signatures()
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
     cuts = read_jsonl(args.input_jsonl)
-    selected = cuts[: args.debug_limit] if args.debug else cuts
+    requested_sample_ids = {
+        sample_id
+        for value in (args.sample_ids or [])
+        for sample_id in (part.strip() for part in value.split(","))
+        if sample_id
+    }
+    selected = (
+        [cut for cut in cuts if cut_id(cut) in requested_sample_ids]
+        if requested_sample_ids
+        else cuts
+    )
+    if requested_sample_ids:
+        found_sample_ids = {cut_id(cut) for cut in selected}
+        missing_sample_ids = sorted(requested_sample_ids - found_sample_ids)
+        if missing_sample_ids:
+            raise ValueError(
+                "Requested sample IDs not found in input JSONL: "
+                + ", ".join(missing_sample_ids)
+            )
+    if args.debug:
+        selected = selected[: args.debug_limit]
 
     context = AVQARuntimeContext(
         max_turns=args.max_turns,
@@ -718,10 +798,15 @@ def run_batch() -> None:
             f"base_url={os.environ.get('QWEN_BASE_URL', '')}, "
             f"video_only={os.environ.get('QWEN_VIDEO_ONLY', '')}, "
             f"video_first={os.environ.get('QWEN_VIDEO_FIRST', '')}, "
+            f"use_audio_in_video={os.environ.get('QWEN_USE_AUDIO_IN_VIDEO', '')}, "
             f"enable_thinking={os.environ.get('QWEN_ENABLE_THINKING', '')}, "
             f"timeout={os.environ.get('QWEN_TIMEOUT', '')}, "
             f"max_retries={os.environ.get('QWEN_MAX_RETRIES', '')}, "
             f"delay_s={os.environ.get('QWEN_DELAY_S', '')}, "
+            f"empty_retry_min_tokens={os.environ.get('QWEN_EMPTY_RESPONSE_RETRY_MIN_TOKENS', '')}, "
+            f"empty_retry_temperature={os.environ.get('QWEN_EMPTY_RESPONSE_RETRY_TEMPERATURE', '')}, "
+            f"empty_retry_seed_step={os.environ.get('QWEN_EMPTY_RESPONSE_RETRY_SEED_STEP', '')}, "
+            f"raise_on_empty={os.environ.get('QWEN_RAISE_ON_EMPTY_RESPONSE', '')}, "
             f"temperature={os.environ.get('QWEN_TEMPERATURE', '')}, "
             f"top_p={os.environ.get('QWEN_TOP_P', '')}, "
             f"top_k={os.environ.get('QWEN_TOP_K', '')}, "

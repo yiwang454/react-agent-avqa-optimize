@@ -1,15 +1,21 @@
 task:
   video_only: false
+  use_audio_in_video: true
   enable_thinking: false
   batch_size: 1
   parallel_qwen: false
   qwen_delay_s: 1.0
-  max_retries: 3
+  max_retries: 5
   timeout: 180
+  empty_response_retry_min_tokens: 32
+  empty_response_retry_temperature: 0.0
+  empty_response_retry_seed_step: 1
+  empty_response_retry_video_first: true
+  raise_on_empty_response: true
 
 model:
   qwen_model: qwen3-omni-instruct
-  qwen_base_url: "http://10.62.27.37:8000/v1"
+  qwen_base_url: "http://10.62.186.8:8000/v1"
   qwen_api_key: EMPTY
   
 sampling_params:

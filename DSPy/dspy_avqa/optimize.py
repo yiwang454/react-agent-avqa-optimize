@@ -50,6 +50,10 @@ GEPA_PRIVILEGED_CAPTION_FILES = (
     ("gepa_privileged_video_consistent_captions", "video_consistent_captions.txt"),
     ("gepa_privileged_audio_revised_captions", "audio_revised_captions.txt"),
 )
+GEPA_DENSIFIED_LABEL_FIELDS = (
+    ("gepa_privileged_key_evidence", "key_evidence"),
+)
+GEPA_DENSIFIED_OPTIONAL_SOURCE_KEYS = frozenset({"ideal_perception_target"})
 GEPA_CAPTIONER_TARGET_PREFIX = "captioner."
 GEPA_PLANNER_TARGET_PREFIX = "planner."
 GEPA_CAPTION_SUPERVISION_CHOICES = ("auto", "none", "privileged")
@@ -59,16 +63,16 @@ GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE = """I provided an assistant with the 
 <curr_instructions>
 ```
 
-Below are optimization examples containing runtime trajectories, evaluation feedback, and any privileged dataset evidence if enabled:
+Below are optimization examples containing runtime trajectories, evaluation feedback, and any optimization-only privileged supervision if enabled:
 ```
 <inputs_outputs_feedback>
 ```
 
 This instruction is used by the ask_caption tool to obtain a factual audio-visual caption. It must not solve the multiple-choice question, choose an option, output a final answer letter, plan tool calls, or instruct another model.
 
-Write an improved captioning instruction. If privileged evidence is present, use it only to judge whether the caption instruction asked for the right kinds of audio, visual, identity, continuity, action, source, simultaneity, and audio-visual correspondence information. Infer reusable improvements that will generalize to unseen videos.
+Write an improved captioning instruction. For each example with densified supervision, compare the caption step and its response against the matching Key evidence. Use Key evidence to judge whether the caption step captured the decisive observable facts, then infer reusable improvements that will generalize to unseen videos.
 
-The privileged evidence is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged evidence or assume access to it.
+All privileged supervision is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged supervision or assume access to it.
 
 Provide only the new captioner instruction within ``` blocks."""
 
@@ -77,7 +81,7 @@ GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE = """I provided an assistant with the fo
 <curr_instructions>
 ```
 
-Below are optimization examples containing runtime trajectories and evaluation feedback:
+Below are optimization examples containing runtime trajectories, evaluation feedback, and optimization-only densified supervision when available:
 ```
 <inputs_outputs_feedback>
 ```
@@ -86,9 +90,9 @@ Your task is to write a new instruction for the assistant.
 
 Infer the task format and the behavior required to solve it.
 
-Read the assistant responses and feedback. Identify recurring mistakes and general strategies that could improve performance on unseen examples.
+Read the assistant responses and feedback. For each example with densified supervision, compare the rollout against its matching Key evidence. Use Key evidence to judge whether caption/perception steps obtained and preserved the decisive facts. Identify recurring mistakes and general strategies that could improve performance on unseen examples.
 
-The goal is to improve the assistant's planning and tool-use policy, not to learn facts from the example videos.
+The goal is to improve the assistant's planning and tool-use policy, not to learn facts from the example videos. The privileged supervision is unavailable at runtime.
 
 Turn example-specific feedback into general rules. Do not copy or include any specific answer, option, timestamp, person, object, scene, event, caption text, tool observation, or other example-specific detail.
 
@@ -104,6 +108,39 @@ Provide only the new instruction within a single ``` block."""
 GEPA_REFLECTION_TEMPERATURE_ENV = "GEPA_REFLECTION_TEMPERATURE"
 GEPA_REFLECTION_MODEL_ENV = "GEPA_REFLECTION_MODEL"
 GEPA_REFLECTION_REASONING_EFFORT_ENV = "GEPA_REFLECTION_REASONING_EFFORT"
+GEPA_REFLECTION_API_KEY_ENV = "GEPA_REFLECTION_API_KEY"
+GEPA_REFLECTION_API_BASE_ENV = "GEPA_REFLECTION_API_BASE"
+GEPA_REFLECTION_TEMPLATE_YAML_ENV = "GEPA_REFLECTION_TEMPLATE_YAML"
+GEPA_REFLECTION_TEMPLATE_VERSION_ENV = "GEPA_REFLECTION_TEMPLATE_VERSION"
+GEPA_REFLECTION_TEMPLATE_VERSION_AUTO = "auto"
+GEPA_REFLECTION_TEMPLATE_VERSION_ORIGINAL = "original"
+GEPA_REFLECTION_TEMPLATE_VERSION_DENSIFIED_KEY_EVIDENCE = "densified_key_evidence"
+GEPA_REFLECTION_TEMPLATE_VERSION_ALIASES = {
+    "g0": GEPA_REFLECTION_TEMPLATE_VERSION_ORIGINAL,
+    "no_densified": GEPA_REFLECTION_TEMPLATE_VERSION_ORIGINAL,
+    "none": GEPA_REFLECTION_TEMPLATE_VERSION_ORIGINAL,
+    "original": GEPA_REFLECTION_TEMPLATE_VERSION_ORIGINAL,
+    "g3": GEPA_REFLECTION_TEMPLATE_VERSION_DENSIFIED_KEY_EVIDENCE,
+    "key_evidence": GEPA_REFLECTION_TEMPLATE_VERSION_DENSIFIED_KEY_EVIDENCE,
+    "densified": GEPA_REFLECTION_TEMPLATE_VERSION_DENSIFIED_KEY_EVIDENCE,
+    "densified_key_evidence": GEPA_REFLECTION_TEMPLATE_VERSION_DENSIFIED_KEY_EVIDENCE,
+}
+GEPA_REFLECTION_TEMPLATE_YAML_KEYS = (
+    "GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE",
+    "GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE",
+)
+GEPA_REFLECTION_TEMPLATE_DEFAULT_PATH = (
+    Path(__file__).resolve().parent / "yamls" / "DSPy" / "reflection_template.yaml"
+)
+GEPA_REFLECTION_TEMPLATE_LEGACY_PATH = (
+    Path(__file__).resolve().parent / "yamls" / "reflection_template.yaml"
+)
+
+_current_gepa_reflection_template_info: dict[str, Any] = {
+    "yaml": None,
+    "requested_version": "hardcoded",
+    "resolved_version": "hardcoded_densified_key_evidence",
+}
 
 
 def _log_gepa_stage_exceptions(stage: str):
@@ -260,6 +297,8 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
     overrides: dict[str, Any] = {}
     raw_model = _optional_env_value(GEPA_REFLECTION_MODEL_ENV)
     raw_effort = _optional_env_value(GEPA_REFLECTION_REASONING_EFFORT_ENV)
+    raw_api_key = _optional_env_value(GEPA_REFLECTION_API_KEY_ENV)
+    raw_api_base = _optional_env_value(GEPA_REFLECTION_API_BASE_ENV)
     raw_temperature = os.environ.get(GEPA_REFLECTION_TEMPERATURE_ENV)
     if raw_model is not None:
         overrides["model"] = _normalize_openai_model_name(raw_model)
@@ -268,6 +307,18 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
             raw_effort,
             env_name=GEPA_REFLECTION_REASONING_EFFORT_ENV,
         )
+    if raw_api_key is not None:
+        overrides["api_key"] = raw_api_key
+    if raw_api_base is not None:
+        overrides["api_base"] = raw_api_base
+
+    planner_kwargs = getattr(planner_lm, "kwargs", None)
+    inherited_api_base = isinstance(planner_kwargs, dict) and bool(planner_kwargs.get("api_base"))
+    if raw_model is not None and inherited_api_base:
+        if raw_api_base is None:
+            overrides["api_base"] = None
+        if raw_api_key is None:
+            overrides["api_key"] = None
 
     if raw_temperature is not None and raw_temperature.strip():
         try:
@@ -283,7 +334,17 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
 
     if not overrides:
         return planner_lm
-    return planner_lm.copy(**overrides)
+
+    reflection_lm = planner_lm.copy(**overrides)
+    if raw_model is not None:
+        reflection_lm.model = overrides["model"]
+    reflection_kwargs = getattr(reflection_lm, "kwargs", None)
+    if isinstance(reflection_kwargs, dict):
+        reflection_kwargs.pop("model", None)
+        for key in ("api_base", "api_key", "temperature"):
+            if key in overrides and overrides.get(key) is None:
+                reflection_kwargs.pop(key, None)
+    return reflection_lm
 
 
 def avqa_metric(example: dspy.Example, pred: dspy.Prediction, trace: Any = None) -> float:
@@ -594,6 +655,64 @@ def _format_gepa_privileged_caption_evidence(example: dspy.Example) -> str:
     )
 
 
+def _load_gepa_densified_supervision(
+    *,
+    label_dir: Path,
+    cut_id: str,
+) -> dict[str, str]:
+    """Load one strict, optimization-only densified label by question ID."""
+    normalized_cut_id = str(cut_id or "").strip()
+    if not normalized_cut_id:
+        raise ValueError("Cannot load GEPA densified supervision without cut_id")
+    if Path(normalized_cut_id).name != normalized_cut_id:
+        raise ValueError(f"Invalid cut_id for GEPA densified supervision: {cut_id!r}")
+
+    label_path = label_dir / f"{normalized_cut_id}.json"
+    if not label_path.is_file():
+        raise ValueError(
+            f"Missing GEPA densified supervision for cut_id={normalized_cut_id}: "
+            f"{label_path}"
+        )
+    try:
+        payload = json.loads(label_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Invalid GEPA densified supervision for cut_id={normalized_cut_id}: "
+            f"{label_path} ({exc})"
+        ) from exc
+
+    required_keys = {source_key for _, source_key in GEPA_DENSIFIED_LABEL_FIELDS}
+    allowed_keys = required_keys | GEPA_DENSIFIED_OPTIONAL_SOURCE_KEYS
+    payload_keys = set(payload) if isinstance(payload, dict) else set()
+    if (
+        not isinstance(payload, dict)
+        or not required_keys.issubset(payload_keys)
+        or not payload_keys.issubset(allowed_keys)
+    ):
+        raise ValueError(
+            f"GEPA densified label must contain required fields {sorted(required_keys)} "
+            f"and only supported fields {sorted(allowed_keys)} "
+            f"for cut_id={normalized_cut_id}: {label_path}"
+        )
+
+    supervision: dict[str, str] = {}
+    for label_name, source_key in GEPA_DENSIFIED_LABEL_FIELDS:
+        value = payload[source_key]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"GEPA densified label field {source_key!r} must be a non-empty string "
+                f"for cut_id={normalized_cut_id}: {label_path}"
+            )
+        supervision[label_name] = value.strip()
+    return supervision
+
+
+def _format_gepa_densified_supervision(example: dspy.Example) -> dict[str, str]:
+    return {
+        "Key evidence": str(getattr(example, "gepa_privileged_key_evidence", "") or "").strip(),
+    }
+
+
 def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
     """Convert raw rows to DSPy Example list."""
     trainset: list[dspy.Example] = []
@@ -609,6 +728,9 @@ def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
             "answer": item["answer"],
         }
         for label_name, _ in GEPA_PRIVILEGED_CAPTION_FILES:
+            if label_name in item:
+                example_fields[label_name] = item[label_name]
+        for label_name, _ in GEPA_DENSIFIED_LABEL_FIELDS:
             if label_name in item:
                 example_fields[label_name] = item[label_name]
         ex = dspy.Example(**example_fields).with_inputs(
@@ -633,6 +755,7 @@ def make_trainset_from_cuts(
     gepa_caption_root: Path | None = None,
     gepa_caption_cache: dict[str, dict[str, str]] | None = None,
     gepa_caption_stats: dict[str, int] | None = None,
+    gepa_densified_label_dir: Path | None = None,
 ) -> tuple[list[dspy.Example], list[dict[str, Any]]]:
     """Convert Daily Omni cut rows into DSPy Examples."""
     raw_items: list[dict[str, Any]] = []
@@ -671,6 +794,13 @@ def make_trainset_from_cuts(
                         video_id=str(video_id or ""),
                         cache=caption_cache,
                         stats=caption_stats,
+                    )
+                )
+            if gepa_densified_label_dir is not None:
+                raw_item.update(
+                    _load_gepa_densified_supervision(
+                        label_dir=gepa_densified_label_dir,
+                        cut_id=cut_id,
                     )
                 )
             raw_items.append(raw_item)
@@ -756,6 +886,138 @@ def _resolve_gepa_caption_supervision(
     if validated_root is None:
         return "none", None
     return "privileged", validated_root
+
+
+def _resolve_gepa_densified_label_dir(args: argparse.Namespace) -> Path | None:
+    """Resolve opt-in densified supervision for GEPA training examples only."""
+    if args.algorithm != "gepa":
+        return None
+    label_dir = getattr(args, "gepa_densified_label_dir", None)
+    if label_dir is None:
+        return None
+    label_dir = Path(label_dir)
+    if not label_dir.is_dir():
+        raise ValueError(
+            "GEPA densified label directory does not exist or is not a directory: "
+            f"{label_dir}"
+        )
+    return label_dir
+
+
+def _default_gepa_reflection_template_yaml_path() -> Path:
+    if GEPA_REFLECTION_TEMPLATE_DEFAULT_PATH.is_file():
+        return GEPA_REFLECTION_TEMPLATE_DEFAULT_PATH
+    return GEPA_REFLECTION_TEMPLATE_LEGACY_PATH
+
+
+def _normalize_gepa_reflection_template_version(
+    value: Any,
+    *,
+    densified_enabled: bool,
+) -> str:
+    raw = str(value or GEPA_REFLECTION_TEMPLATE_VERSION_AUTO).strip().lower()
+    if not raw or raw == GEPA_REFLECTION_TEMPLATE_VERSION_AUTO:
+        if densified_enabled:
+            return GEPA_REFLECTION_TEMPLATE_VERSION_DENSIFIED_KEY_EVIDENCE
+        return GEPA_REFLECTION_TEMPLATE_VERSION_ORIGINAL
+    return GEPA_REFLECTION_TEMPLATE_VERSION_ALIASES.get(raw, raw)
+
+
+def _template_value(entry: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raise ValueError(f"GEPA reflection template entry must define one of {keys}")
+
+
+def _load_gepa_reflection_template_versions(
+    template_yaml: Path,
+) -> dict[str, dict[str, str]]:
+    if not template_yaml.is_file():
+        raise ValueError(f"GEPA reflection template YAML does not exist: {template_yaml}")
+    try:
+        payload = yaml.safe_load(template_yaml.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"Invalid GEPA reflection template YAML: {template_yaml} ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"GEPA reflection template YAML must be a mapping: {template_yaml}")
+
+    versions_payload = payload.get("versions")
+    if versions_payload is None and all(key in payload for key in GEPA_REFLECTION_TEMPLATE_YAML_KEYS):
+        versions_payload = {"default": payload}
+    if not isinstance(versions_payload, dict) or not versions_payload:
+        raise ValueError(
+            "GEPA reflection template YAML must contain a non-empty 'versions' mapping: "
+            f"{template_yaml}"
+        )
+
+    versions: dict[str, dict[str, str]] = {}
+    for version_name, entry in versions_payload.items():
+        normalized_name = str(version_name or "").strip()
+        if not normalized_name:
+            raise ValueError(f"GEPA reflection template version name is empty: {template_yaml}")
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"GEPA reflection template version {normalized_name!r} must be a mapping: "
+                f"{template_yaml}"
+            )
+        versions[normalized_name] = {
+            "captioner": _template_value(
+                entry,
+                "GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE",
+                "captioner",
+                "captioner_template",
+            ),
+            "planner": _template_value(
+                entry,
+                "GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE",
+                "planner",
+                "planner_template",
+            ),
+        }
+    return versions
+
+
+def configure_gepa_reflection_prompt_templates(
+    args: argparse.Namespace,
+    *,
+    densified_enabled: bool,
+) -> dict[str, Any]:
+    """Select the GEPA reflection prompt templates for this optimization run."""
+    global GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE
+    global GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE
+    global _current_gepa_reflection_template_info
+
+    raw_version = getattr(args, "gepa_reflection_template_version", None)
+    resolved_version = _normalize_gepa_reflection_template_version(
+        raw_version,
+        densified_enabled=densified_enabled,
+    )
+    template_yaml = getattr(args, "gepa_reflection_template_yaml", None)
+    template_yaml = Path(template_yaml) if template_yaml is not None else _default_gepa_reflection_template_yaml_path()
+    versions = _load_gepa_reflection_template_versions(template_yaml)
+    if resolved_version not in versions:
+        available_versions = ", ".join(sorted(versions))
+        raise ValueError(
+            f"GEPA reflection template version {resolved_version!r} is not defined in "
+            f"{template_yaml}; available versions: {available_versions}"
+        )
+
+    selected = versions[resolved_version]
+    GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE = selected["captioner"]
+    GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE = selected["planner"]
+    _current_gepa_reflection_template_info = {
+        "yaml": str(template_yaml),
+        "requested_version": str(raw_version or GEPA_REFLECTION_TEMPLATE_VERSION_AUTO),
+        "resolved_version": resolved_version,
+        "densified_enabled": densified_enabled,
+    }
+    return dict(_current_gepa_reflection_template_info)
+
+
+def current_gepa_reflection_template_info() -> dict[str, Any]:
+    return dict(_current_gepa_reflection_template_info)
 
 
 def _none_if_unset(value: Any) -> Any:
@@ -1103,6 +1365,11 @@ class PromptTargetGEPAAdapter:
                 inputs["Privileged dataset evidence (optimization only)"] = (
                     _format_gepa_privileged_caption_evidence(example)
                 )
+        densified_supervision = _format_gepa_densified_supervision(example)
+        if all(densified_supervision.values()):
+            inputs["Privileged densified supervision (optimization only)"] = (
+                densified_supervision
+            )
         return {
             "Inputs": inputs,
             "Generated Outputs": {
@@ -1487,6 +1754,46 @@ def parse_optimize_args() -> argparse.Namespace:
             "Captioner GEPA supervision mode: none uses only downstream answer feedback; "
             "privileged loads DailyOmni caption supervision; auto uses privileged only "
             "when --daily-omni-root/DAILY_OMNI_ROOT is available."
+        ),
+    )
+    parser.add_argument(
+        "--gepa-densified-label-dir",
+        type=Path,
+        default=(
+            Path(os.environ["GEPA_DENSIFIED_LABEL_DIR"])
+            if os.environ.get("GEPA_DENSIFIED_LABEL_DIR")
+            else None
+        ),
+        help=(
+            "Optional directory containing per-cut key_evidence JSON labels. Legacy "
+            "files may also contain ideal_perception_target, which is ignored. Labels "
+            "are loaded only as GEPA reflection supervision for training examples and "
+            "are never passed to runtime modules."
+        ),
+    )
+    parser.add_argument(
+        "--gepa-reflection-template-yaml",
+        type=Path,
+        default=(
+            Path(os.environ[GEPA_REFLECTION_TEMPLATE_YAML_ENV])
+            if os.environ.get(GEPA_REFLECTION_TEMPLATE_YAML_ENV)
+            else _default_gepa_reflection_template_yaml_path()
+        ),
+        help=(
+            "YAML file containing versioned GEPA reflection prompt templates. "
+            "Defaults to DSPy/dspy_avqa/yamls/DSPy/reflection_template.yaml."
+        ),
+    )
+    parser.add_argument(
+        "--gepa-reflection-template-version",
+        default=os.environ.get(
+            GEPA_REFLECTION_TEMPLATE_VERSION_ENV,
+            GEPA_REFLECTION_TEMPLATE_VERSION_AUTO,
+        ),
+        help=(
+            "GEPA reflection template version to load from --gepa-reflection-template-yaml. "
+            "Use 'auto' to select original when no densified labels are loaded and "
+            "densified_key_evidence when --gepa-densified-label-dir is set."
         ),
     )
     parser.add_argument(
@@ -2065,6 +2372,7 @@ def _build_examples_from_cuts(
     gepa_caption_root: Path | None = None,
     gepa_caption_cache: dict[str, dict[str, str]] | None = None,
     gepa_caption_stats: dict[str, int] | None = None,
+    gepa_densified_label_dir: Path | None = None,
 ) -> tuple[list[dspy.Example], list[dict[str, Any]]]:
     return make_trainset_from_cuts(
         cuts,
@@ -2074,6 +2382,7 @@ def _build_examples_from_cuts(
         gepa_caption_root=gepa_caption_root,
         gepa_caption_cache=gepa_caption_cache,
         gepa_caption_stats=gepa_caption_stats,
+        gepa_densified_label_dir=gepa_densified_label_dir,
     )
 
 
@@ -2086,6 +2395,7 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         optimizes_captioner=optimizes_captioner,
     )
     use_gepa_caption_supervision = gepa_caption_supervision_mode == "privileged"
+    gepa_densified_label_dir = _resolve_gepa_densified_label_dir(args)
     gepa_caption_cache: dict[str, dict[str, str]] = {}
     gepa_caption_stats = _new_gepa_caption_supervision_stats()
 
@@ -2114,6 +2424,7 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         gepa_caption_root=gepa_caption_root,
         gepa_caption_cache=gepa_caption_cache,
         gepa_caption_stats=gepa_caption_stats,
+        gepa_densified_label_dir=gepa_densified_label_dir,
     )
     if not trainset:
         raise ValueError("No train examples were built; check train/input JSONL and audio-caption-dir.")
@@ -2168,6 +2479,12 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
             "daily_omni_root": str(gepa_caption_root) if gepa_caption_root else None,
             "files": [filename for _, filename in GEPA_PRIVILEGED_CAPTION_FILES],
             **gepa_caption_stats,
+        },
+        "gepa_densified_supervision": {
+            "enabled": gepa_densified_label_dir is not None,
+            "label_dir": str(gepa_densified_label_dir) if gepa_densified_label_dir else None,
+            "labels_loaded": len(trainset) if gepa_densified_label_dir else 0,
+            "fields": [source_key for _, source_key in GEPA_DENSIFIED_LABEL_FIELDS],
         },
     }
 
@@ -2488,6 +2805,13 @@ def run_optimization() -> None:
     skipped_val = dataset_info["skipped_val"]
 
     planner_lm = dspy.settings.lm
+    if args.algorithm == "gepa":
+        gepa_reflection_template = configure_gepa_reflection_prompt_templates(
+            args,
+            densified_enabled=dataset_info["gepa_densified_supervision"]["enabled"],
+        )
+    else:
+        gepa_reflection_template = None
     gepa_reflection_lm = build_gepa_reflection_lm(planner_lm) if args.algorithm == "gepa" else planner_lm
     initial_program_signatures = _program_signature_summary(program)
 
@@ -2530,11 +2854,24 @@ def run_optimization() -> None:
             f"missing_files={gepa_caption_supervision['missing_files']}, "
             f"unreadable_files={gepa_caption_supervision['unreadable_files']}"
         )
+    gepa_densified_supervision = dataset_info["gepa_densified_supervision"]
+    print(
+        "GEPA densified supervision: "
+        f"enabled={gepa_densified_supervision['enabled']}, "
+        f"label_dir={gepa_densified_supervision['label_dir']}, "
+        f"labels_loaded={gepa_densified_supervision['labels_loaded']}"
+    )
     print(f"Planner model: {context.planner_model}")
     print(f"Planner temperature: {planner_lm.kwargs.get('temperature')}")
     if args.algorithm == "gepa":
         print(
             f"GEPA reflection temperature: {gepa_reflection_lm.kwargs.get('temperature')}"
+        )
+        print(
+            "GEPA reflection template: "
+            f"version={gepa_reflection_template['resolved_version']}, "
+            f"requested={gepa_reflection_template['requested_version']}, "
+            f"yaml={gepa_reflection_template['yaml']}"
         )
     print(f"Perception model: {args.perception_model}")
     for line in gemini_backend_log_lines():
@@ -2716,6 +3053,8 @@ def run_optimization() -> None:
                 else None
             ),
             "gepa_caption_supervision": dataset_info["gepa_caption_supervision"],
+            "gepa_densified_supervision": dataset_info["gepa_densified_supervision"],
+            "gepa_reflection_template": gepa_reflection_template,
             "requested_audio_caption_dir": (
                 str(args.requested_audio_caption_dir) if args.requested_audio_caption_dir else None
             ),

@@ -1,0 +1,101 @@
+default_version: original
+versions:
+  original:
+    GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE: |-
+      I provided an assistant with the following captioning instruction:
+      ```
+      <curr_instructions>
+      ```
+
+      Below are optimization examples containing runtime trajectories, evaluation feedback, and any privileged dataset evidence if enabled:
+      ```
+      <inputs_outputs_feedback>
+      ```
+
+      This instruction is used by the ask_caption tool to obtain a factual audio-visual caption. It must not solve the multiple-choice question, choose an option, output a final answer letter, plan tool calls, or instruct another model.
+
+      Write an improved captioning instruction. If privileged evidence is present, use it only to judge whether the caption instruction asked for the right kinds of audio, visual, identity, continuity, action, source, simultaneity, and audio-visual correspondence information. Infer reusable improvements that will generalize to unseen videos.
+
+      The privileged evidence is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged evidence or assume access to it.
+
+      Provide only the new captioner instruction within ``` blocks.
+
+    GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE: |-
+      I provided an assistant with the following planner workflow instruction:
+      ```
+      <curr_instructions>
+      ```
+
+      Below are optimization examples containing runtime trajectories and evaluation feedback:
+      ```
+      <inputs_outputs_feedback>
+      ```
+
+      Your task is to write a new instruction for the assistant.
+
+      Infer the task format and the behavior required to solve it.
+
+      Read the assistant responses and feedback. Identify recurring mistakes and general strategies that could improve performance on unseen examples.
+
+      The goal is to improve the assistant's planning and tool-use policy, not to learn facts from the example videos.
+
+      Turn example-specific feedback into general rules. Do not copy or include any specific answer, option, timestamp, person, object, scene, event, caption text, tool observation, or other example-specific detail.
+
+      Preserve useful task-level information, such as:
+      - how to identify the most important missing evidence,
+      - how to formulate one targeted perceptual question,
+      - how to combine the caption and perceptual observation before answering,
+
+      Only include strategies that are likely to help across different unseen inputs. Keep the new instruction concise, clear, and actionable.
+
+      Provide only the new instruction within a single ``` block.
+
+  densified_key_evidence:
+    GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE: |-
+      I provided an assistant with the following captioning instruction:
+      ```
+      <curr_instructions>
+      ```
+
+      Below are optimization examples containing runtime trajectories, evaluation feedback, and any optimization-only privileged supervision if enabled:
+      ```
+      <inputs_outputs_feedback>
+      ```
+
+      This instruction is used by the ask_caption tool to obtain a factual audio-visual caption. It must not solve the multiple-choice question, choose an option, output a final answer letter, plan tool calls, or instruct another model.
+
+      Write an improved captioning instruction. For each example with densified supervision, compare the caption step and its response against the matching Key evidence. Use Key evidence to judge whether the caption step captured the decisive observable facts, then infer reusable improvements that will generalize to unseen videos.
+
+      All privileged supervision is unavailable at runtime. Do not copy or encode any example-specific answer, option, timestamp, person, object, scene, event, wording, caption sentence, or other dataset fact into the new instruction. Do not mention privileged supervision or assume access to it.
+
+      Provide only the new captioner instruction within ``` blocks.
+
+    GEPA_PLANNER_REFLECTION_PROMPT_TEMPLATE: |-
+      I provided an assistant with the following planner workflow instruction:
+      ```
+      <curr_instructions>
+      ```
+
+      Below are optimization examples containing runtime trajectories, evaluation feedback, and optimization-only densified supervision when available:
+      ```
+      <inputs_outputs_feedback>
+      ```
+
+      Your task is to write a new instruction for the assistant.
+
+      Infer the task format and the behavior required to solve it.
+
+      Read the assistant responses and feedback. For each example with densified supervision, compare the rollout against its matching Key evidence. Use Key evidence to judge whether caption/perception steps obtained and preserved the decisive facts. Identify recurring mistakes and general strategies that could improve performance on unseen examples.
+
+      The goal is to improve the assistant's planning and tool-use policy, not to learn facts from the example videos. The privileged supervision is unavailable at runtime.
+
+      Turn example-specific feedback into general rules. Do not copy or include any specific answer, option, timestamp, person, object, scene, event, caption text, tool observation, or other example-specific detail.
+
+      Preserve useful task-level information, such as:
+      - how to identify the most important missing evidence,
+      - how to formulate one targeted perceptual question,
+      - how to combine the caption and perceptual observation before answering,
+
+      Only include strategies that are likely to help across different unseen inputs. Keep the new instruction concise, clear, and actionable.
+
+      Provide only the new instruction within a single ``` block.
