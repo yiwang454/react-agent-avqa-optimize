@@ -10,8 +10,9 @@ from typing import Any
 
 import yaml
 
-from .deepseek_dspy_lm import consume_planner_call_trace
+from .caption_cache import validate_caption_cache_coverage
 from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
+from .deepseek_dspy_lm import consume_planner_call_trace
 from .data import (
     build_input_state,
     build_result_row,
@@ -27,6 +28,7 @@ from .reliable_qwen import (
     turn_trace_has_empty_qwen_observation,
 )
 from .signatures import apply_prompt_config_to_signatures
+from .tools import build_caption_prompt
 
 
 GEMINI_API_BACKENDS = ("legacy", "dspy")
@@ -123,6 +125,19 @@ def parse_args() -> argparse.Namespace:
         help="Run only these cut/question IDs. Comma-separated values are also accepted.",
     )
     parser.add_argument("--audio-caption-dir", type=Path, default=None)
+    parser.add_argument(
+        "--caption-cache-dir",
+        type=Path,
+        default=(
+            Path(os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"])
+            if os.environ.get("DSPY_AVQA_CAPTION_CACHE_DIR", "").strip()
+            else None
+        ),
+        help=(
+            "Question-scoped cache used only when the planner calls ask_caption. "
+            "Cache misses and prompt mismatches fail; there is no live fallback."
+        ),
+    )
     parser.add_argument(
         "--ignore-audio-caption-dir",
         action="store_true",
@@ -274,7 +289,10 @@ def configure_gemini_api_backend(args: argparse.Namespace) -> bool:
             os.environ[env_name] = str(value).strip()
 
     perception_is_gemini = os.environ.get("PERCEPTION_MODEL", "qwen").strip().lower() == "gemini"
-    captioner_is_gemini = _selected_captioner_model() == "gemini"
+    captioner_is_gemini = (
+        _selected_captioner_model() == "gemini"
+        and not bool(getattr(args, "caption_cache_dir", None))
+    )
     gemini_is_active = perception_is_gemini or captioner_is_gemini
     if backend != "dspy" or not gemini_is_active:
         return gemini_is_active
@@ -682,6 +700,7 @@ def run_one(
             video_path=payload["video_path"],
             audio_path=payload["audio_path"],
             video_id=payload.get("video_id"),
+            question_id=payload.get("question_id"),
             video_description=payload.get("video_description"),
             max_turns=max_turns,
         )
@@ -706,8 +725,14 @@ def run_batch() -> None:
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
+    if args.caption_cache_dir is not None:
+        args.caption_cache_dir = args.caption_cache_dir.expanduser().resolve()
+        os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"] = str(args.caption_cache_dir)
+    else:
+        os.environ.pop("DSPY_AVQA_CAPTION_CACHE_DIR", None)
     load_perception_config_yaml(args.perception_config_yaml)
-    load_captioner_config_yaml(args.captioner_config_yaml)
+    if args.caption_cache_dir is None:
+        load_captioner_config_yaml(args.captioner_config_yaml)
     configure_gemini_api_backend(args)
     load_prompt_config(args.prompt_yaml)
     audio_caption_dir, audio_caption_skip_reason = resolve_preloaded_audio_caption_dir(
@@ -715,8 +740,15 @@ def run_batch() -> None:
         caption_placement=args.caption_placement,
         ignore_audio_caption_dir=args.ignore_audio_caption_dir,
     )
+    if args.caption_cache_dir is not None and audio_caption_dir is not None:
+        raise ValueError(
+            "--caption-cache-dir and an active --audio-caption-dir are mutually exclusive; "
+            "use --ignore-audio-caption-dir for V8 cache-backed ask_caption."
+        )
     apply_prompt_config_to_signatures()
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
+    if args.caption_cache_dir is not None and "ask_caption" not in allowed_tools:
+        raise ValueError("--caption-cache-dir requires ask_caption in --allowed-tools")
     cuts = read_jsonl(args.input_jsonl)
     requested_sample_ids = {
         sample_id
@@ -739,11 +771,19 @@ def run_batch() -> None:
             )
     if args.debug:
         selected = selected[: args.debug_limit]
+    caption_cache_coverage = None
+    if args.caption_cache_dir is not None:
+        caption_cache_coverage = validate_caption_cache_coverage(
+            args.caption_cache_dir,
+            [cut_id(cut) for cut in selected],
+            expected_prompt=build_caption_prompt(),
+        )
 
     context = AVQARuntimeContext(
         max_turns=args.max_turns,
         allowed_tools=allowed_tools,
         caption_placement=args.caption_placement,
+        caption_cache_dir=args.caption_cache_dir,
     )
     program = AVQADSPyReActProgram(context=context)
 
@@ -759,6 +799,15 @@ def run_batch() -> None:
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
     print(f"Signature in system prompt: {args.signature_in_system_prompt}")
     print(f"Caption placement: {context.caption_placement}")
+    if caption_cache_coverage is not None:
+        print(
+            "Caption cache: "
+            f"{caption_cache_coverage['cache_dir']} "
+            f"(validated={caption_cache_coverage['validated']}/"
+            f"{caption_cache_coverage['requested']}, "
+            f"manifest_sha256={caption_cache_coverage['manifest_sha256']}, "
+            f"content_sha256={caption_cache_coverage['content_sha256']})"
+        )
     if audio_caption_dir:
         print(f"Audio caption dir: {audio_caption_dir}")
     elif args.audio_caption_dir:
@@ -767,7 +816,7 @@ def run_batch() -> None:
         print("Audio caption dir: <none; use captioner tool if needed>")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
-    if args.captioner_config_yaml:
+    if args.captioner_config_yaml and args.caption_cache_dir is None:
         print(f"Captioner config yaml: {args.captioner_config_yaml}")
     print(
         "Qwen perception config: "

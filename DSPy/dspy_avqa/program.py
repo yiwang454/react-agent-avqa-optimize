@@ -8,14 +8,18 @@ from typing import Any
 
 import dspy
 
-from .deepseek_dspy_lm import clear_planner_call_trace, consume_planner_call_trace
+from .caption_cache import load_cached_caption
 from .context import AVQARuntimeContext, configure_deepseek_lm, resolve_allowed_tools
+from .deepseek_dspy_lm import clear_planner_call_trace, consume_planner_call_trace
 from .prompt_config import prompt_value, render_prompt
 from .signatures import PlanNextAction
 from .tools import (
     ask_caption,
     ask_perception,
+    build_caption_prompt,
+    captioner_system_prompt,
     consume_last_perception_metadata,
+    record_perception_metadata,
     selected_captioner_model,
     selected_perception_model,
     temporal_ground_video,
@@ -435,9 +439,32 @@ class AVQADSPyReActProgram(dspy.Module):
         video_path: str,
         audio_path: str | None,
         tool_query: str,
+        question_id: str | None = None,
     ) -> str:
         """Dispatch one planner tool call."""
         if tool_name == "ask_caption":
+            caption_cache_dir = getattr(self.context, "caption_cache_dir", None)
+            if caption_cache_dir is not None:
+                prompt = build_caption_prompt(tool_query)
+                cached = load_cached_caption(
+                    caption_cache_dir,
+                    str(question_id or ""),
+                    expected_prompt=prompt,
+                )
+                record_perception_metadata(
+                    backend="caption_cache",
+                    system_prompt=captioner_system_prompt(),
+                    prompt=prompt,
+                    model=cached.source_model,
+                    env_prefix="CAPTION_CACHE",
+                    caption_cache_hit=True,
+                    caption_cache_path=str(cached.path),
+                    caption_cache_source_results=cached.source_results_file,
+                    caption_cache_source_rank=cached.source_rank,
+                    caption_cache_source_backend=cached.source_backend,
+                    caption_cache_source_token_usage=cached.source_token_usage,
+                )
+                return cached.response
             return ask_caption(
                 video_path=video_path,
                 audio_path=audio_path,
@@ -462,6 +489,7 @@ class AVQADSPyReActProgram(dspy.Module):
         video_path: str,
         audio_path: str | None = None,
         video_id: str | None = None,
+        question_id: str | None = None,
         video_description: str | None = None,
         max_turns: int | None = None,
     ) -> dspy.Prediction:
@@ -537,14 +565,22 @@ class AVQADSPyReActProgram(dspy.Module):
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
             tool_query = _tool_query(payload, tool_name, source_question=question)
-            perception_backend = selected_captioner_model() if tool_name == "ask_caption" else selected_perception_model()
+            default_perception_backend = (
+                selected_captioner_model()
+                if tool_name == "ask_caption"
+                else selected_perception_model()
+            )
             tool_observation = self._call_tool(
                 tool_name=tool_name,
                 video_path=video_path,
                 audio_path=audio_path,
                 tool_query=tool_query,
+                question_id=question_id,
             )
             perception_metadata = consume_last_perception_metadata()
+            perception_backend = (
+                perception_metadata.get("backend") or default_perception_backend
+            )
             if tool_name == "ask_caption" and self.context.caption_placement == "task":
                 caption_task_description = str(tool_observation or "").strip()
 
@@ -562,6 +598,20 @@ class AVQADSPyReActProgram(dspy.Module):
                     "perception_model": perception_metadata.get("model"),
                     "perception_thinking": perception_metadata.get("thinking_text", ""),
                     "perception_token_usage": perception_metadata.get("token_usage"),
+                    "caption_cache_hit": perception_metadata.get("caption_cache_hit"),
+                    "caption_cache_path": perception_metadata.get("caption_cache_path"),
+                    "caption_cache_source_results": perception_metadata.get(
+                        "caption_cache_source_results"
+                    ),
+                    "caption_cache_source_rank": perception_metadata.get(
+                        "caption_cache_source_rank"
+                    ),
+                    "caption_cache_source_backend": perception_metadata.get(
+                        "caption_cache_source_backend"
+                    ),
+                    "caption_cache_source_token_usage": perception_metadata.get(
+                        "caption_cache_source_token_usage"
+                    ),
                     "reliable_qwen_profile": perception_metadata.get("reliable_qwen_profile"),
                     "qwen_response_empty": perception_metadata.get("qwen_response_empty"),
                     "planner_raw": raw_action,

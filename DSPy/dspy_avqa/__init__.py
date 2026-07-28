@@ -1,6 +1,12 @@
 """Public exports for DSPy AVQA package."""
 
 from .context import AVQARuntimeContext, configure_deepseek_lm
+from .caption_cache import (
+    CachedCaption,
+    extract_caption_cache,
+    load_cached_caption,
+    validate_caption_cache_coverage,
+)
 from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 from .deepseek_dspy_lm import DeepSeekDSPyLM
 from .data import (
@@ -42,6 +48,10 @@ from .tools import (
 
 __all__ = [
     "AVQARuntimeContext",
+    "CachedCaption",
+    "load_cached_caption",
+    "validate_caption_cache_coverage",
+    "extract_caption_cache",
     "configure_deepseek_lm",
     "DeepSeekPlannerConfig",
     "DeepSeekPlannerClient",

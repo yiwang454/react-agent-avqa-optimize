@@ -133,6 +133,12 @@ def _set_last_perception_metadata(**metadata: Any) -> None:
         key: value for key, value in metadata.items() if value is not None
     }
 
+
+def record_perception_metadata(**metadata: Any) -> None:
+    """Record tool metadata for the current worker thread."""
+    _set_last_perception_metadata(**metadata)
+
+
 def consume_last_perception_metadata() -> dict[str, Any]:
     """Return and clear metadata from the most recent perception call in this thread."""
     metadata = dict(getattr(_PERCEPTION_METADATA_STATE, "last", {}) or {})

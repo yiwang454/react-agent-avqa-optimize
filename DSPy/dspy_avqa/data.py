@@ -100,6 +100,7 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path | None) -> di
         raise ValueError(f"Audio caption is empty for question_id={question_id}")
 
     return {
+        "question_id": question_id,
         "question": question,
         "options": options,
         "video_path": video_path,
@@ -178,4 +179,3 @@ def write_results_jsonl(rows: list[dict[str, Any]], output_jsonl: Path) -> None:
     with output_jsonl.open("w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(json_safe(row), ensure_ascii=False, default=str) + "\n")
-

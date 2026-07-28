@@ -18,6 +18,7 @@ from typing import Any
 import dspy
 import yaml
 
+from .caption_cache import validate_caption_cache_coverage
 from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
 from .deepseek_dspy_lm import consume_planner_call_trace
 from .data import build_input_state, build_result_row, maybe_dump_question_data, read_jsonl, write_results_jsonl
@@ -43,6 +44,7 @@ from .runner import (
     resolve_preloaded_audio_caption_dir,
 )
 from .signatures import apply_prompt_config_to_signatures
+from .tools import build_caption_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -734,6 +736,9 @@ def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
     trainset: list[dspy.Example] = []
     for item in raw_items:
         example_fields = {
+            "question_id": (
+                item.get("question_id") or item.get("cut_id") or item.get("video_id")
+            ),
             "question": item["question"],
             "options_json": json.dumps(item["options"], ensure_ascii=False),
             "video_path": item["video_path"],
@@ -750,6 +755,7 @@ def make_trainset(raw_items: list[dict[str, Any]]) -> list[dspy.Example]:
             if label_name in item:
                 example_fields[label_name] = item[label_name]
         ex = dspy.Example(**example_fields).with_inputs(
+            "question_id",
             "question",
             "options_json",
             "video_path",
@@ -793,6 +799,7 @@ def make_trainset_from_cuts(
                 raise ValueError(f"Missing answer in cut_id={cut_id}")
             video_id = payload.get("video_id") or cut_id.rsplit("-", 1)[0]
             raw_item = {
+                "question_id": cut_id,
                 "question": payload["question"],
                 "options": payload["options"],
                 "video_path": payload["video_path"],
@@ -2051,6 +2058,19 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--data-seed", type=int, default=int(os.environ.get("DSPY_AVQA_DATA_SEED", "0")))
     parser.add_argument("--audio-caption-dir", type=Path, default=None)
     parser.add_argument(
+        "--caption-cache-dir",
+        type=Path,
+        default=(
+            Path(os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"])
+            if os.environ.get("DSPY_AVQA_CAPTION_CACHE_DIR", "").strip()
+            else None
+        ),
+        help=(
+            "Question-scoped cache used by ask_caption. Cache misses and prompt "
+            "mismatches fail; there is no live captioner fallback."
+        ),
+    )
+    parser.add_argument(
         "--daily-omni-root",
         type=Path,
         default=(Path(os.environ["DAILY_OMNI_ROOT"]) if os.environ.get("DAILY_OMNI_ROOT") else None),
@@ -2637,6 +2657,7 @@ def _run_program_on_cut(
     payload = build_input_state(cut, audio_caption_dir)
     try:
         pred = program(
+            question_id=payload.get("question_id"),
             question=payload["question"],
             options_json=json.dumps(payload["options"], ensure_ascii=False),
             video_path=payload["video_path"],
@@ -2791,8 +2812,24 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
         val_selection = "trainset"
         valset_is_trainset = True
 
+    caption_cache_coverage = None
+    if getattr(args, "caption_cache_dir", None) is not None:
+        cache_question_ids = list(
+            dict.fromkeys(
+                cut_id(cut)
+                for source_cuts in (input_cuts, train_source_cuts, val_source_cuts)
+                for cut in source_cuts
+            )
+        )
+        caption_cache_coverage = validate_caption_cache_coverage(
+            args.caption_cache_dir,
+            cache_question_ids,
+            expected_prompt=build_caption_prompt(),
+        )
+
     return {
         "input_cuts": input_cuts,
+        "caption_cache_coverage": caption_cache_coverage,
         "train_source_path": train_source_path,
         "train_source_cuts": train_source_cuts,
         "train_cuts": train_cuts,
@@ -3123,10 +3160,26 @@ def _run_inference_only(
 ) -> None:
     _load_optimized_program(program, args.output_program)
     cuts = read_jsonl(args.input_jsonl)
+    caption_cache_coverage = None
+    if getattr(args, "caption_cache_dir", None) is not None:
+        caption_cache_coverage = validate_caption_cache_coverage(
+            args.caption_cache_dir,
+            [cut_id(cut) for cut in cuts],
+            expected_prompt=build_caption_prompt(),
+        )
     print(f"Inference-only mode: loaded optimized program from {args.output_program}")
     print(f"Loaded final-test cuts: {len(cuts)}")
     print(f"Final-test cache directory: {args.final_eval_output_dir}")
     print(f"Planner model: {context.planner_model}")
+    if caption_cache_coverage is not None:
+        print(
+            "Caption cache: "
+            f"{caption_cache_coverage['cache_dir']} "
+            f"(validated={caption_cache_coverage['validated']}/"
+            f"{caption_cache_coverage['requested']}, "
+            f"manifest_sha256={caption_cache_coverage['manifest_sha256']}, "
+            f"content_sha256={caption_cache_coverage['content_sha256']})"
+        )
     if args.audio_caption_dir:
         print(f"Audio caption dir: {args.audio_caption_dir}")
     elif args.requested_audio_caption_dir:
@@ -3168,8 +3221,15 @@ def run_optimization() -> None:
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
+    caption_cache_dir = getattr(args, "caption_cache_dir", None)
+    if caption_cache_dir is not None:
+        args.caption_cache_dir = caption_cache_dir.expanduser().resolve()
+        os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"] = str(args.caption_cache_dir)
+    else:
+        os.environ.pop("DSPY_AVQA_CAPTION_CACHE_DIR", None)
     load_perception_config_yaml(args.perception_config_yaml)
-    load_captioner_config_yaml(args.captioner_config_yaml)
+    if caption_cache_dir is None:
+        load_captioner_config_yaml(args.captioner_config_yaml)
     configure_gemini_api_backend(args)
     load_prompt_config(args.prompt_yaml)
     args.requested_audio_caption_dir = args.audio_caption_dir
@@ -3178,14 +3238,28 @@ def run_optimization() -> None:
         caption_placement=args.caption_placement,
         ignore_audio_caption_dir=args.ignore_audio_caption_dir,
     )
+    if caption_cache_dir is not None and args.audio_caption_dir is not None:
+        raise ValueError(
+            "--caption-cache-dir and an active --audio-caption-dir are mutually exclusive; "
+            "use --ignore-audio-caption-dir for V8 cache-backed ask_caption."
+        )
+    if caption_cache_dir is not None and any(
+        _is_captioner_target(target) for target in args.optimize_targets
+    ):
+        raise ValueError(
+            "--caption-cache-dir cannot be used while optimizing captioner.* targets"
+        )
     validate_optimize_targets(args.optimize_targets)
     apply_prompt_config_to_signatures(apply_instructions=False)
 
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
+    if caption_cache_dir is not None and "ask_caption" not in allowed_tools:
+        raise ValueError("--caption-cache-dir requires ask_caption in --allowed-tools")
     context = AVQARuntimeContext(
         max_turns=args.max_turns,
         allowed_tools=allowed_tools,
         caption_placement=args.caption_placement,
+        caption_cache_dir=getattr(args, "caption_cache_dir", None),
     )
     base_program = AVQADSPyReActProgram(context=context)
     program: dspy.Module = PromptTargetProgram(
@@ -3224,6 +3298,16 @@ def run_optimization() -> None:
     print(f"Optimize targets: {', '.join(args.optimize_targets)}")
     print(f"Signature in system prompt: {args.signature_in_system_prompt}")
     print(f"Caption placement: {context.caption_placement}")
+    caption_cache_coverage = dataset_info["caption_cache_coverage"]
+    if caption_cache_coverage is not None:
+        print(
+            "Caption cache: "
+            f"{caption_cache_coverage['cache_dir']} "
+            f"(validated={caption_cache_coverage['validated']}/"
+            f"{caption_cache_coverage['requested']}, "
+            f"manifest_sha256={caption_cache_coverage['manifest_sha256']}, "
+            f"content_sha256={caption_cache_coverage['content_sha256']})"
+        )
     print(f"Loaded input cuts: {len(cuts)}")
     print(f"Train source jsonl: {dataset_info['train_source_path']}")
     print(f"Val source jsonl: {dataset_info['val_source_path']}")
@@ -3450,6 +3534,12 @@ def run_optimization() -> None:
             "valset_jsonl": str(args.valset_jsonl) if args.valset_jsonl else None,
             "data_seed": args.data_seed,
             "audio_caption_dir": str(args.audio_caption_dir) if args.audio_caption_dir else None,
+            "caption_cache_dir": (
+                str(args.caption_cache_dir)
+                if getattr(args, "caption_cache_dir", None)
+                else None
+            ),
+            "caption_cache_coverage": dataset_info["caption_cache_coverage"],
             "daily_omni_root": (
                 str(args.daily_omni_root)
                 if getattr(args, "daily_omni_root", None)

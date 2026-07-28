@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import dspy
@@ -99,6 +100,11 @@ def normalize_caption_placement(value: str | None = None) -> str:
             f"expected one of {list(CAPTION_PLACEMENT_CHOICES)}"
         )
     return placement
+
+
+def optional_path_env(name: str) -> Path | None:
+    value = os.environ.get(name)
+    return Path(value).expanduser().resolve() if value and value.strip() else None
 
 
 def _split_tool_names(value: str | Iterable[str] | None) -> list[str]:
@@ -233,12 +239,17 @@ class AVQARuntimeContext:
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
     caption_placement: str = field(default_factory=normalize_caption_placement)
+    caption_cache_dir: Path | None = field(
+        default_factory=lambda: optional_path_env("DSPY_AVQA_CAPTION_CACHE_DIR")
+    )
 
     def __post_init__(self) -> None:
         self.planner_provider = normalize_planner_provider(self.planner_provider)
         if not self.planner_model.strip():
             self.planner_model = resolve_planner_model(self.planner_provider)
         self.caption_placement = normalize_caption_placement(self.caption_placement)
+        if self.caption_cache_dir is not None:
+            self.caption_cache_dir = self.caption_cache_dir.expanduser().resolve()
 
 
 def _obj_get(value: Any, key: str, default: Any = None) -> Any:
