@@ -366,6 +366,22 @@ def test_runner_dspy_validation_requires_roots_and_validates_captioner_top_k(mon
     assert os.environ["GEMINI_API_BACKEND"] == "dspy"
 
 
+def test_runner_cached_captioner_does_not_initialize_gemini(monkeypatch, tmp_path):
+    runner = _load_runner()
+    monkeypatch.setenv("PERCEPTION_MODEL", "qwen")
+    monkeypatch.setenv("CAPTIONER_MODEL", "gemini")
+    args = argparse.Namespace(
+        gemini_api_backend="dspy",
+        vertex_project=None,
+        vertex_location=None,
+        gemini_local_data_root=None,
+        gemini_gcs_data_root=None,
+        caption_cache_dir=tmp_path / "caption-cache",
+    )
+
+    assert runner.configure_gemini_api_backend(args) is False
+
+
 def test_precomputed_audio_caption_dir_is_ignored_when_not_rendered(tmp_path):
     runner = _load_runner()
     caption_dir = tmp_path / "captions"

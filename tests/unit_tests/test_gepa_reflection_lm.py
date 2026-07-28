@@ -74,6 +74,10 @@ def _load_optimize_module():
     prompt_config.prompt_value = lambda *args, **kwargs: ""
     sys.modules["dspy_avqa.prompt_config"] = prompt_config
 
+    tools = types.ModuleType("dspy_avqa.tools")
+    tools.build_caption_prompt = lambda *args, **kwargs: ""
+    sys.modules["dspy_avqa.tools"] = tools
+
     runner = types.ModuleType("dspy_avqa.runner")
     for name in (
         "add_gemini_backend_args",
@@ -714,6 +718,7 @@ def test_make_trainset_from_cuts_attaches_densified_labels_by_question_id(tmp_pa
     )
 
     assert skipped == []
+    assert examples[0].inputs()["question_id"] == "question-2"
     assert examples[0].labels()["gepa_privileged_key_evidence"] == "matching evidence"
     assert "gepa_privileged_ideal_perception_target" not in examples[0].labels()
 
@@ -753,6 +758,7 @@ def test_gepa_caption_supervision_is_a_label_not_a_runtime_input():
 
     example = optimize.make_trainset([raw_item])[0]
 
+    assert example.inputs()["question_id"] == "video"
     assert "gepa_privileged_av_alignment_captions" not in example.inputs()
     assert example.labels()["gepa_privileged_av_alignment_captions"] == "alignment gold"
     assert example.labels()["gepa_privileged_video_consistent_captions"] == "visual gold"

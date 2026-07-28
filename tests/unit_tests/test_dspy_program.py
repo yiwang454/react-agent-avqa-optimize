@@ -46,7 +46,15 @@ def _install_program_import_stubs() -> None:
     tools = types.ModuleType("dspy_avqa.tools")
     tools.ask_caption = lambda *args, **kwargs: ""
     tools.ask_perception = lambda *args, **kwargs: ""
-    tools.consume_last_perception_metadata = lambda: {}
+    tools.build_caption_prompt = lambda instruction=None: str(instruction or "").strip()
+    tools.captioner_system_prompt = lambda: ""
+    tools._metadata = {}
+    tools.record_perception_metadata = lambda **kwargs: tools._metadata.update(kwargs)
+    def consume_metadata():
+        value = dict(tools._metadata)
+        tools._metadata.clear()
+        return value
+    tools.consume_last_perception_metadata = consume_metadata
     tools.selected_captioner_model = lambda: "gemini"
     tools.selected_perception_model = lambda: "gemini"
     tools.temporal_ground_video = lambda *args, **kwargs: ""
@@ -218,6 +226,7 @@ class _FakeRuntimeContext:
     allowed_tools = ("ask_caption", "ask_perception")
     caption_placement = "conversation_state"
     system_prompt = "workflow instruction"
+    caption_cache_dir = None
 
 
 def _run_caption_then_perception(tmp_path, caption_placement: str):
@@ -239,7 +248,7 @@ def _run_caption_then_perception(tmp_path, caption_placement: str):
             return '{"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"what key detail distinguishes the options?"}}', [], None
         return '{"action":"final","answer":"A"}', [], None
 
-    def fake_call_tool(*, tool_name, video_path, audio_path, tool_query):
+    def fake_call_tool(*, tool_name, video_path, audio_path, tool_query, question_id=None):
         if tool_name == "ask_caption":
             return long_caption
         return "perception observation"
@@ -256,6 +265,78 @@ def _run_caption_then_perception(tmp_path, caption_placement: str):
         max_turns=3,
     )
     return result, planner_inputs, long_caption
+
+
+def test_cached_caption_preserves_v8_tool_flow_without_live_captioner(tmp_path, monkeypatch):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=True)
+    prompt_config.load_prompt_config(prompt_yaml)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "sample-1.json").write_text(
+        """{
+  "question_id": "sample-1",
+  "response": "fixed cached caption",
+  "caption_prompt": "default caption instruction",
+  "source_results_file": "repeat1/output_test.jsonl",
+  "source_rank": 1,
+  "source_backend": "gemini",
+  "source_model": "gemini-2.5-flash",
+  "source_token_usage": {"totalTokenCount": 10}
+}
+""",
+        encoding="utf-8",
+    )
+
+    context = _FakeRuntimeContext()
+    context.caption_placement = "task"
+    context.caption_cache_dir = cache_dir
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    planner_inputs = []
+
+    def fake_plan_next_action(*, task, conversation_state, turn_index, max_turns):
+        planner_inputs.append((task, conversation_state))
+        if turn_index == "1":
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        if turn_index == "2":
+            return '{"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"detail?"}}', [], None
+        return '{"action":"final","answer":"A"}', [], None
+
+    monkeypatch.setattr(
+        program,
+        "ask_caption",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live captioner must not be called")
+        ),
+    )
+    monkeypatch.setattr(program, "ask_perception", lambda *args, **kwargs: "perception")
+    avqa_program._plan_next_action = fake_plan_next_action
+
+    result = avqa_program.forward(
+        question_id="sample-1",
+        question="question",
+        options_json='["first", "second"]',
+        video_path="/tmp/video.mp4",
+        audio_path="/tmp/audio.wav",
+        video_id="video",
+        video_description=None,
+        max_turns=3,
+    )
+
+    assert [turn["tool_name"] for turn in result["turn_trace"][:2]] == [
+        "ask_caption",
+        "ask_perception",
+    ]
+    caption_turn = result["turn_trace"][0]
+    assert caption_turn["tool_observation"] == "fixed cached caption"
+    assert caption_turn["perception_backend"] == "caption_cache"
+    assert caption_turn["perception_model"] == "gemini-2.5-flash"
+    assert caption_turn["perception_token_usage"] is None
+    assert caption_turn["caption_cache_hit"] is True
+    assert caption_turn["caption_cache_source_rank"] == 1
+    assert "fixed cached caption" not in planner_inputs[0][0]
+    assert "fixed cached caption" in planner_inputs[1][0]
+    assert program.CAPTION_MOVED_TO_TASK_MARKER in planner_inputs[1][1]
 
 
 def test_default_caption_placement_keeps_caption_in_conversation_state(tmp_path):
@@ -344,4 +425,3 @@ def test_task_caption_placement_rejects_template_without_video_description(tmp_p
         assert "{video_description}" in message
     else:
         raise AssertionError("Expected ValueError when task placement cannot render caption")
-
