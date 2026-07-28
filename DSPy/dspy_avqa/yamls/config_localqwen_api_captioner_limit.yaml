@@ -1,5 +1,7 @@
 task:
   video_only: false
+  use_audio_in_video: false
+  video_first: false
   enable_thinking: false
   batch_size: 1
   parallel_qwen: false

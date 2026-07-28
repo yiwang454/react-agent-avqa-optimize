@@ -562,6 +562,8 @@ class AVQADSPyReActProgram(dspy.Module):
                     "perception_model": perception_metadata.get("model"),
                     "perception_thinking": perception_metadata.get("thinking_text", ""),
                     "perception_token_usage": perception_metadata.get("token_usage"),
+                    "reliable_qwen_profile": perception_metadata.get("reliable_qwen_profile"),
+                    "qwen_response_empty": perception_metadata.get("qwen_response_empty"),
                     "planner_raw": raw_action,
                     "planner_calls": {"action_decision": planner_calls},
                     "planner_parse_error": planner_error,

@@ -90,9 +90,42 @@ uv run --no-sync python DSPy/avqa_dspy_impl.py \
   --output-jsonl <output.jsonl> \
   --output-dir <output_dir> \
   --max-turns 4 \
-  --concurrency 1 \
+  --inference-num-threads 4 \
   --debug
 ```
+
+## GEPA 的 Qwen 空响应恢复
+
+`PromptTargetGEPAAdapter` 使用 `ReliableQwenExecutor` 包住每个 GEPA
+evaluation batch。primary pass 仍按 `--gepa-num-threads` 并行；只有整批完成后
+检测到 Qwen `tool_observation` 为空（含纯空白）时，才会重跑对应的完整 ReAct
+rollout。media layout 固定为：
+
+1. primary：`use_audio_in_video=false`，audio-first（并行）；
+2. retry 1：`use_audio_in_video=false`，video-first（串行，Qwen max_inflight=1）；
+3. retry 2：`use_audio_in_video=true`（串行）。
+
+默认重复两次；在 perception YAML 的 `task.reliable_max_batch_retries` 或环境变量
+`QWEN_RELIABLE_MAX_BATCH_RETRIES` 中增大该值时，后续串行重试会继续使用第 3
+种 embedded-audio layout。环境变量优先于 YAML。所有重试失败后不会终止
+evaluation batch：validation 中该 rollout 会从 accuracy 的分子和分母排除（保留
+它原有的位置，避免 GEPA 将后续 score 对错样本）；training/reflection trace 则保留
+并写入 `reliable_qwen_error`，使 reflection dataset 明确显示该 sample 的错误。
+该机制不在 worker thread 中修改 `QWEN_VIDEO_FIRST`，它仍仅代表非可靠执行器的默认值。
+
+普通 `avqa_dspy_impl.py` inference 现在默认以 4 个 primary ReAct rollout 并行运行，
+并在每 4 个 sample 完成后应用同一套 Qwen recovery。通过
+`--inference-num-threads`、`--inference-batch-size`（或环境变量
+`DSPY_AVQA_INFERENCE_NUM_THREADS`）调整；设为 `1` 可完全串行。GEPA optimizer 的
+`--final-eval-output-jsonl` 路径也使用相同策略，默认 4 线程，可由
+`--final-eval-num-threads`、`--final-eval-batch-size`（或
+`DSPY_AVQA_FINAL_EVAL_NUM_THREADS`）调整。所有 fallback 仍保证 Qwen
+`max_inflight=1`；若最终仍为空，inference/final-eval 将输出带
+`reliable_qwen_error` 的 `[ERROR]` row，而非缓存一个基于空 evidence 的答案。
+
+两个 DeepSeek+Qwen GEPA wrapper 默认使用 `GEPA_MAX_FULL_EVALS=10` 和
+`GEPA_NUM_THREADS=8`，均可通过同名环境变量覆盖；wrapper 内的多个 seed 仍是顺序
+执行的。
 
 ## ELM GPT planner
 

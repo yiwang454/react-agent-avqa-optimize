@@ -23,6 +23,14 @@ from .deepseek_dspy_lm import consume_planner_call_trace
 from .data import build_input_state, build_result_row, maybe_dump_question_data, read_jsonl, write_results_jsonl
 from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_overrides, prompt_value
+from .reliable_qwen import (
+    ReliableQwenExecutor,
+    QwenValidationScore,
+    mark_empty_qwen_prediction,
+    mark_empty_qwen_turn_trace,
+    prediction_has_empty_qwen_observation,
+    turn_trace_has_empty_qwen_observation,
+)
 from .runner import (
     add_gemini_backend_args,
     configure_gemini_api_backend,
@@ -497,6 +505,14 @@ def _compact_reflection_trace(prediction: Any) -> tuple[list[dict[str, Any]], di
                 limit=MAX_GEPA_REFLECTION_ERROR_CHARS,
             )
             compact_turn["parse_error"] = error_text
+            errors.append(f"turn {turn_id}: {error_text}")
+        qwen_error = raw_turn.get("reliable_qwen_error")
+        if isinstance(qwen_error, dict):
+            error_text = _bounded_reflection_text(
+                qwen_error.get("message") or "Qwen returned an empty response.",
+                limit=MAX_GEPA_REFLECTION_ERROR_CHARS,
+            )
+            compact_turn["qwen_error"] = _json_safe(qwen_error)
             errors.append(f"turn {turn_id}: {error_text}")
         turns.append(compact_turn)
 
@@ -1208,6 +1224,114 @@ def _prompt_component_text(program: dspy.Module, target_path: str) -> str:
     return str(getattr(signature, "instructions", "") or "").strip()
 
 
+_CAPTION_TOOL_NAMES = frozenset({
+    "ask_caption",
+    "ask_captioner",
+    "caption_video",
+    "captioner",
+})
+_QWEN_LENGTH_FINISH_REASONS = frozenset({
+    "length",
+    "max_token",
+    "max_tokens",
+    "max_output_tokens",
+    "token_limit",
+})
+_QWEN_OUTPUT_TOKEN_USAGE_KEYS = ("completion_tokens", "output_tokens")
+
+
+def _mapping_value(value: Any) -> dict[str, Any]:
+    """Return a dict from API metadata without failing GEPA diagnostics."""
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except Exception:
+            return {}
+        return dumped if isinstance(dumped, dict) else {}
+    return {}
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _qwen_call_hit_max_tokens(token_usage: Any) -> bool:
+    """Detect a Qwen generation that stopped because of its output cap."""
+    usage = _mapping_value(token_usage)
+    attempt_usages = [usage]
+    attempts = usage.get("qwen_response_attempts")
+    if isinstance(attempts, list):
+        attempt_usages.extend(_mapping_value(attempt) for attempt in attempts)
+
+    for attempt_usage in attempt_usages:
+        finish_reason = str(
+            attempt_usage.get("qwen_finish_reason")
+            or attempt_usage.get("finish_reason")
+            or ""
+        ).strip().lower()
+        if finish_reason in _QWEN_LENGTH_FINISH_REASONS:
+            return True
+
+        max_tokens = _positive_int(
+            attempt_usage.get("qwen_max_tokens", attempt_usage.get("max_tokens"))
+        )
+        if max_tokens is None:
+            continue
+        for token_key in _QWEN_OUTPUT_TOKEN_USAGE_KEYS:
+            completion_tokens = _positive_int(attempt_usage.get(token_key))
+            if completion_tokens is not None and completion_tokens >= max_tokens:
+                return True
+    return False
+
+
+def _qwen_captioner_max_token_stats(predictions: list[Any]) -> dict[str, Any]:
+    """Aggregate Qwen captioner cap hits across a completed GEPA batch."""
+    captioner_samples = 0
+    hit_samples = 0
+    captioner_calls = 0
+    hit_calls = 0
+    max_tokens_values: set[int] = set()
+
+    for prediction in predictions:
+        sample_has_captioner_call = False
+        sample_hit_max_tokens = False
+        for turn in getattr(prediction, "turn_trace", None) or []:
+            if not isinstance(turn, dict):
+                continue
+            tool_name = str(turn.get("tool_name") or "").strip().lower()
+            backend = str(turn.get("perception_backend") or "").strip().lower()
+            if tool_name not in _CAPTION_TOOL_NAMES or backend != "qwen":
+                continue
+            sample_has_captioner_call = True
+            captioner_calls += 1
+            token_usage = _mapping_value(turn.get("perception_token_usage"))
+            max_tokens = _positive_int(token_usage.get("qwen_max_tokens"))
+            if max_tokens is not None:
+                max_tokens_values.add(max_tokens)
+            if _qwen_call_hit_max_tokens(token_usage):
+                sample_hit_max_tokens = True
+                hit_calls += 1
+        if sample_has_captioner_call:
+            captioner_samples += 1
+        if sample_hit_max_tokens:
+            hit_samples += 1
+
+    return {
+        "captioner_samples": captioner_samples,
+        "hit_samples": hit_samples,
+        "captioner_calls": captioner_calls,
+        "hit_calls": hit_calls,
+        "max_tokens_values": tuple(sorted(max_tokens_values)),
+    }
+
+
 class PromptTargetGEPAAdapter:
     """GEPA adapter for prompt components that are read but not called as predictors."""
 
@@ -1221,6 +1345,8 @@ class PromptTargetGEPAAdapter:
         rng: random.Random | None = None,
         reflection_lm: Any = None,
         reflection_minibatch_size: int | None = None,
+        qwen_executor: ReliableQwenExecutor | None = None,
+        validation_examples: list[dspy.Example] | None = None,
     ):
         self.student = student_module
         self.component_names = student_module.component_names
@@ -1230,6 +1356,10 @@ class PromptTargetGEPAAdapter:
         self.rng = rng or random.Random(0)
         self.reflection_lm = reflection_lm
         self.reflection_minibatch_size = reflection_minibatch_size
+        self.qwen_executor = qwen_executor or ReliableQwenExecutor()
+        self.validation_example_ids = frozenset(
+            id(example) for example in (validation_examples or [])
+        )
 
     def stripped_lm_call(self, x: str) -> list[str]:
         raw_outputs = (self.reflection_lm or dspy.settings.lm)(x)
@@ -1252,6 +1382,137 @@ class PromptTargetGEPAAdapter:
                 component.signature = component.signature.with_instructions(candidate_text)
         return new_prog
 
+    @staticmethod
+    def _metric_score_value(score: Any) -> Any:
+        return score["score"] if hasattr(score, "score") else score
+
+    def _retry_empty_qwen_predictions(
+        self,
+        *,
+        program: dspy.Module,
+        batch: list[dspy.Example],
+        predictions: list[Any],
+        raw_scores: list[Any],
+    ) -> tuple[list[int], list[str]]:
+        """Replace only empty-Qwen rollouts after a concurrent evaluation batch.
+
+        The primary pass is already complete when this runs.  Every fallback
+        rollout is executed one at a time, and the request-level semaphore in
+        ``ReliableQwenExecutor`` keeps Qwen max_inflight at one even if a caller
+        later introduces another retry worker.
+        """
+        executor = getattr(self, "qwen_executor", None) or ReliableQwenExecutor()
+        invalid_indices = [
+            index
+            for index, prediction in enumerate(predictions)
+            if prediction_has_empty_qwen_observation(prediction)
+        ]
+        if not invalid_indices:
+            return [], [executor.primary_profile.name]
+
+        attempted_profiles = [executor.primary_profile.name]
+        for retry_number in range(1, executor.max_batch_retries + 1):
+            with executor.retry_batch(retry_number) as profile:
+                attempted_profiles.append(profile.name)
+                logger.warning(
+                    "Retrying %d empty-Qwen rollout(s) serially after evaluation batch "
+                    "with profile=%s (retry %d/%d).",
+                    len(invalid_indices),
+                    profile.name,
+                    retry_number,
+                    executor.max_batch_retries,
+                )
+                for index in invalid_indices:
+                    prediction = program(**batch[index].inputs())
+                    predictions[index] = prediction
+                    raw_scores[index] = self.metric_fn(batch[index], prediction)
+
+            invalid_indices = [
+                index
+                for index in invalid_indices
+                if prediction_has_empty_qwen_observation(predictions[index])
+            ]
+            if not invalid_indices:
+                return [], attempted_profiles
+
+        # Keep the rollout so training/reflection can see its explicit error;
+        # validation wraps its score below so the sample is excluded from mean
+        # accuracy without changing GEPA's positional val-id mapping.
+        return invalid_indices, attempted_profiles
+
+    def _is_validation_batch(
+        self,
+        batch: list[dspy.Example],
+        *,
+        capture_traces: bool,
+    ) -> bool:
+        if capture_traces or not batch:
+            return False
+        validation_ids = getattr(self, "validation_example_ids", frozenset())
+        return bool(validation_ids) and all(id(example) in validation_ids for example in batch)
+
+    def _apply_exhausted_qwen_outcome(
+        self,
+        *,
+        predictions: list[Any],
+        raw_scores: list[Any],
+        invalid_indices: list[int],
+        attempted_profiles: list[str],
+        is_validation_batch: bool,
+    ) -> list[Any]:
+        invalid_set = set(invalid_indices)
+        for index in invalid_indices:
+            mark_empty_qwen_prediction(
+                predictions[index],
+                attempted_profiles=attempted_profiles,
+            )
+
+        if not is_validation_batch:
+            # Discovery/training keeps its normal score and sample membership.
+            # The reflection trace above carries the reliable_qwen_error so the
+            # teacher can see why a rollout was unreliable.
+            return raw_scores
+
+        # Keep one score object per original validation example: GEPA maps
+        # scores positionally to validation IDs. QwenValidationScore excludes
+        # failed rollouts from the aggregate while preserving that mapping.
+        if invalid_indices:
+            logger.warning(
+                "Excluding %d exhausted empty-Qwen rollout(s) from validation accuracy; "
+                "their traces remain attached to the corresponding examples.",
+                len(invalid_indices),
+            )
+        return [
+            QwenValidationScore(
+                self._metric_score_value(score),
+                included=index not in invalid_set,
+            )
+            for index, score in enumerate(raw_scores)
+        ]
+
+    def _report_captioner_max_token_hits(
+        self,
+        predictions: list[Any],
+        *,
+        capture_traces: bool,
+    ) -> None:
+        """Print one captioner token-cap summary after each GEPA batch."""
+        stats = _qwen_captioner_max_token_stats(predictions)
+        batch_index = getattr(self, "_gepa_evaluation_batch_index", 0) + 1
+        self._gepa_evaluation_batch_index = batch_index
+        phase = "reflection_trace" if capture_traces else "evaluation"
+        observed_max_tokens = ",".join(map(str, stats["max_tokens_values"])) or "unknown"
+        print(
+            "[GEPA captioner max-tokens] "
+            f"batch={batch_index} phase={phase} batch_samples={len(predictions)} "
+            f"qwen_captioner_samples={stats['captioner_samples']} "
+            f"hit_max_tokens_samples={stats['hit_samples']} "
+            f"qwen_captioner_calls={stats['captioner_calls']} "
+            f"hit_max_tokens_calls={stats['hit_calls']} "
+            f"observed_max_tokens={observed_max_tokens}",
+            flush=True,
+        )
+
     def evaluate(self, batch: list[dspy.Example], candidate: dict[str, str], capture_traces: bool = False):
         from dspy.evaluate import Evaluate
         from gepa.core.adapter import EvaluationBatch
@@ -1262,28 +1523,59 @@ class PromptTargetGEPAAdapter:
             if self.reflection_minibatch_size is None or len(batch) > self.reflection_minibatch_size
             else {"disable_logging": True}
         )
+        qwen_executor = getattr(self, "qwen_executor", None) or ReliableQwenExecutor()
         if capture_traces:
             from dspy.teleprompt import bootstrap_trace as bootstrap_trace_module
 
-            trajs = bootstrap_trace_module.bootstrap_trace_data(
-                program=program,
-                dataset=batch,
-                metric=self.metric_fn,
-                num_threads=self.num_threads,
-                raise_on_error=False,
-                capture_failed_parses=True,
-                failure_score=self.failure_score,
-                format_failure_score=self.failure_score,
-                callback_metadata=callback_metadata,
-            )
+            with qwen_executor.primary_batch():
+                trajs = bootstrap_trace_module.bootstrap_trace_data(
+                    program=program,
+                    dataset=batch,
+                    metric=self.metric_fn,
+                    num_threads=self.num_threads,
+                    raise_on_error=False,
+                    capture_failed_parses=True,
+                    failure_score=self.failure_score,
+                    format_failure_score=self.failure_score,
+                    callback_metadata=callback_metadata,
+                )
+            # bootstrap_trace_data keeps the original example index.  GEPA
+            # normally returns every item here; retaining the explicit mapping
+            # also avoids silently retrying a non-Qwen parse failure.
+            trajectories_by_index = {
+                int(item["example_ind"]): item
+                for item in trajs
+                if isinstance(item, dict) and "example_ind" in item
+            }
+            if len(trajectories_by_index) == len(batch):
+                predictions = [trajectories_by_index[index]["prediction"] for index in range(len(batch))]
+                raw_scores = [
+                    trajectories_by_index[index].get("score", self.failure_score)
+                    for index in range(len(batch))
+                ]
+                invalid_indices, attempted_profiles = self._retry_empty_qwen_predictions(
+                    program=program,
+                    batch=batch,
+                    predictions=predictions,
+                    raw_scores=raw_scores,
+                )
+                raw_scores = self._apply_exhausted_qwen_outcome(
+                    predictions=predictions,
+                    raw_scores=raw_scores,
+                    invalid_indices=invalid_indices,
+                    attempted_profiles=attempted_profiles,
+                    is_validation_batch=False,
+                )
+                for index, item in trajectories_by_index.items():
+                    item["prediction"] = predictions[index]
+                    item["score"] = raw_scores[index]
+
             scores = []
             outputs = []
             for item in trajs:
                 outputs.append(item["prediction"])
-                score = item.get("score", self.failure_score)
-                if hasattr(score, "score"):
-                    score = score["score"]
-                scores.append(score)
+                scores.append(self._metric_score_value(item.get("score", self.failure_score)))
+            self._report_captioner_max_token_hits(outputs, capture_traces=True)
             return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajs)
 
         evaluator = Evaluate(
@@ -1296,10 +1588,31 @@ class PromptTargetGEPAAdapter:
             max_errors=len(batch) * 100,
             callback_metadata=callback_metadata,
         )
-        result = evaluator(program)
+        with qwen_executor.primary_batch():
+            result = evaluator(program)
         outputs = [row[1] for row in result.results]
-        scores = [row[2] for row in result.results]
-        scores = [score["score"] if hasattr(score, "score") else score for score in scores]
+        raw_scores = [row[2] for row in result.results]
+        invalid_indices, attempted_profiles = self._retry_empty_qwen_predictions(
+            program=program,
+            batch=batch,
+            predictions=outputs,
+            raw_scores=raw_scores,
+        )
+        raw_scores = self._apply_exhausted_qwen_outcome(
+            predictions=outputs,
+            raw_scores=raw_scores,
+            invalid_indices=invalid_indices,
+            attempted_profiles=attempted_profiles,
+            is_validation_batch=self._is_validation_batch(
+                batch,
+                capture_traces=False,
+            ),
+        )
+        scores = [
+            score if isinstance(score, QwenValidationScore) else self._metric_score_value(score)
+            for score in raw_scores
+        ]
+        self._report_captioner_max_token_hits(outputs, capture_traces=False)
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=None)
 
     def _target_path(self, component_name: str) -> str:
@@ -1487,6 +1800,7 @@ def optimize_prompt_target_with_gepa(
         rng=rng,
         reflection_lm=reflection_lm,
         reflection_minibatch_size=reflection_minibatch_size,
+        validation_examples=valset,
     )
     seed_candidate = {name: program._candidate_text(path) for path, name in zip(program.target_paths, adapter.component_names)}
     reflective_dataset_save_interval = _nonnegative_int(
@@ -1852,6 +2166,24 @@ def parse_optimize_args() -> argparse.Namespace:
             "--final-eval-output-jsonl. Defaults to the --output-program directory."
         ),
     )
+    parser.add_argument(
+        "--final-eval-num-threads",
+        type=int,
+        default=int(os.environ.get("DSPY_AVQA_FINAL_EVAL_NUM_THREADS", "4")),
+        help=(
+            "Concurrent ReAct rollouts for final evaluation (default: 4). "
+            "Reliable-Qwen retries are always serial."
+        ),
+    )
+    parser.add_argument(
+        "--final-eval-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Primary rollouts per final-evaluation reliable-Qwen batch. Defaults to "
+            "--final-eval-num-threads."
+        ),
+    )
     parser.add_argument("--max-turns", type=int, default=int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--debug", action="store_true", help="Use only the first debug-limit samples.")
@@ -1969,6 +2301,10 @@ def parse_optimize_args() -> argparse.Namespace:
         parser.error("--inference-only requires --final-eval-output-jsonl")
     if args.final_eval_output_jsonl is not None and args.final_eval_output_dir is None:
         args.final_eval_output_dir = args.output_program.parent
+    if args.final_eval_num_threads < 1:
+        parser.error("--final-eval-num-threads must be >= 1")
+    if args.final_eval_batch_size is not None and args.final_eval_batch_size < 1:
+        parser.error("--final-eval-batch-size must be >= 1")
     return args
 
 
@@ -2516,13 +2852,24 @@ def write_batch_style_program_outputs(
     output_dir: Path | None = None,
     max_turns: int,
     skip_bad_examples: bool = False,
+    num_threads: int = 1,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
-    """Run final test inference, resuming from valid per-sample JSON files."""
+    """Run final test inference, resuming from valid per-sample JSON files.
+
+    Primary rollouts may run concurrently.  Empty Qwen observations are retried
+    only after the primary batch completes, under the serial fallback layouts.
+    """
+    if num_threads < 1:
+        raise ValueError("num_threads must be >= 1")
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
     cache_dir = output_dir or output_jsonl.parent
     rows_by_sample_id: dict[str, dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
     cached_samples = 0
     new_samples = 0
+    exhausted_qwen_samples = 0
 
     with _final_eval_directory_lock(cache_dir):
         remaining: list[tuple[int, dict[str, Any]]] = []
@@ -2536,22 +2883,73 @@ def write_batch_style_program_outputs(
 
         print(f"Cached final-test samples: {cached_samples}")
         print(f"Remaining final-test samples: {len(remaining)}")
+        reliable_qwen = ReliableQwenExecutor()
+        resolved_batch_size = batch_size or num_threads
+        print(
+            "Final-eval rollout config: "
+            f"primary_threads={num_threads}, "
+            f"reliable_batch_size={resolved_batch_size}, "
+            f"qwen_batch_retries={reliable_qwen.max_batch_retries}"
+        )
 
-        for idx, cut in remaining:
+        def run_item(item: tuple[int, dict[str, Any]]) -> tuple[dict[str, Any] | None, Exception | None]:
+            _, cut = item
             try:
-                row = _run_program_on_cut(program, cut, audio_caption_dir, max_turns)
+                return _run_program_on_cut(program, cut, audio_caption_dir, max_turns), None
             except Exception as exc:
-                if not skip_bad_examples:
-                    raise
-                skipped.append({
-                    "example_index": idx,
-                    "cut_id": str(cut.get("id") or ""),
-                    "error": str(exc),
-                })
-                continue
-            maybe_dump_question_data(cache_dir, row)
-            rows_by_sample_id[cut_id(cut)] = row
-            new_samples += 1
+                return None, exc
+
+        def has_empty_qwen(result: tuple[dict[str, Any] | None, Exception | None]) -> bool:
+            row, error = result
+            if error is not None or not isinstance(row, dict):
+                return False
+            question_data = row.get("question_data")
+            return isinstance(question_data, dict) and turn_trace_has_empty_qwen_observation(
+                question_data.get("turn_trace") or []
+            )
+
+        for batch_start in range(0, len(remaining), resolved_batch_size):
+            rollout_batch = remaining[batch_start : batch_start + resolved_batch_size]
+            recovered = reliable_qwen.run_batch(
+                rollout_batch,
+                run_item=run_item,
+                has_empty_qwen_response=has_empty_qwen,
+                max_workers=num_threads,
+            )
+            exhausted_indices = set(recovered.exhausted_indices)
+            exhausted_qwen_samples += len(exhausted_indices)
+            if exhausted_indices:
+                print(
+                    "Qwen recovery exhausted for "
+                    f"{len(exhausted_indices)} final-eval sample(s) in batch "
+                    f"{batch_start // resolved_batch_size + 1}; recording [ERROR] rows."
+                )
+
+            for batch_index, ((idx, cut), result) in enumerate(zip(rollout_batch, recovered.results)):
+                row, error = result
+                if error is not None:
+                    if not skip_bad_examples:
+                        raise error
+                    skipped.append({
+                        "example_index": idx,
+                        "cut_id": str(cut.get("id") or ""),
+                        "error": str(error),
+                    })
+                    continue
+                assert row is not None
+                if batch_index in exhausted_indices:
+                    question_data = row.setdefault("question_data", {})
+                    if isinstance(question_data, dict):
+                        mark_empty_qwen_turn_trace(
+                            question_data.get("turn_trace") or [],
+                            attempted_profiles=recovered.attempted_profiles,
+                        )
+                        question_data["response"] = (
+                            "[ERROR] Qwen returned no visible content after reliable recovery"
+                        )
+                maybe_dump_question_data(cache_dir, row)
+                rows_by_sample_id[cut_id(cut)] = row
+                new_samples += 1
 
         rows = [
             rows_by_sample_id[cut_id(cut)]
@@ -2567,6 +2965,7 @@ def write_batch_style_program_outputs(
         "final_eval_total_samples": len(cuts),
         "final_eval_cached_samples": cached_samples,
         "final_eval_new_samples": new_samples,
+        "final_eval_qwen_exhausted_samples": exhausted_qwen_samples,
         "final_eval_rows": len(rows),
         "final_eval_skipped_examples": skipped,
         "final_eval_complete": len(rows) + len(skipped) == len(cuts),
@@ -2743,6 +3142,8 @@ def _run_inference_only(
         output_dir=args.final_eval_output_dir,
         max_turns=args.max_turns,
         skip_bad_examples=args.skip_bad_examples,
+        num_threads=args.final_eval_num_threads,
+        batch_size=args.final_eval_batch_size,
     )
     elapsed = time.perf_counter() - started
     _update_inference_only_metadata(
@@ -3030,6 +3431,8 @@ def run_optimization() -> None:
             output_dir=args.final_eval_output_dir,
             max_turns=args.max_turns,
             skip_bad_examples=args.skip_bad_examples,
+            num_threads=args.final_eval_num_threads,
+            batch_size=args.final_eval_batch_size,
         )
 
     elapsed = time.perf_counter() - started

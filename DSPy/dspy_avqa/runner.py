@@ -21,6 +21,11 @@ from .data import (
 )
 from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config
+from .reliable_qwen import (
+    ReliableQwenExecutor,
+    mark_empty_qwen_turn_trace,
+    turn_trace_has_empty_qwen_observation,
+)
 from .signatures import apply_prompt_config_to_signatures
 
 
@@ -136,6 +141,24 @@ def parse_args() -> argparse.Namespace:
         help="Number of leading samples to run when --debug is enabled.",
     )
     parser.add_argument("--max-turns", type=int, default=4)
+    parser.add_argument(
+        "--inference-num-threads",
+        type=int,
+        default=int(os.environ.get("DSPY_AVQA_INFERENCE_NUM_THREADS", "4")),
+        help=(
+            "Concurrent ReAct rollouts in the primary inference pass (default: 4). "
+            "Qwen-only recovery retries remain serial."
+        ),
+    )
+    parser.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Primary rollouts per reliable-Qwen batch. Defaults to "
+            "--inference-num-threads; empty-Qwen retries start after each batch."
+        ),
+    )
     parser.add_argument(
         "--perception-config-yaml",
         type=Path,
@@ -495,6 +518,15 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "empty_response_retry_video_first": "QWEN_EMPTY_RESPONSE_RETRY_VIDEO_FIRST",
         },
     )
+    # Keep an explicit shell override available for long-running GEPA jobs while
+    # retaining the YAML value as the normal default.
+    if (
+        task.get("reliable_max_batch_retries") is not None
+        and not os.environ.get("QWEN_RELIABLE_MAX_BATCH_RETRIES", "").strip()
+    ):
+        os.environ["QWEN_RELIABLE_MAX_BATCH_RETRIES"] = str(
+            task["reliable_max_batch_retries"]
+        )
     if task.get("raise_on_empty_response") is not None:
         os.environ["QWEN_RAISE_ON_EMPTY_RESPONSE"] = _env_bool(
             task["raise_on_empty_response"]
@@ -667,6 +699,10 @@ def run_one(
 def run_batch() -> None:
     """Entrypoint for batch execution."""
     args = parse_args()
+    if args.inference_num_threads < 1:
+        raise ValueError("--inference-num-threads must be >= 1")
+    if args.inference_batch_size is not None and args.inference_batch_size < 1:
+        raise ValueError("--inference-batch-size must be >= 1")
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
@@ -828,40 +864,74 @@ def run_batch() -> None:
 
     print(f"Cached samples: {len(selected) - len(remaining)}")
     print(f"Remaining samples: {len(remaining)}")
+    reliable_qwen = ReliableQwenExecutor()
+    inference_batch_size = args.inference_batch_size or args.inference_num_threads
+    print(
+        "Inference rollout config: "
+        f"primary_threads={args.inference_num_threads}, "
+        f"reliable_batch_size={inference_batch_size}, "
+        f"qwen_batch_retries={reliable_qwen.max_batch_retries}"
+    )
 
-    for cut in remaining:
-        cut_item, response_text, turn_trace, payload, error, error_info = run_one(
-            program=program,
-            cut=cut,
-            audio_caption_dir=audio_caption_dir,
-            max_turns=args.max_turns,
+    for batch_start in range(0, len(remaining), inference_batch_size):
+        rollout_batch = remaining[batch_start : batch_start + inference_batch_size]
+        recovered = reliable_qwen.run_batch(
+            rollout_batch,
+            run_item=lambda cut: run_one(
+                program=program,
+                cut=cut,
+                audio_caption_dir=audio_caption_dir,
+                max_turns=args.max_turns,
+            ),
+            has_empty_qwen_response=lambda result: turn_trace_has_empty_qwen_observation(
+                result[2]
+            ),
+            max_workers=args.inference_num_threads,
         )
-        row = build_result_row(cut_item, response_text)
-        if error is None:
-            row["question_data"]["turn_trace"] = turn_trace
-        else:
-            row["question_data"]["response"] = f"[ERROR] {error}"
-            if error_info:
-                row["question_data"]["planner_error"] = error_info
-            row["question_data"]["turn_trace"] = [
-                {
-                    "turn_id": 1,
-                    "planner_action": "error",
-                    "tool_name": None,
-                    "tool_args": {
-                        "video_path": payload.get("video_path"),
-                        "audio_path": payload.get("audio_path"),
-                    },
-                    "tool_observation": None,
-                    "final_answer": None,
-                    "tool_error": error,
-                    "planner_lm_response": (error_info or {}).get("planner_lm_response"),
-                    "planner_calls": (error_info or {}).get("planner_calls", []),
-                    "planner_error": error_info,
-                }
-            ]
-        maybe_dump_question_data(args.output_dir, row)
-        rows_by_sample_id[cut_id(cut_item)] = row
+        exhausted_indices = set(recovered.exhausted_indices)
+        if exhausted_indices:
+            print(
+                "Qwen recovery exhausted for "
+                f"{len(exhausted_indices)} inference sample(s) in batch "
+                f"{batch_start // inference_batch_size + 1}; recording [ERROR] rows."
+            )
+
+        for batch_index, result in enumerate(recovered.results):
+            cut_item, response_text, turn_trace, payload, error, error_info = result
+            row = build_result_row(cut_item, response_text)
+            if error is None:
+                if batch_index in exhausted_indices:
+                    mark_empty_qwen_turn_trace(
+                        turn_trace,
+                        attempted_profiles=recovered.attempted_profiles,
+                    )
+                    row["question_data"]["response"] = (
+                        "[ERROR] Qwen returned no visible content after reliable recovery"
+                    )
+                row["question_data"]["turn_trace"] = turn_trace
+            else:
+                row["question_data"]["response"] = f"[ERROR] {error}"
+                if error_info:
+                    row["question_data"]["planner_error"] = error_info
+                row["question_data"]["turn_trace"] = [
+                    {
+                        "turn_id": 1,
+                        "planner_action": "error",
+                        "tool_name": None,
+                        "tool_args": {
+                            "video_path": payload.get("video_path"),
+                            "audio_path": payload.get("audio_path"),
+                        },
+                        "tool_observation": None,
+                        "final_answer": None,
+                        "tool_error": error,
+                        "planner_lm_response": (error_info or {}).get("planner_lm_response"),
+                        "planner_calls": (error_info or {}).get("planner_calls", []),
+                        "planner_error": error_info,
+                    }
+                ]
+            maybe_dump_question_data(args.output_dir, row)
+            rows_by_sample_id[cut_id(cut_item)] = row
 
     rows = [rows_by_sample_id[cut_id(cut)] for cut in selected if cut_id(cut) in rows_by_sample_id]
     write_results_jsonl(rows, args.output_jsonl)

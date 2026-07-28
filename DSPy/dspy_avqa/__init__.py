@@ -24,6 +24,7 @@ from .optimize import (
 )
 from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_value
+from .reliable_qwen import ReliableQwenExecutor
 from .runner import parse_args, run_batch, run_one
 from .signatures import apply_prompt_config_to_signatures
 from .tools import (
@@ -55,6 +56,7 @@ __all__ = [
     "write_results_jsonl",
     "AVQADSPyReActProgram",
     "normalize_option_letter",
+    "ReliableQwenExecutor",
     "load_prompt_config",
     "active_prompt_yaml_path",
     "prompt_config",
@@ -81,4 +83,3 @@ __all__ = [
     "parse_optimize_args",
     "run_optimization",
 ]
-

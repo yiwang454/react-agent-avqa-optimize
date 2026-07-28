@@ -1,17 +1,18 @@
 task:
   video_only: false
-  use_audio_in_video: true
+  # Default layout outside ReliableQwenExecutor.  GEPA's executor uses this
+  # audio-first split layout for its primary pass without mutating env vars.
+  use_audio_in_video: false
+  video_first: false
   enable_thinking: false
   batch_size: 1
   parallel_qwen: false
   qwen_delay_s: 1.0
   max_retries: 5
   timeout: 180
-  empty_response_retry_min_tokens: 32
-  empty_response_retry_temperature: 0.0
-  empty_response_retry_seed_step: 1
-  empty_response_retry_video_first: true
-  raise_on_empty_response: true
+  # Retries after the concurrent GEPA batch: split/video-first once, then
+  # embedded-audio.  Values above 2 repeat embedded-audio serially.
+  reliable_max_batch_retries: 2
 
 model:
   qwen_model: qwen3-omni-instruct

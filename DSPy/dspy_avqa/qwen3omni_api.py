@@ -235,6 +235,7 @@ def call_qwen_messages(
     empty_response_retry_seed_step: int = 0,
     empty_response_retry_video_first: bool = False,
     raise_on_empty_response: bool = False,
+    stream_empty_fallback: bool = True,
 ) -> Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], str]:
     last_err: Exception | None = None
     resolved_stream = _env_flag("QWEN_STREAM", True) if stream is None else stream
@@ -321,7 +322,7 @@ def call_qwen_messages(
                     finish_reason = _extract_finish_reason(chunk) or finish_reason
                 response_text = "".join(content_chunks)
                 reasoning_text = "".join(reasoning_chunks).strip()
-                if not response_text.strip() and not reasoning_text:
+                if stream_empty_fallback and not response_text.strip() and not reasoning_text:
                     retry_kwargs = dict(request_kwargs)
                     retry_kwargs["stream"] = False
                     retry_kwargs.pop("stream_options", None)
@@ -382,8 +383,13 @@ def call_qwen_messages(
                 if raise_on_empty_response:
                     raise EmptyQwenResponseError(message, response_attempts)
 
+            # Preserve the requested cap and server stop reason with the
+            # provider usage. GEPA aggregates these fields at the batch level
+            # to expose captioner rollouts that are cut off by max_tokens.
+            token_usage = dict(token_usage)
+            token_usage["qwen_max_tokens"] = max_tokens
+            token_usage["qwen_finish_reason"] = finish_reason
             if len(response_attempts) > 1:
-                token_usage = dict(token_usage)
                 token_usage["qwen_response_attempts"] = response_attempts
 
             if return_thinking:

@@ -12,6 +12,7 @@ from typing import Any
 
 from .gemini_api import call_gemini_messages
 from .prompt_config import prompt_value, render_prompt
+from .reliable_qwen import active_qwen_request_profile, qwen_request_slot
 
 
 SUPPORTED_PERCEPTION_MODELS = {"qwen", "gemini"}
@@ -218,10 +219,23 @@ def call_qwen_perception(
     """Call Qwen3-omni for AV perception/grounding."""
     from .qwen3omni_api import call_qwen_messages, to_data_url
 
-    qwen_video_only = _env_flag_prefixed(env_prefix, "VIDEO_ONLY", "false")
-    qwen_use_audio_in_video = (
-        not qwen_video_only
-        and _env_flag_prefixed(env_prefix, "USE_AUDIO_IN_VIDEO", "false")
+    request_profile = active_qwen_request_profile()
+    if request_profile is None:
+        qwen_video_only = _env_flag_prefixed(env_prefix, "VIDEO_ONLY", "false")
+        qwen_use_audio_in_video = (
+            not qwen_video_only
+            and _env_flag_prefixed(env_prefix, "USE_AUDIO_IN_VIDEO", "false")
+        )
+        qwen_video_first = _env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false")
+    else:
+        # The reliable policy is intentionally request-local.  In particular,
+        # it never mutates QWEN_VIDEO_FIRST while DSPy worker threads are live.
+        qwen_video_only = False
+        qwen_use_audio_in_video = request_profile.use_audio_in_video
+        qwen_video_first = request_profile.video_first
+    defer_empty_response_retries = bool(
+        request_profile is not None
+        and request_profile.defer_empty_response_retries
     )
     if not audio_path and not qwen_video_only and not qwen_use_audio_in_video:
         raise ValueError("audio_path is required for Qwen3-omni calls")
@@ -233,7 +247,7 @@ def call_qwen_perception(
         if audio_path and not qwen_video_only and not qwen_use_audio_in_video
         else None
     )
-    if _env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false"):
+    if qwen_video_first:
         content.append(video_content)
         if audio_content is not None:
             content.append(audio_content)
@@ -248,50 +262,58 @@ def call_qwen_perception(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": content})
 
-    response_text, token_usage, thinking_text = call_qwen_messages(
-        messages,
-        model=_env_value_prefixed(env_prefix, "MODEL", "qwen3-omni-flash") or "qwen3-omni-flash",
-        api_key=_env_optional_value_prefixed(env_prefix, "API_KEY"),
-        base_url=_env_optional_value_prefixed(env_prefix, "BASE_URL"),
-        timeout=int(_env_value_prefixed(env_prefix, "TIMEOUT", "180")),
-        max_retries=int(_env_value_prefixed(env_prefix, "MAX_RETRIES", "3")),
-        retry_delay_s=float(_env_value_prefixed(env_prefix, "DELAY_S", "1.0")),
-        temperature=float(_env_value_prefixed(env_prefix, "TEMPERATURE", "0.6")),
-        qwen_seed=_env_optional_int_prefixed(env_prefix, "SEED"),
-        top_p=float(_env_value_prefixed(env_prefix, "TOP_P", "0.95")),
-        top_k=int(_env_value_prefixed(env_prefix, "TOP_K", "20")),
-        max_tokens=int(_env_value_prefixed(env_prefix, "MAX_TOKENS", "1024")),
-        fps=float(_env_value_prefixed(env_prefix, "FPS", "2.0")),
-        max_frames=int(_env_value_prefixed(env_prefix, "MAX_FRAMES", "128")),
-        use_audio_in_video=qwen_use_audio_in_video,
-        repetition_penalty=_env_optional_float_prefixed(env_prefix, "REPETITION_PENALTY"),
-        enable_thinking=_env_optional_bool_prefixed(env_prefix, "ENABLE_THINKING"),
-        return_thinking=True,
-        retry_degenerate_response=True,
-        empty_response_retry_min_tokens=int(
-            _env_value_prefixed(env_prefix, "EMPTY_RESPONSE_RETRY_MIN_TOKENS", "0")
-        ),
-        empty_response_retry_temperature=_env_optional_float_prefixed(
-            env_prefix, "EMPTY_RESPONSE_RETRY_TEMPERATURE"
-        ),
-        empty_response_retry_seed_step=int(
-            _env_value_prefixed(env_prefix, "EMPTY_RESPONSE_RETRY_SEED_STEP", "0")
-        ),
-        empty_response_retry_video_first=_env_flag_prefixed(
-            env_prefix, "EMPTY_RESPONSE_RETRY_VIDEO_FIRST", "true"
-        ),
-        raise_on_empty_response=_env_flag_prefixed(
-            env_prefix, "RAISE_ON_EMPTY_RESPONSE", "true"
-        ),
-    )
+    with qwen_request_slot():
+        response_text, token_usage, thinking_text = call_qwen_messages(
+            messages,
+            model=_env_value_prefixed(env_prefix, "MODEL", "qwen3-omni-flash") or "qwen3-omni-flash",
+            api_key=_env_optional_value_prefixed(env_prefix, "API_KEY"),
+            base_url=_env_optional_value_prefixed(env_prefix, "BASE_URL"),
+            timeout=int(_env_value_prefixed(env_prefix, "TIMEOUT", "180")),
+            max_retries=int(_env_value_prefixed(env_prefix, "MAX_RETRIES", "3")),
+            retry_delay_s=float(_env_value_prefixed(env_prefix, "DELAY_S", "1.0")),
+            temperature=float(_env_value_prefixed(env_prefix, "TEMPERATURE", "0.6")),
+            qwen_seed=_env_optional_int_prefixed(env_prefix, "SEED"),
+            top_p=float(_env_value_prefixed(env_prefix, "TOP_P", "0.95")),
+            top_k=int(_env_value_prefixed(env_prefix, "TOP_K", "20")),
+            max_tokens=int(_env_value_prefixed(env_prefix, "MAX_TOKENS", "1024")),
+            fps=float(_env_value_prefixed(env_prefix, "FPS", "2.0")),
+            max_frames=int(_env_value_prefixed(env_prefix, "MAX_FRAMES", "128")),
+            use_audio_in_video=qwen_use_audio_in_video,
+            repetition_penalty=_env_optional_float_prefixed(env_prefix, "REPETITION_PENALTY"),
+            enable_thinking=_env_optional_bool_prefixed(env_prefix, "ENABLE_THINKING"),
+            return_thinking=True,
+            # During a reliable batch, preserve transport retries but return an
+            # empty visible completion to the adapter.  The adapter retries only
+            # after all concurrent workers have completed.
+            retry_degenerate_response=not defer_empty_response_retries,
+            empty_response_retry_min_tokens=int(
+                _env_value_prefixed(env_prefix, "EMPTY_RESPONSE_RETRY_MIN_TOKENS", "0")
+            ),
+            empty_response_retry_temperature=_env_optional_float_prefixed(
+                env_prefix, "EMPTY_RESPONSE_RETRY_TEMPERATURE"
+            ),
+            empty_response_retry_seed_step=int(
+                _env_value_prefixed(env_prefix, "EMPTY_RESPONSE_RETRY_SEED_STEP", "0")
+            ),
+            empty_response_retry_video_first=_env_flag_prefixed(
+                env_prefix, "EMPTY_RESPONSE_RETRY_VIDEO_FIRST", "true"
+            ),
+            raise_on_empty_response=(
+                not defer_empty_response_retries
+                and _env_flag_prefixed(env_prefix, "RAISE_ON_EMPTY_RESPONSE", "true")
+            ),
+            stream_empty_fallback=not defer_empty_response_retries,
+        )
     _set_last_perception_metadata(
         backend="qwen",
         system_prompt=system_prompt,
         prompt=prompt,
         model=_env_value_prefixed(env_prefix, "MODEL", "qwen3-omni") or "qwen3-omni",
         base_url=_env_optional_value_prefixed(env_prefix, "BASE_URL"),
-        video_first=_env_flag_prefixed(env_prefix, "VIDEO_FIRST", "false"),
+        video_first=qwen_video_first,
         use_audio_in_video=qwen_use_audio_in_video,
+        reliable_qwen_profile=request_profile.name if request_profile is not None else None,
+        qwen_response_empty=not response_text.strip(),
         env_prefix=env_prefix,
         token_usage=token_usage,
         thinking_text=thinking_text,
