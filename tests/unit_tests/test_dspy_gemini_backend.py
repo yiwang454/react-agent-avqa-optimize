@@ -207,6 +207,93 @@ def test_qwen_audio_in_video_omits_duplicate_standalone_audio(monkeypatch):
     assert metadata["use_audio_in_video"] is True
 
 
+def test_reliable_qwen_profiles_override_layout_without_mutating_environment(monkeypatch):
+    tools = _load_tools()
+    captured = []
+    qwen_api = types.ModuleType("dspy_avqa.qwen3omni_api")
+    qwen_api.to_data_url = lambda path: f"data:{path}"
+
+    def call(messages, **kwargs):
+        captured.append((messages, kwargs))
+        return "visible evidence", {}, ""
+
+    qwen_api.call_qwen_messages = call
+    sys.modules["dspy_avqa.qwen3omni_api"] = qwen_api
+    reliable_qwen = sys.modules["dspy_avqa.reliable_qwen"]
+    executor = reliable_qwen.ReliableQwenExecutor(max_batch_retries=3)
+    monkeypatch.setenv("QWEN_VIDEO_FIRST", "false")
+    monkeypatch.setenv("QWEN_USE_AUDIO_IN_VIDEO", "true")
+
+    with executor.primary_batch():
+        tools.call_qwen_perception("video.mp4", "audio.wav", "question", system_prompt="")
+    with executor.retry_batch(1):
+        tools.call_qwen_perception("video.mp4", "audio.wav", "question", system_prompt="")
+    with executor.retry_batch(2):
+        tools.call_qwen_perception("video.mp4", "audio.wav", "question", system_prompt="")
+    with executor.retry_batch(3):
+        tools.call_qwen_perception("video.mp4", "audio.wav", "question", system_prompt="")
+
+    primary_messages, primary_kwargs = captured[0]
+    first_retry_messages, first_retry_kwargs = captured[1]
+    embedded_messages, embedded_kwargs = captured[2]
+    repeated_embedded_messages, repeated_embedded_kwargs = captured[3]
+    assert [item["type"] for item in primary_messages[0]["content"]] == [
+        "audio_url",
+        "video_url",
+        "text",
+    ]
+    assert primary_kwargs["use_audio_in_video"] is False
+    assert primary_kwargs["retry_degenerate_response"] is False
+    assert primary_kwargs["stream_empty_fallback"] is False
+    assert primary_kwargs["raise_on_empty_response"] is False
+    assert [item["type"] for item in first_retry_messages[0]["content"]] == [
+        "video_url",
+        "audio_url",
+        "text",
+    ]
+    assert first_retry_kwargs["use_audio_in_video"] is False
+    assert [item["type"] for item in embedded_messages[0]["content"]] == [
+        "video_url",
+        "text",
+    ]
+    assert embedded_kwargs["use_audio_in_video"] is True
+    assert [item["type"] for item in repeated_embedded_messages[0]["content"]] == [
+        "video_url",
+        "text",
+    ]
+    assert repeated_embedded_kwargs["use_audio_in_video"] is True
+    assert os.environ["QWEN_VIDEO_FIRST"] == "false"
+
+
+def test_reliable_qwen_executor_retries_only_empty_primary_results():
+    _load_tools()
+    reliable_qwen = sys.modules["dspy_avqa.reliable_qwen"]
+    executor = reliable_qwen.ReliableQwenExecutor(max_batch_retries=2)
+    profiles = []
+
+    def run_item(item):
+        profile = reliable_qwen.active_qwen_request_profile()
+        assert profile is not None
+        profiles.append((item, profile.name))
+        return {"empty": item == "needs-retry" and profile == executor.primary_profile}
+
+    result = executor.run_batch(
+        ["already-valid", "needs-retry"],
+        run_item=run_item,
+        has_empty_qwen_response=lambda value: value["empty"],
+        max_workers=2,
+    )
+
+    assert result.exhausted_indices == []
+    assert result.attempted_profiles == [
+        "primary_separate_audio_first",
+        "retry_separate_video_first",
+    ]
+    assert profiles.count(("already-valid", "primary_separate_audio_first")) == 1
+    assert profiles.count(("needs-retry", "primary_separate_audio_first")) == 1
+    assert profiles.count(("needs-retry", "retry_separate_video_first")) == 1
+
+
 def test_qwen_video_only_takes_precedence_over_audio_in_video(monkeypatch):
     tools = _load_tools()
     captured = {}

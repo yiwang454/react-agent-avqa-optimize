@@ -89,6 +89,8 @@ def test_qwen_retries_empty_response_and_raises_after_exhaustion(monkeypatch):
 
     assert text == "A detailed visual description."
     assert usage["completion_tokens"] == 24
+    assert usage["qwen_max_tokens"] == 4096
+    assert usage["qwen_finish_reason"] == "stop"
     assert usage["qwen_response_attempts"][0]["degenerate_reason"] == "response is empty after strip"
     assert usage["qwen_response_attempts"][1]["degenerate_reason"] is None
     assert len(calls) == 2

@@ -23,10 +23,10 @@ if [ -z "${PYTHON_BIN}" ] && [ -n "${ENV_PREFIX:-}" ] && [ -x "${ENV_PREFIX}/bin
 fi
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-export GEPA_EXPERIMENT_NAME="${GEPA_EXPERIMENT_NAME:-g0p_deepseek_qwen_v8_free_caption_in_task_planner_gpt5_4_reflection}"
+export GEPA_EXPERIMENT_NAME="${GEPA_EXPERIMENT_NAME:-g0_deepseek_qwen_gemini_v8_caption_in_task_planner_gpt5_4_reflection}"
 export OPTIMIZE_TARGETS_CSV="planner.workflow_prompt"
-export PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/daily_qa_prompt_v8_free_caption_in_task.yaml}"
-export GEPA_OPTIMIZED_PROMPT_CONFIG_BASENAME="daily_qa_prompt_v8_free_caption_in_task.yaml"
+export PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/daily_qa_prompt_v8_caption_in_task.yaml}"
+export GEPA_OPTIMIZED_PROMPT_CONFIG_BASENAME="daily_qa_prompt_v8_caption_in_task.yaml"
 
 export PLANNER_PROVIDER="deepseek"
 export PLANNER_TEMPERATURE="${PLANNER_TEMPERATURE_OVERRIDE:-0.0}"
@@ -36,10 +36,11 @@ export DEEPSEEK_SEED="${DEEPSEEK_SEED_OVERRIDE:-7}"
 unset PLANNER_REASONING_EFFORT PLANNER_SEED
 
 export PERCEPTION_MODEL="qwen"
-export CAPTIONER_MODEL="qwen"
+export CAPTIONER_MODEL="gemini"
 export PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/config_localqwen_api_instruct.yaml}"
-export CAPTIONER_CONFIG_YAML="${CAPTIONER_CONFIG_YAML_OVERRIDE:-${PROJECT_DIR}/DSPy/dspy_avqa/yamls/config_localqwen_api_captioner_limit.yaml}"
+export CAPTIONER_CONFIG_YAML="${CAPTIONER_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/demos/yamls/gemini_qa/daily_125_gemini2.5_cold_captioner.yaml}"
 export DSPY_AVQA_ALLOWED_TOOLS="${DSPY_AVQA_ALLOWED_TOOLS_OVERRIDE:-ask_caption,ask_perception}"
+export QWEN_BASE_URL="${QWEN_BASE_URL_OVERRIDE:-http://10.62.186.8:8000/v1}"
 
 export GEPA_CAPTION_SUPERVISION="none"
 export GEPA_REFLECTION_TEMPLATE_VERSION="${GEPA_REFLECTION_TEMPLATE_VERSION:-original}"
@@ -47,18 +48,13 @@ export GEPA_REFLECTION_MODEL="${GEPA_REFLECTION_MODEL_OVERRIDE:-gpt-5.4}"
 export GEPA_REFLECTION_REASONING_EFFORT="${GEPA_REFLECTION_REASONING_EFFORT_OVERRIDE:-medium}"
 unset GEPA_REFLECTION_TEMPERATURE
 
-export QWEN_SERVE_URL="${QWEN_SERVE_URL_OVERRIDE:-${QWEN_BASE_URL_OVERRIDE:-http://10.62.186.26:8000/v1}}"
-export QWEN_BASE_URL="${QWEN_SERVE_URL}"
-export CAPTIONER_QWEN_BASE_URL="${QWEN_SERVE_URL}"
-
-BASE_ENV_OUTPUT_DIR="${GEPA_BASE_ENV_OUTPUT_DIR:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_deepseek_qwen_v8_gepa_${GEPA_EXPERIMENT_NAME}}"
+BASE_ENV_OUTPUT_DIR="${GEPA_BASE_ENV_OUTPUT_DIR:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_deepseek_qwen_gemini_v8_gepa_${GEPA_EXPERIMENT_NAME}}"
 INPUT_JSONL="${GEPA_INPUT_JSONL:-${INPUT_JSONL}}"
 DAILY_OMNI_ROOT="${GEPA_DAILY_OMNI_ROOT:-${DAILY_OMNI_ROOT:-/mnt/ceph_rbd/data/avqa_project/daily_omni}}"
 TRAINSET_JSONL="${GEPA_TRAINSET_JSONL:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_selectedTrain125.jsonl}"
 VALSET_JSONL="${GEPA_VALSET_JSONL:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_selectedVal125.jsonl}"
 TRAIN_LIMIT="${GEPA_TRAIN_LIMIT:-64}"
 MAX_TURNS="${GEPA_MAX_TURNS:-${MAX_TURNS:-3}}"
-# 10 full evaluations keeps GEPA proposals near the intended 10--12 range.
 GEPA_MAX_FULL_EVALS="${GEPA_MAX_FULL_EVALS:-10}"
 GEPA_NUM_THREADS="${GEPA_NUM_THREADS:-8}"
 GEPA_REFLECTION_MINIBATCH_SIZE="${GEPA_REFLECTION_MINIBATCH_SIZE:-16}"
@@ -116,16 +112,15 @@ for gepa_seed in "${GEPA_SEEDS[@]}"; do
     cmd+=(--debug --debug-limit "${DEBUG_LIMIT}")
   fi
 
-  echo "${SCRIPT_DIR}/logs/${GEPA_EXPERIMENT_NAME}.log";
+  echo "${SCRIPT_DIR}/logs/${GEPA_EXPERIMENT_NAME}.log"
   {
     echo "GEPA experiment=${GEPA_EXPERIMENT_NAME}; seed=${gepa_seed}; targets=${OPTIMIZE_TARGETS_CSV}"
     echo "Prompt=${PROMPT_YAML}; planner=${PLANNER_PROVIDER}/${DEEPSEEK_MODEL:-}; reflection=${GEPA_REFLECTION_MODEL}/${GEPA_REFLECTION_REASONING_EFFORT}"
     echo "DeepSeek base url=${DEEPSEEK_BASE_URL:-}"
     echo "GPT reflection base url=${GEPA_REFLECTION_API_BASE:-}"
     echo "Qwen perception config yaml=${PERCEPTION_CONFIG_YAML}"
-    echo "Qwen captioner config yaml=${CAPTIONER_CONFIG_YAML}"
     echo "Qwen perception base url=${QWEN_BASE_URL}"
-    echo "Qwen captioner base url=${CAPTIONER_QWEN_BASE_URL}"
+    echo "Gemini captioner config yaml=${CAPTIONER_CONFIG_YAML}"
     echo "Perception=${PERCEPTION_MODEL}; captioner=${CAPTIONER_MODEL}; tools=${DSPY_AVQA_ALLOWED_TOOLS}; gepa_threads=${GEPA_NUM_THREADS}; qwen_batch_retries=${QWEN_RELIABLE_MAX_BATCH_RETRIES:-3}"
     "${cmd[@]}" "$@"
   } >> "${SCRIPT_DIR}/logs/${GEPA_EXPERIMENT_NAME}.log" 2>&1

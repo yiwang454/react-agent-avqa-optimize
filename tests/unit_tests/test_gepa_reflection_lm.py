@@ -247,6 +247,206 @@ def test_json_safe_serializes_nested_model_dump_wrapper():
     assert json.loads(json.dumps(normalized)) == {"usage": [{"reasoning_tokens": 17}]}
 
 
+def test_gepa_captioner_max_tokens_are_aggregated_per_batch(capsys):
+    optimize = _load_optimize_module()
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    predictions = [
+        types.SimpleNamespace(
+            turn_trace=[
+                {
+                    "tool_name": "ask_caption",
+                    "perception_backend": "qwen",
+                    "perception_token_usage": {
+                        "qwen_max_tokens": 256,
+                        "completion_tokens": 256,
+                        "qwen_finish_reason": "length",
+                    },
+                },
+                {
+                    "tool_name": "ask_perception",
+                    "perception_backend": "qwen",
+                    "perception_token_usage": {
+                        "qwen_max_tokens": 256,
+                        "completion_tokens": 256,
+                        "qwen_finish_reason": "length",
+                    },
+                },
+            ]
+        ),
+        types.SimpleNamespace(
+            turn_trace=[
+                {
+                    "tool_name": "ask_caption",
+                    "perception_backend": "qwen",
+                    "perception_token_usage": {
+                        "qwen_max_tokens": 256,
+                        "completion_tokens": 255,
+                        "qwen_finish_reason": "stop",
+                    },
+                },
+            ]
+        ),
+        types.SimpleNamespace(turn_trace=[]),
+    ]
+
+    stats = optimize._qwen_captioner_max_token_stats(predictions)
+
+    assert stats == {
+        "captioner_samples": 2,
+        "hit_samples": 1,
+        "captioner_calls": 2,
+        "hit_calls": 1,
+        "max_tokens_values": (256,),
+    }
+    adapter._report_captioner_max_token_hits(predictions, capture_traces=False)
+    report = capsys.readouterr().out
+    assert report.count("\n") == 1
+    assert "batch=1 phase=evaluation batch_samples=3" in report
+    assert "hit_max_tokens_samples=1" in report
+    assert "hit_max_tokens_calls=1" in report
+    assert "observed_max_tokens=256" in report
+
+
+def test_gepa_adapter_retries_empty_qwen_predictions_after_batch(monkeypatch):
+    optimize = _load_optimize_module()
+    reliable_qwen = sys.modules["dspy_avqa.reliable_qwen"]
+
+    class Example:
+        def inputs(self):
+            return {"sample": "one"}
+
+    profiles = []
+
+    class Program:
+        def __call__(self, **kwargs):
+            profile = reliable_qwen.active_qwen_request_profile()
+            profiles.append(profile.name if profile is not None else None)
+            return types.SimpleNamespace(
+                turn_trace=[
+                    {
+                        "planner_action": "tool",
+                        "perception_backend": "qwen",
+                        "tool_observation": "recovered evidence",
+                    }
+                ]
+            )
+
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    adapter.qwen_executor = reliable_qwen.ReliableQwenExecutor(max_batch_retries=2)
+    adapter.metric_fn = lambda example, prediction: 1.0
+    predictions = [
+        types.SimpleNamespace(
+            turn_trace=[
+                {
+                    "planner_action": "tool",
+                    "perception_backend": "qwen",
+                    "tool_observation": "\n",
+                }
+            ]
+        )
+    ]
+    raw_scores = [0.0]
+
+    adapter._retry_empty_qwen_predictions(
+        program=Program(),
+        batch=[Example()],
+        predictions=predictions,
+        raw_scores=raw_scores,
+    )
+
+    assert profiles == ["retry_separate_video_first"]
+    assert predictions[0].turn_trace[0]["tool_observation"] == "recovered evidence"
+    assert raw_scores == [1.0]
+
+
+def test_gepa_adapter_marks_exhausted_empty_qwen_rollout_for_reflection():
+    optimize = _load_optimize_module()
+    reliable_qwen = sys.modules["dspy_avqa.reliable_qwen"]
+
+    class Example:
+        def inputs(self):
+            return {}
+
+    class Program:
+        def __call__(self, **kwargs):
+            return types.SimpleNamespace(
+                turn_trace=[
+                    {
+                        "planner_action": "tool",
+                        "perception_backend": "qwen",
+                        "tool_observation": "",
+                    }
+                ]
+            )
+
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    adapter.qwen_executor = reliable_qwen.ReliableQwenExecutor(max_batch_retries=2)
+    adapter.metric_fn = lambda example, prediction: 0.0
+    adapter.failure_score = 0.0
+    predictions = [Program()()]
+
+    invalid_indices, attempted_profiles = adapter._retry_empty_qwen_predictions(
+        program=Program(),
+        batch=[Example()],
+        predictions=predictions,
+        raw_scores=[0.0],
+    )
+
+    assert invalid_indices == [0]
+    assert attempted_profiles == [
+        "primary_separate_audio_first",
+        "retry_separate_video_first",
+        "retry_embedded_audio",
+    ]
+    scores = adapter._apply_exhausted_qwen_outcome(
+        predictions=predictions,
+        raw_scores=[1.0],
+        invalid_indices=invalid_indices,
+        attempted_profiles=attempted_profiles,
+        is_validation_batch=False,
+    )
+    assert scores == [1.0]
+    assert predictions[0].turn_trace[0]["reliable_qwen_error"]["error_type"] == "EmptyQwenResponse"
+
+
+def test_exhausted_validation_qwen_scores_are_excluded_from_accuracy_without_shifting_ids():
+    optimize = _load_optimize_module()
+
+    adapter = optimize.PromptTargetGEPAAdapter.__new__(optimize.PromptTargetGEPAAdapter)
+    adapter.failure_score = 0.0
+    predictions = [
+        types.SimpleNamespace(turn_trace=[]),
+        types.SimpleNamespace(
+            turn_trace=[
+                {
+                    "planner_action": "tool",
+                    "perception_backend": "qwen",
+                    "tool_observation": "",
+                }
+            ]
+        ),
+        types.SimpleNamespace(turn_trace=[]),
+    ]
+
+    scores = adapter._apply_exhausted_qwen_outcome(
+        predictions=predictions,
+        raw_scores=[1.0, 0.0, 0.0],
+        invalid_indices=[1],
+        attempted_profiles=["primary_separate_audio_first", "retry_embedded_audio"],
+        is_validation_batch=True,
+    )
+
+    assert len(scores) == 3
+    assert scores[1].included is False
+    # GEPA's validation state computes sum(scores) / len(scores).  The custom
+    # sum object deliberately ignores the exhausted sample's denominator.
+    assert sum(scores) / len(scores) == 0.5
+    assert predictions[1].turn_trace[0]["reliable_qwen_error"]["attempted_profiles"] == [
+        "primary_separate_audio_first",
+        "retry_embedded_audio",
+    ]
+
+
 def test_make_reflective_dataset_keeps_only_reflection_relevant_trace_fields():
     optimize = _load_optimize_module()
     full_reasoning = "reasoning " * 400
@@ -922,6 +1122,50 @@ def test_final_eval_regenerates_unreadable_or_empty_cache(tmp_path):
     assert calls == ["a", "b"]
     assert result["final_eval_cached_samples"] == 1
     assert result["final_eval_new_samples"] == 2
+
+
+def test_final_eval_parallel_primary_uses_reliable_qwen_retry(tmp_path):
+    optimize = _load_optimize_module()
+    _install_final_eval_test_io(optimize)
+    reliable_qwen = sys.modules["dspy_avqa.reliable_qwen"]
+    profiles = []
+
+    def run(program, cut, audio_caption_dir, max_turns):
+        profile = reliable_qwen.active_qwen_request_profile()
+        assert profile is not None
+        profiles.append((cut["id"], profile.name))
+        empty = cut["id"] == "retry" and profile.name == "primary_separate_audio_first"
+        return {
+            "video_id": cut["id"],
+            "metadata": {"video_id": cut["id"]},
+            "question_data": {
+                "response": "A. answer",
+                "turn_trace": [
+                    {
+                        "planner_action": "tool",
+                        "perception_backend": "qwen",
+                        "tool_observation": "" if empty else "visible evidence",
+                    }
+                ],
+            },
+        }
+
+    optimize._run_program_on_cut = run
+    result = optimize.write_batch_style_program_outputs(
+        object(),
+        [{"id": "valid"}, {"id": "retry"}],
+        tmp_path,
+        tmp_path / "output.jsonl",
+        output_dir=tmp_path,
+        max_turns=3,
+        num_threads=2,
+        batch_size=2,
+    )
+
+    assert result["final_eval_qwen_exhausted_samples"] == 0
+    assert profiles.count(("valid", "primary_separate_audio_first")) == 1
+    assert profiles.count(("retry", "primary_separate_audio_first")) == 1
+    assert profiles.count(("retry", "retry_separate_video_first")) == 1
 
 
 def test_final_eval_lock_rejects_a_second_writer(tmp_path):
