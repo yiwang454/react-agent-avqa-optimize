@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -160,8 +161,24 @@ def _log_gepa_stage_exceptions(stage: str):
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             try:
                 return method(*args, **kwargs)
-            except Exception:
+            except Exception as exc:
                 logger.exception("GEPA %s failed", stage)
+                if "missing credentials" in str(exc).lower():
+                    print(
+                        "FATAL: GEPA reflection LM is missing credentials; stopping optimization. "
+                        f"Original error: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    # GEPA catches ordinary Exception instances and turns them into
+                    # skipped proposals.  SystemExit deliberately bypasses that path.
+                    raise SystemExit(1) from exc
+                print(
+                    f"WARNING: GEPA {stage} failed; skipping this proposal. "
+                    f"Original error: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 raise
 
         return wrapped
@@ -351,6 +368,8 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
     reflection_kwargs = getattr(reflection_lm, "kwargs", None)
     if isinstance(reflection_kwargs, dict):
         reflection_kwargs.pop("model", None)
+        if raw_model is not None and overrides["model"].lower().startswith("openai/gpt-"):
+            reflection_kwargs.pop("extra_body", None)
         for key in ("api_base", "api_key", "temperature"):
             if key in overrides and overrides.get(key) is None:
                 reflection_kwargs.pop(key, None)

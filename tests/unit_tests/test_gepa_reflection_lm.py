@@ -171,6 +171,7 @@ def test_gepa_reflection_model_override_does_not_inherit_deepseek_connection(mon
             "api_base": "https://api.deepseek.com",
             "seed": 7,
             "temperature": 0.0,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
         },
     )
     monkeypatch.setenv("GEPA_REFLECTION_MODEL", "gpt-5.4")

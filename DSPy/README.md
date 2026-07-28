@@ -155,6 +155,9 @@ version, dash-named GPT-5 variants such as `gpt-5-mini` accept only `0.0` or
 `PLANNER_REASONING_EFFORT` and `PLANNER_SEED` are forwarded only in `elm_gpt`
 mode.
 
+## Change the manner to build_lm, separate initialization of planner and reflection model
+Record that the last commit before separating initialization of planner and reflection model is `04cf2934db9ab2aafe5ef9a3e8694068b0e0af1a` ?
+
 ## Gemini legacy / DSPy Vertex 后端
 
 Gemini 默认走现有 `legacy` generateContent 路径。若要通过 DSPy/LiteLLM 调用官方 Vertex Gemini，必须同时显式提供本地媒体根与对应 GCS 根；`GEMINI_API_KEY`、`GEMINI_BASE_URL` 在该模式下不会使用。
@@ -201,3 +204,5 @@ active `planner.task_prompt_template` 引用了 `{video_description}` 时才会�
 ## Caveat:
 
 小 caveat：如果不是走 run_batch()，而是在别的 Python 代码里直接 new AVQARuntimeContext() / AVQADSPyReActProgram()，想用自定义 YAML，需要先调用 load_prompt_config(custom_path)，再创建 context/program；否则会用默认 v0。
+
+未传 --caption-cache-dir 且未设置 DSPY_AVQA_CAPTION_CACHE_DIR：实时调用 captioner/Gemini。也就是说在用实时caption的时候需要检查两个parameter是否都没有设置。
