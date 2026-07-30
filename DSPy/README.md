@@ -205,4 +205,7 @@ active `planner.task_prompt_template` 引用了 `{video_description}` 时才会�
 
 小 caveat：如果不是走 run_batch()，而是在别的 Python 代码里直接 new AVQARuntimeContext() / AVQADSPyReActProgram()，想用自定义 YAML，需要先调用 load_prompt_config(custom_path)，再创建 context/program；否则会用默认 v0。
 
-未传 --caption-cache-dir 且未设置 DSPY_AVQA_CAPTION_CACHE_DIR：实时调用 captioner/Gemini。也就是说在用实时caption的时候需要检查两个parameter是否都没有设置。
+只有显式传入 `--caption-cache-dir` 才会启用 question-scoped caption cache；未传该参数时
+实时调用 captioner/Gemini。Cached wrapper 内部使用普通的 `CAPTION_CACHE_DIR` shell 变量
+保存默认路径，并将其显式传给 `--caption-cache-dir`，Python/DSPy 层不会读取 caption cache
+环境变量。

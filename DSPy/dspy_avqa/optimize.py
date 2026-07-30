@@ -121,6 +121,7 @@ GEPA_REFLECTION_MODEL_ENV = "GEPA_REFLECTION_MODEL"
 GEPA_REFLECTION_REASONING_EFFORT_ENV = "GEPA_REFLECTION_REASONING_EFFORT"
 GEPA_REFLECTION_API_KEY_ENV = "GEPA_REFLECTION_API_KEY"
 GEPA_REFLECTION_API_BASE_ENV = "GEPA_REFLECTION_API_BASE"
+GEPA_REFLECTION_THINKING_MODE_ENV = "GEPA_REFLECTION_THINKING_MODE"
 GEPA_REFLECTION_TEMPLATE_YAML_ENV = "GEPA_REFLECTION_TEMPLATE_YAML"
 GEPA_REFLECTION_TEMPLATE_VERSION_ENV = "GEPA_REFLECTION_TEMPLATE_VERSION"
 GEPA_REFLECTION_TEMPLATE_VERSION_AUTO = "auto"
@@ -319,6 +320,19 @@ def _validate_reasoning_effort(value: str, *, env_name: str) -> str:
     return effort
 
 
+def _deepseek_thinking_extra_body(value: str, *, env_name: str) -> dict[str, Any] | None:
+    mode = value.strip().lower().replace("_", "-")
+    if mode in {"auto", "default", "none", "unset"}:
+        return None
+    if mode in {"enabled", "enable", "thinking", "think", "on", "true", "1"}:
+        return {"thinking": {"type": "enabled"}}
+    if mode in {"disabled", "disable", "non-thinking", "nonthinking", "no-thinking", "off", "false", "0"}:
+        return {"thinking": {"type": "disabled"}}
+    raise ValueError(
+        f"{env_name}={value!r} is invalid; expected enabled, disabled, or auto"
+    )
+
+
 def build_gepa_reflection_lm(planner_lm: Any) -> Any:
     """Return a GEPA reflection LM with optional model, effort, and temperature overrides."""
     overrides: dict[str, Any] = {}
@@ -326,6 +340,7 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
     raw_effort = _optional_env_value(GEPA_REFLECTION_REASONING_EFFORT_ENV)
     raw_api_key = _optional_env_value(GEPA_REFLECTION_API_KEY_ENV)
     raw_api_base = _optional_env_value(GEPA_REFLECTION_API_BASE_ENV)
+    raw_thinking_mode = _optional_env_value(GEPA_REFLECTION_THINKING_MODE_ENV)
     raw_temperature = os.environ.get(GEPA_REFLECTION_TEMPERATURE_ENV)
     if raw_model is not None:
         overrides["model"] = _normalize_openai_model_name(raw_model)
@@ -338,6 +353,19 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
         overrides["api_key"] = raw_api_key
     if raw_api_base is not None:
         overrides["api_base"] = raw_api_base
+    if raw_thinking_mode is not None:
+        reflection_model = str(overrides.get("model", getattr(planner_lm, "model", ""))).lower()
+        if "deepseek" not in reflection_model:
+            raise ValueError(
+                f"{GEPA_REFLECTION_THINKING_MODE_ENV} is only supported for DeepSeek reflection models; "
+                f"got {reflection_model!r}"
+            )
+        thinking_extra_body = _deepseek_thinking_extra_body(
+            raw_thinking_mode,
+            env_name=GEPA_REFLECTION_THINKING_MODE_ENV,
+        )
+        if thinking_extra_body is not None:
+            overrides["extra_body"] = thinking_extra_body
 
     planner_kwargs = getattr(planner_lm, "kwargs", None)
     inherited_api_base = isinstance(planner_kwargs, dict) and bool(planner_kwargs.get("api_base"))
@@ -2065,6 +2093,14 @@ def parse_optimize_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--optimization-train-only",
+        action="store_true",
+        help=(
+            "Run optimization and save its artifacts, then stop before final-test inference. "
+            "Cannot be combined with --inference-only or --final-eval-output-jsonl."
+        ),
+    )
+    parser.add_argument(
         "--optimize-target",
         action="append",
         dest="optimize_targets",
@@ -2079,11 +2115,7 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument(
         "--caption-cache-dir",
         type=Path,
-        default=(
-            Path(os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"])
-            if os.environ.get("DSPY_AVQA_CAPTION_CACHE_DIR", "").strip()
-            else None
-        ),
+        default=None,
         help=(
             "Question-scoped cache used by ask_caption. Cache misses and prompt "
             "mismatches fail; there is no live captioner fallback."
@@ -2338,6 +2370,10 @@ def parse_optimize_args() -> argparse.Namespace:
     args.optimize_targets = tuple(args.optimize_targets or ("planner.workflow_prompt",))
     if args.inference_only and args.final_eval_output_jsonl is None:
         parser.error("--inference-only requires --final-eval-output-jsonl")
+    if args.inference_only and args.optimization_train_only:
+        parser.error("--inference-only and --optimization-train-only cannot be combined")
+    if args.optimization_train_only and args.final_eval_output_jsonl is not None:
+        parser.error("--optimization-train-only cannot be combined with --final-eval-output-jsonl")
     if args.final_eval_output_jsonl is not None and args.final_eval_output_dir is None:
         args.final_eval_output_dir = args.output_program.parent
     if args.final_eval_num_threads < 1:
@@ -3230,6 +3266,7 @@ def _run_inference_only(
 def run_optimization() -> None:
     """Entrypoint for DSPy AVQA optimization."""
     args = parse_optimize_args()
+    optimization_train_only = bool(getattr(args, "optimization_train_only", False))
     started = time.perf_counter()
 
     if args.inference_only and not args.output_program.is_file():
@@ -3243,9 +3280,6 @@ def run_optimization() -> None:
     caption_cache_dir = getattr(args, "caption_cache_dir", None)
     if caption_cache_dir is not None:
         args.caption_cache_dir = caption_cache_dir.expanduser().resolve()
-        os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"] = str(args.caption_cache_dir)
-    else:
-        os.environ.pop("DSPY_AVQA_CAPTION_CACHE_DIR", None)
     load_perception_config_yaml(args.perception_config_yaml)
     if caption_cache_dir is None:
         load_captioner_config_yaml(args.captioner_config_yaml)
@@ -3508,9 +3542,11 @@ def run_optimization() -> None:
         )
         print(f"Saved signature search to {args.signature_search_json}")
 
-    if args.trajectory_jsonl is not None:
+    if args.trajectory_jsonl is not None and not optimization_train_only:
         write_final_trajectories_jsonl(compiled, trainset, args.trajectory_jsonl)
         print(f"Saved final trainset trajectories to {args.trajectory_jsonl}")
+    elif args.trajectory_jsonl is not None:
+        print("Optimization-train-only mode: skipping optimized-trainset trajectory inference.")
 
     optimizer_log_paths: dict[str, str] = {}
     if args.algorithm in {"copro", "miprov2", "gepa"}:
@@ -3525,7 +3561,9 @@ def run_optimization() -> None:
     optimizer_log_paths.update(prompt_target_artifacts)
 
     final_eval_metadata: dict[str, Any] = {}
-    if args.final_eval_output_jsonl is not None:
+    if optimization_train_only:
+        print("Optimization-train-only mode: skipping final-test inference.")
+    elif args.final_eval_output_jsonl is not None:
         final_eval_metadata = write_batch_style_program_outputs(
             compiled,
             cuts,
@@ -3546,6 +3584,7 @@ def run_optimization() -> None:
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata = {
             "algorithm": args.algorithm,
+            "optimization_train_only": optimization_train_only,
             "optimize_target": args.optimize_targets[0] if len(args.optimize_targets) == 1 else None,
             "optimize_targets": list(args.optimize_targets),
             "input_jsonl": str(args.input_jsonl),
@@ -3574,7 +3613,11 @@ def run_optimization() -> None:
             "output_program": str(args.output_program),
             "initial_program": str(args.initial_program) if args.initial_program else None,
             "signature_search_json": str(args.signature_search_json) if args.signature_search_json else None,
-            "trajectory_jsonl": str(args.trajectory_jsonl) if args.trajectory_jsonl else None,
+            "trajectory_jsonl": (
+                str(args.trajectory_jsonl)
+                if args.trajectory_jsonl is not None and not optimization_train_only
+                else None
+            ),
             "optimizer_log_dir": str(optimizer_log_dir),
             "optimizer_logs": optimizer_log_paths,
             "final_eval": final_eval_metadata,

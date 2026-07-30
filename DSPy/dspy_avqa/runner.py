@@ -128,11 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--caption-cache-dir",
         type=Path,
-        default=(
-            Path(os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"])
-            if os.environ.get("DSPY_AVQA_CAPTION_CACHE_DIR", "").strip()
-            else None
-        ),
+        default=None,
         help=(
             "Question-scoped cache used only when the planner calls ask_caption. "
             "Cache misses and prompt mismatches fail; there is no live fallback."
@@ -643,6 +639,25 @@ def _has_empty_qwen_tool_observation(question_data: dict[str, Any]) -> bool:
     return False
 
 
+def _has_parseable_final_answer(question_data: dict[str, Any]) -> bool:
+    """Return whether a cached trajectory ends with a usable A-F answer."""
+    for turn in question_data.get("turn_trace") or []:
+        if not isinstance(turn, dict):
+            continue
+        if str(turn.get("planner_action") or "").strip().lower() != "final":
+            continue
+        if normalize_option_letter(str(turn.get("final_answer") or "")) in {
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F",
+        }:
+            return True
+    return False
+
+
 def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, Any]) -> dict[str, Any] | None:
     """Load one completed per-sample JSON cache and wrap it as a result row."""
     sample_id = cut_id(cut)
@@ -669,6 +684,9 @@ def load_cached_row_from_question_json(output_dir: Path | None, cut: dict[str, A
         return None
     if response.startswith("[ERROR]"):
         print(f"Cached DSPy sample at {path} contains an error response, regenerating.")
+        return None
+    if not _has_parseable_final_answer(question_data):
+        print(f"Cached DSPy sample at {path} has no parseable final answer, regenerating.")
         return None
     if _has_empty_qwen_tool_observation(question_data):
         print(
@@ -727,9 +745,6 @@ def run_batch() -> None:
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
     if args.caption_cache_dir is not None:
         args.caption_cache_dir = args.caption_cache_dir.expanduser().resolve()
-        os.environ["DSPY_AVQA_CAPTION_CACHE_DIR"] = str(args.caption_cache_dir)
-    else:
-        os.environ.pop("DSPY_AVQA_CAPTION_CACHE_DIR", None)
     load_perception_config_yaml(args.perception_config_yaml)
     if args.caption_cache_dir is None:
         load_captioner_config_yaml(args.captioner_config_yaml)

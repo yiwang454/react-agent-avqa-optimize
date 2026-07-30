@@ -102,11 +102,6 @@ def normalize_caption_placement(value: str | None = None) -> str:
     return placement
 
 
-def optional_path_env(name: str) -> Path | None:
-    value = os.environ.get(name)
-    return Path(value).expanduser().resolve() if value and value.strip() else None
-
-
 def _split_tool_names(value: str | Iterable[str] | None) -> list[str]:
     if value is None:
         return []
@@ -239,9 +234,7 @@ class AVQARuntimeContext:
     max_turns: int = field(default_factory=lambda: int(os.environ.get("DEFAULT_MAX_TURNS", "4")))
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
     caption_placement: str = field(default_factory=normalize_caption_placement)
-    caption_cache_dir: Path | None = field(
-        default_factory=lambda: optional_path_env("DSPY_AVQA_CAPTION_CACHE_DIR")
-    )
+    caption_cache_dir: Path | None = None
 
     def __post_init__(self) -> None:
         self.planner_provider = normalize_planner_provider(self.planner_provider)
