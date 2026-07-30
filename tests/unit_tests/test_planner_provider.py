@@ -71,6 +71,16 @@ def _runtime_context(context):
     return context.AVQARuntimeContext(system_prompt="", allowed_tools=("ask_caption",))
 
 
+def test_runtime_context_does_not_read_caption_cache_environment(monkeypatch, tmp_path):
+    context, _ = _load_context()
+    monkeypatch.setenv(
+        "DSPY_AVQA_CAPTION_CACHE_DIR",
+        str(tmp_path / "stale-environment-cache"),
+    )
+
+    assert _runtime_context(context).caption_cache_dir is None
+
+
 def test_deepseek_provider_keeps_default_api_base(monkeypatch):
     context, state = _load_context()
     monkeypatch.setenv("PLANNER_PROVIDER", "deepseek")

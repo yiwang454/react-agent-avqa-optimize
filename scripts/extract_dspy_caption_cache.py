@@ -19,7 +19,7 @@ from dspy_avqa.caption_cache import extract_caption_cache  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = Path(
     "/mnt/ceph_rbd/data/avqa_project/daily_omni/"
-    "daily_omni_caption_cache_v8_gemini_repeat1_fallback_repeat2_repeat3"
+    "daily_omni_caption_cache_v8_gemini_from3repeats"
 )
 
 
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--primary-results", type=Path, required=True)
     parser.add_argument("--fallback-results", type=Path, nargs="*", default=[])
-    parser.add_argument("--input-jsonl", type=Path, required=True)
+    parser.add_argument("--input-jsonl", type=Path, default="/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_v3.jsonl")
     parser.add_argument("--prompt-yaml", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()

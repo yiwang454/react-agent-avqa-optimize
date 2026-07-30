@@ -5,6 +5,7 @@ scripts/run_dspy_react_agent_daily_qwen_v2_dsthink.sh
 result_examples/
 scripts/analysis_results/
 old_scripts
+scripts/experiment_records/
 
 # smoke test / temporary tests for development
 scripts/gemini_official_api.py

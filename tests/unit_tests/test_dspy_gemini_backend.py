@@ -332,7 +332,8 @@ def test_runner_invalidates_cached_empty_qwen_observations(tmp_path):
                 "planner_action": "tool",
                 "perception_backend": "qwen",
                 "tool_observation": "",
-            }
+            },
+            {"planner_action": "final", "final_answer": "A"},
         ],
     }
     cache_path.write_text(json.dumps(question_data), encoding="utf-8")
@@ -345,6 +346,23 @@ def test_runner_invalidates_cached_empty_qwen_observations(tmp_path):
     question_data["response"] = "[ERROR] Qwen API call failed"
     cache_path.write_text(json.dumps(question_data), encoding="utf-8")
     assert runner.load_cached_row_from_question_json(tmp_path, cut) is None
+
+
+def test_runner_invalidates_cached_unparseable_final_answers(tmp_path):
+    runner = _load_runner()
+    cut = {"id": "sample-1"}
+    cache_path = tmp_path / "sample-1.json"
+    question_data = {
+        "response": ". None of the above",
+        "turn_trace": [{"planner_action": "final", "final_answer": "None"}],
+    }
+    cache_path.write_text(json.dumps(question_data), encoding="utf-8")
+    assert runner.load_cached_row_from_question_json(tmp_path, cut) is None
+
+    question_data["response"] = "B. answer"
+    question_data["turn_trace"][0]["final_answer"] = "B"
+    cache_path.write_text(json.dumps(question_data), encoding="utf-8")
+    assert runner.load_cached_row_from_question_json(tmp_path, cut) is not None
 
 
 def test_runner_dspy_validation_requires_roots_and_validates_captioner_top_k(monkeypatch):
@@ -380,6 +398,27 @@ def test_runner_cached_captioner_does_not_initialize_gemini(monkeypatch, tmp_pat
     )
 
     assert runner.configure_gemini_api_backend(args) is False
+
+
+def test_runner_caption_cache_requires_explicit_cli_argument(monkeypatch, tmp_path):
+    runner = _load_runner()
+    monkeypatch.setenv(
+        "DSPY_AVQA_CAPTION_CACHE_DIR",
+        str(tmp_path / "stale-environment-cache"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "avqa_dspy_impl.py",
+            "--input-jsonl",
+            str(tmp_path / "input.jsonl"),
+            "--output-jsonl",
+            str(tmp_path / "output.jsonl"),
+        ],
+    )
+
+    assert runner.parse_args().caption_cache_dir is None
 
 
 def test_precomputed_audio_caption_dir_is_ignored_when_not_rendered(tmp_path):

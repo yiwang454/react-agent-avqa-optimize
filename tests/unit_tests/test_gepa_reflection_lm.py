@@ -187,6 +187,36 @@ def test_gepa_reflection_model_override_does_not_inherit_deepseek_connection(mon
     }
 
 
+def test_gepa_reflection_thinking_can_differ_from_deepseek_planner(monkeypatch):
+    optimize = _load_optimize_module()
+    planner_lm = _PlannerLM(
+        "openai/deepseek-v4-pro",
+        {
+            "api_key": "deepseek-key",
+            "api_base": "https://api.deepseek.com",
+            "seed": 7,
+            "temperature": 0.0,
+            "extra_body": {"thinking": {"type": "disabled"}},
+        },
+    )
+    monkeypatch.setenv("GEPA_REFLECTION_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("GEPA_REFLECTION_API_KEY", "deepseek-key")
+    monkeypatch.setenv("GEPA_REFLECTION_API_BASE", "https://api.deepseek.com")
+    monkeypatch.setenv("GEPA_REFLECTION_THINKING_MODE", "enable")
+    monkeypatch.delenv("GEPA_REFLECTION_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("GEPA_REFLECTION_TEMPERATURE", raising=False)
+
+    reflection_lm = optimize.build_gepa_reflection_lm(planner_lm)
+
+    assert reflection_lm.model == "openai/deepseek-v4-pro"
+    assert reflection_lm.kwargs == {
+        "api_key": "deepseek-key",
+        "api_base": "https://api.deepseek.com",
+        "seed": 7,
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+
+
 def _reflection_template_yaml_path():
     return OPTIMIZE_PATH.parent / "yamls" / "DSPy" / "reflection_template.yaml"
 
@@ -1253,6 +1283,48 @@ def test_inference_only_skips_optimization_dataset_resolution(tmp_path):
     optimize.run_optimization()
 
     assert len(inference_calls) == 1
+
+
+def test_optimizer_caption_cache_requires_explicit_cli_argument(monkeypatch, tmp_path):
+    optimize = _load_optimize_module()
+    monkeypatch.setenv(
+        "DSPY_AVQA_CAPTION_CACHE_DIR",
+        str(tmp_path / "stale-environment-cache"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "avqa_dspy_optimize.py",
+            "--input-jsonl",
+            str(tmp_path / "input.jsonl"),
+            "--output-program",
+            str(tmp_path / "compiled.json"),
+        ],
+    )
+
+    assert optimize.parse_optimize_args().caption_cache_dir is None
+
+
+def test_optimization_train_only_rejects_final_eval_output(monkeypatch, tmp_path):
+    optimize = _load_optimize_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "avqa_dspy_optimize.py",
+            "--input-jsonl",
+            str(tmp_path / "input.jsonl"),
+            "--output-program",
+            str(tmp_path / "compiled.json"),
+            "--optimization-train-only",
+            "--final-eval-output-jsonl",
+            str(tmp_path / "output.jsonl"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        optimize.parse_optimize_args()
 
 
 def test_inference_only_updates_existing_metadata(tmp_path):
