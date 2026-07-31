@@ -76,6 +76,18 @@ GEPA_REFLECTION_MINIBATCH_SIZE="${GEPA_REFLECTION_MINIBATCH_SIZE:-16}"
 DEBUG="${GEPA_DEBUG:-${DEBUG:-false}}"
 DEBUG_LIMIT="${GEPA_DEBUG_LIMIT:-${DEBUG_LIMIT:-4}}"
 GEPA_SEEDS=(${GEPA_SEEDS_OVERRIDE:-18})
+# Set INFERENCE_ONLY=true to load the existing compiled program and resume its
+# final-test cache in the original GEPA run directory.
+INFERENCE_ONLY="${INFERENCE_ONLY:-false}"
+FINAL_EVAL_NUM_THREADS="${FINAL_EVAL_NUM_THREADS:-4}"
+
+case "${INFERENCE_ONLY}" in
+  true|false) ;;
+  *)
+    echo "INFERENCE_ONLY must be true or false; got: ${INFERENCE_ONLY}" >&2
+    exit 2
+    ;;
+esac
 
 IFS=, read -r -a OPTIMIZE_TARGETS <<< "${OPTIMIZE_TARGETS_CSV}"
 mkdir -p "${SCRIPT_DIR}/logs"
@@ -92,12 +104,10 @@ for gepa_seed in "${GEPA_SEEDS[@]}"; do
     --daily-omni-root "${DAILY_OMNI_ROOT}"
     --output-program "${gepa_run_dir}/compiled_gepa.json"
     --initial-program "${gepa_run_dir}/initial_gepa_program.json"
-    --metadata-json "${gepa_run_dir}/compiled_gepa_metadata.json"
     --signature-search-json "${gepa_run_dir}/compiled_gepa_signature_search.json"
     --trajectory-jsonl "${gepa_run_dir}/optimized_trainset_trajectories.jsonl"
     --optimizer-log-dir "${gepa_run_dir}/optimizer_logs"
     --optimized-prompt-config-yaml "${gepa_run_dir}/${safe_targets}_GEPA_${GEPA_OPTIMIZED_PROMPT_CONFIG_BASENAME}"
-    --optimization-train-only
     --max-turns "${MAX_TURNS}"
     --perception-model "${PERCEPTION_MODEL}"
     --perception-config-yaml "${PERCEPTION_CONFIG_YAML}"
@@ -120,6 +130,20 @@ for gepa_seed in "${GEPA_SEEDS[@]}"; do
     --caption-cache-dir "${CAPTION_CACHE_DIR}"
     --ignore-audio-caption-dir
   )
+  if [ "${INFERENCE_ONLY}" = "true" ]; then
+    cmd+=(
+      --inference-only
+      --metadata-json "${gepa_run_dir}/inference_only_metadata.json"
+      --final-eval-output-jsonl "${gepa_run_dir}/output_test.jsonl"
+      --final-eval-output-dir "${gepa_run_dir}"
+      --final-eval-num-threads "${FINAL_EVAL_NUM_THREADS}"
+    )
+  else
+    cmd+=(
+      --optimization-train-only
+      --metadata-json "${gepa_run_dir}/compiled_gepa_metadata.json"
+    )
+  fi
   for optimize_target in "${OPTIMIZE_TARGETS[@]}"; do
     cmd+=(--optimize-target "${optimize_target}")
   done
@@ -129,16 +153,21 @@ for gepa_seed in "${GEPA_SEEDS[@]}"; do
 
   echo "${SCRIPT_DIR}/logs/${GEPA_EXPERIMENT_NAME}.log"
   {
-    echo "GEPA experiment=${GEPA_EXPERIMENT_NAME}; seed=${gepa_seed}; targets=${OPTIMIZE_TARGETS_CSV}"
+    echo "GEPA experiment=${GEPA_EXPERIMENT_NAME}; seed=${gepa_seed}; targets=${OPTIMIZE_TARGETS_CSV}; inference_only=${INFERENCE_ONLY}"
     echo "Prompt=${PROMPT_YAML}; planner=${PLANNER_PROVIDER}/${DEEPSEEK_MODEL}; reflection=deepseek/${GEPA_REFLECTION_MODEL}"
     echo "DeepSeek planner base url=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}; planner thinking=${PLANNER_THINKING_MODE}"
     echo "DeepSeek reflection base url=${GEPA_REFLECTION_API_BASE}; reflection thinking=${GEPA_REFLECTION_THINKING_MODE}"
     echo "Qwen perception config yaml=${PERCEPTION_CONFIG_YAML}"
     echo "Qwen perception base url=${QWEN_BASE_URL}"
     echo "Gemini caption cache dir=${CAPTION_CACHE_DIR}"
-    echo "Perception=${PERCEPTION_MODEL}; captioner=${CAPTIONER_MODEL}; tools=${DSPY_AVQA_ALLOWED_TOOLS}; gepa_threads=${GEPA_NUM_THREADS}; qwen_batch_retries=${QWEN_RELIABLE_MAX_BATCH_RETRIES:-3}"
+    echo "Perception=${PERCEPTION_MODEL}; captioner=${CAPTIONER_MODEL}; tools=${DSPY_AVQA_ALLOWED_TOOLS}; gepa_threads=${GEPA_NUM_THREADS}; qwen_batch_retries=${QWEN_RELIABLE_MAX_BATCH_RETRIES:-2}; qwen_fallback_threads=${QWEN_RELIABLE_FALLBACK_NUM_THREADS:-1}"
+    if [ "${INFERENCE_ONLY}" = "true" ]; then
+      echo "Final-test output=${gepa_run_dir}/output_test.jsonl; cache_dir=${gepa_run_dir}; final_eval_threads=${FINAL_EVAL_NUM_THREADS}"
+    fi
     "${cmd[@]}" "$@"
-    PYTHONPATH="${PROJECT_DIR}/DSPy${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" scripts/analyze_gepa_detailed.py --gepa-result-dir "${gepa_run_dir}"
+    if [ "${INFERENCE_ONLY}" != "true" ]; then
+      PYTHONPATH="${PROJECT_DIR}/DSPy${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" scripts/analyze_gepa_detailed.py --gepa-result-dir "${gepa_run_dir}"
+    fi
   } >> "${SCRIPT_DIR}/logs/${GEPA_EXPERIMENT_NAME}.log" 2>&1
 done

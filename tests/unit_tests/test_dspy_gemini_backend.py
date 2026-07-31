@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import json
 import os
+import threading
 import sys
 import types
 from pathlib import Path
@@ -292,6 +293,33 @@ def test_reliable_qwen_executor_retries_only_empty_primary_results():
     assert profiles.count(("already-valid", "primary_separate_audio_first")) == 1
     assert profiles.count(("needs-retry", "primary_separate_audio_first")) == 1
     assert profiles.count(("needs-retry", "retry_separate_video_first")) == 1
+
+
+def test_reliable_qwen_executor_allows_bounded_parallel_fallback_requests():
+    _load_tools()
+    reliable_qwen = sys.modules["dspy_avqa.reliable_qwen"]
+    executor = reliable_qwen.ReliableQwenExecutor(
+        max_batch_retries=1,
+        fallback_max_workers=2,
+    )
+    fallback_barrier = threading.Barrier(2, timeout=1)
+
+    def run_item(item):
+        profile = reliable_qwen.active_qwen_request_profile()
+        assert profile is not None
+        if profile != executor.primary_profile:
+            with reliable_qwen.qwen_request_slot():
+                fallback_barrier.wait()
+        return {"empty": profile == executor.primary_profile}
+
+    result = executor.run_batch(
+        ["first", "second"],
+        run_item=run_item,
+        has_empty_qwen_response=lambda value: value["empty"],
+        max_workers=2,
+    )
+
+    assert result.exhausted_indices == []
 
 
 def test_qwen_video_only_takes_precedence_over_audio_in_video(monkeypatch):
