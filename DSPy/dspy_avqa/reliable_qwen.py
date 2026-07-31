@@ -3,8 +3,9 @@
 The Qwen server can return an empty visible completion when several AV calls are
 in flight.  Retrying such a request inside the worker that made it makes the
 load spike worse and changes the request layout mid-batch.  This module keeps
-the initial batch concurrent, then lets its caller re-run only the affected
-examples serially with deterministic media-layout fallbacks.
+the initial batch concurrent, then lets its caller re-run only affected
+examples with deterministic media-layout fallbacks. Recovery is serial by
+default and can be bounded to a small parallelism level when needed.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterator, Sequence, TypeVar
 
 
@@ -149,6 +150,13 @@ def _read_nonnegative_int_env(name: str, default: int) -> int:
     return value
 
 
+def _read_positive_int_env(name: str, default: int) -> int:
+    value = _read_nonnegative_int_env(name, default)
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value}")
+    return value
+
+
 def active_qwen_request_profile() -> QwenRequestProfile | None:
     """Return the batch profile without changing process environment variables."""
     with _ACTIVE_PROFILE_LOCK:
@@ -265,7 +273,11 @@ class ReliableQwenExecutor:
     the final prescribed fallback.
     """
 
-    def __init__(self, max_batch_retries: int | None = None) -> None:
+    def __init__(
+        self,
+        max_batch_retries: int | None = None,
+        fallback_max_workers: int | None = None,
+    ) -> None:
         self.max_batch_retries = (
             _read_nonnegative_int_env("QWEN_RELIABLE_MAX_BATCH_RETRIES", 2)
             if max_batch_retries is None
@@ -273,6 +285,13 @@ class ReliableQwenExecutor:
         )
         if self.max_batch_retries < 0:
             raise ValueError("max_batch_retries must be non-negative")
+        self.fallback_max_workers = (
+            _read_positive_int_env("QWEN_RELIABLE_FALLBACK_NUM_THREADS", 1)
+            if fallback_max_workers is None
+            else fallback_max_workers
+        )
+        if self.fallback_max_workers < 1:
+            raise ValueError("fallback_max_workers must be >= 1")
 
     @property
     def primary_profile(self) -> QwenRequestProfile:
@@ -291,8 +310,17 @@ class ReliableQwenExecutor:
             yield
 
     @contextmanager
-    def retry_batch(self, retry_number: int) -> Iterator[QwenRequestProfile]:
+    def retry_batch(
+        self,
+        retry_number: int,
+        *,
+        allow_parallel_requests: bool = False,
+    ) -> Iterator[QwenRequestProfile]:
         profile = self.retry_profile(retry_number)
+        # The executor bounds fallback workers itself. Disable the per-request
+        # serial gate only for a bounded parallel fallback.
+        if allow_parallel_requests:
+            profile = replace(profile, serial=False)
         with qwen_request_profile(profile):
             yield profile
 
@@ -304,7 +332,7 @@ class ReliableQwenExecutor:
         has_empty_qwen_response: Callable[[TResult], bool],
         max_workers: int,
     ) -> ReliableQwenBatchResult:
-        """Run a concurrent primary batch and serially recover empty responses."""
+        """Run a concurrent primary batch and bounded recovery for empty responses."""
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
         results: list[TResult | None] = [None] * len(items)
@@ -334,10 +362,23 @@ class ReliableQwenExecutor:
         for retry_number in range(1, self.max_batch_retries + 1):
             if not invalid_indices:
                 break
-            with self.retry_batch(retry_number) as profile:
+            fallback_workers = min(self.fallback_max_workers, len(invalid_indices))
+            with self.retry_batch(
+                retry_number,
+                allow_parallel_requests=fallback_workers > 1,
+            ) as profile:
                 attempted_profiles.append(profile.name)
-                for index in invalid_indices:
-                    completed_results[index] = run_item(items[index])
+                if fallback_workers == 1:
+                    for index in invalid_indices:
+                        completed_results[index] = run_item(items[index])
+                else:
+                    with ThreadPoolExecutor(max_workers=fallback_workers) as executor:
+                        futures = {
+                            executor.submit(run_item, items[index]): index
+                            for index in invalid_indices
+                        }
+                        for future in as_completed(futures):
+                            completed_results[futures[future]] = future.result()
             invalid_indices = [
                 index
                 for index in invalid_indices
