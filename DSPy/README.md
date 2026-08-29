@@ -174,6 +174,8 @@ python DSPy/avqa_dspy_impl.py ... \
 
 `--gemini-api-backend dspy` 同时覆盖 Gemini perception 与 Gemini captioner。Vertex Gemini 的 `sampling_params.top_k` 必须为 `1..64`；旧配置中的 `0` 请改为例如 `64`。认证由 ADC/service account 完成。
 
+`vertex_project` 与 `vertex_location` 也可以写在 perception/captioner config YAML 的 `model` 段；显式的 `--vertex-project`、`--vertex-location` 会覆盖 YAML 值。本地路径到 GCS 的映射仍需通过 `--gemini-local-data-root` 与 `--gemini-gcs-data-root` 显式提供。
+
 `--response-error-sensitive` 会仅对 Gemini 启用进程级熔断：空响应、`[ERROR]` 响应或最终 Gemini/LiteLLM 调用异常会立即停止当前运行，不再写成普通失败样本。默认关闭；可用 `--no-response-error-sensitive` 显式关闭。
 
 ## Final test inference 断点续跑

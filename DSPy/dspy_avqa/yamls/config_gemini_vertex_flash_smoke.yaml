@@ -7,6 +7,8 @@ task:
 
 model:
   gemini_model: gemini-2.5-flash
+  vertex_project: decoupled-avqa-501420
+  vertex_location: global
 
 sampling_params:
   temperature: 0.0

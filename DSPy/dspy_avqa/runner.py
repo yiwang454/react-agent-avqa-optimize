@@ -456,6 +456,8 @@ def load_gemini_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
         model,
         {
             "gemini_model": "CAPTIONER_GEMINI_MODEL",
+            "vertex_project": "VERTEXAI_PROJECT",
+            "vertex_location": "VERTEXAI_LOCATION",
             "gemini_base_url": "CAPTIONER_GEMINI_BASE_URL",
             "gemini_api_key": "CAPTIONER_GEMINI_API_KEY",
             "gemini_provider": "CAPTIONER_GEMINI_PROVIDER",
@@ -552,6 +554,8 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
         model,
         {
             "gemini_model": "GEMINI_MODEL",
+            "vertex_project": "VERTEXAI_PROJECT",
+            "vertex_location": "VERTEXAI_LOCATION",
             "gemini_base_url": "GEMINI_BASE_URL",
             "gemini_api_key": "GEMINI_API_KEY",
             "qwen_model": "QWEN_MODEL",

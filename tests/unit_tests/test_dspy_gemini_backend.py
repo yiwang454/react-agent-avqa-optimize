@@ -412,6 +412,58 @@ def test_runner_dspy_validation_requires_roots_and_validates_captioner_top_k(mon
     assert os.environ["GEMINI_API_BACKEND"] == "dspy"
 
 
+def test_gemini_config_loads_vertex_settings_and_cli_overrides_them(monkeypatch, tmp_path):
+    runner = _load_runner()
+    config_path = tmp_path / "gemini.yaml"
+    config_path.write_text(
+        """
+model:
+  gemini_model: gemini-2.5-flash
+  vertex_project: yaml-project
+  vertex_location: us-central1
+sampling_params:
+  top_k: 64
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("PERCEPTION_MODEL", "gemini")
+    runner.load_perception_config_yaml(config_path)
+    assert os.environ["VERTEXAI_PROJECT"] == "yaml-project"
+    assert os.environ["VERTEXAI_LOCATION"] == "us-central1"
+
+    args = argparse.Namespace(
+        gemini_api_backend="dspy",
+        vertex_project="cli-project",
+        vertex_location="global",
+        gemini_local_data_root="/data",
+        gemini_gcs_data_root="gs://bucket/data",
+    )
+    assert runner.configure_gemini_api_backend(args) is True
+    assert os.environ["VERTEXAI_PROJECT"] == "cli-project"
+    assert os.environ["VERTEXAI_LOCATION"] == "global"
+
+
+def test_gemini_captioner_config_loads_vertex_settings(monkeypatch, tmp_path):
+    runner = _load_runner()
+    config_path = tmp_path / "gemini-captioner.yaml"
+    config_path.write_text(
+        """
+model:
+  gemini_model: gemini-2.5-flash
+  vertex_project: captioner-project
+  vertex_location: europe-west4
+sampling_params:
+  top_k: 64
+""".strip(),
+        encoding="utf-8",
+    )
+
+    runner.load_gemini_captioner_config_yaml(config_path)
+    assert os.environ["VERTEXAI_PROJECT"] == "captioner-project"
+    assert os.environ["VERTEXAI_LOCATION"] == "europe-west4"
+
+
 def test_runner_cached_captioner_does_not_initialize_gemini(monkeypatch, tmp_path):
     runner = _load_runner()
     monkeypatch.setenv("PERCEPTION_MODEL", "qwen")
