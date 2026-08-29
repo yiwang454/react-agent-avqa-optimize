@@ -22,6 +22,12 @@ import yaml
 from .caption_cache import validate_caption_cache_coverage
 from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
 from .deepseek_dspy_lm import consume_planner_call_trace
+from .experiment_config import (
+    lm_effective_config,
+    load_reasoner_config_yaml,
+    planner_effective_config,
+    save_resolved_experiment_config,
+)
 from .data import build_input_state, build_result_row, maybe_dump_question_data, read_jsonl, write_results_jsonl
 from .program import AVQADSPyReActProgram, normalize_option_letter
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_overrides, prompt_value
@@ -119,6 +125,8 @@ Provide only the new instruction within a single ``` block."""
 GEPA_REFLECTION_TEMPERATURE_ENV = "GEPA_REFLECTION_TEMPERATURE"
 GEPA_REFLECTION_MODEL_ENV = "GEPA_REFLECTION_MODEL"
 GEPA_REFLECTION_REASONING_EFFORT_ENV = "GEPA_REFLECTION_REASONING_EFFORT"
+GEPA_REFLECTION_MAX_TOKENS_ENV = "GEPA_REFLECTION_MAX_TOKENS"
+GEPA_REFLECTION_SEED_ENV = "GEPA_REFLECTION_SEED"
 GEPA_REFLECTION_API_KEY_ENV = "GEPA_REFLECTION_API_KEY"
 GEPA_REFLECTION_API_BASE_ENV = "GEPA_REFLECTION_API_BASE"
 GEPA_REFLECTION_THINKING_MODE_ENV = "GEPA_REFLECTION_THINKING_MODE"
@@ -341,6 +349,8 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
     raw_api_key = _optional_env_value(GEPA_REFLECTION_API_KEY_ENV)
     raw_api_base = _optional_env_value(GEPA_REFLECTION_API_BASE_ENV)
     raw_thinking_mode = _optional_env_value(GEPA_REFLECTION_THINKING_MODE_ENV)
+    raw_max_tokens = _optional_env_value(GEPA_REFLECTION_MAX_TOKENS_ENV)
+    raw_seed = _optional_env_value(GEPA_REFLECTION_SEED_ENV)
     raw_temperature = os.environ.get(GEPA_REFLECTION_TEMPERATURE_ENV)
     if raw_model is not None:
         overrides["model"] = _normalize_openai_model_name(raw_model)
@@ -366,6 +376,15 @@ def build_gepa_reflection_lm(planner_lm: Any) -> Any:
         )
         if thinking_extra_body is not None:
             overrides["extra_body"] = thinking_extra_body
+    for raw_value, key, env_name in (
+        (raw_max_tokens, "max_tokens", GEPA_REFLECTION_MAX_TOKENS_ENV),
+        (raw_seed, "seed", GEPA_REFLECTION_SEED_ENV),
+    ):
+        if raw_value is not None:
+            try:
+                overrides[key] = int(raw_value)
+            except ValueError as exc:
+                raise ValueError(f"{env_name} must be an integer, got {raw_value!r}") from exc
 
     planner_kwargs = getattr(planner_lm, "kwargs", None)
     inherited_api_base = isinstance(planner_kwargs, dict) and bool(planner_kwargs.get("api_base"))
@@ -903,6 +922,95 @@ def _load_optimizer_config(path: Path | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Optimizer config must be a mapping: {path}")
     return payload
+
+
+_GEPA_RUN_PATH_FIELDS = {
+    "trainset_jsonl",
+    "valset_jsonl",
+    "daily_omni_root",
+    "audio_caption_dir",
+    "output_program",
+    "initial_program",
+    "metadata_json",
+    "signature_search_json",
+    "trajectory_jsonl",
+    "optimizer_log_dir",
+    "optimized_prompt_config_yaml",
+    "final_eval_output_jsonl",
+    "final_eval_output_dir",
+    "gepa_reflection_template_yaml",
+}
+_GEPA_RUN_INT_FIELDS = {"train_limit", "gepa_seed"}
+_GEPA_RUN_STRING_FIELDS = {
+    "algorithm",
+    "gepa_reflection_template_version",
+    "gepa_log_dir",
+}
+_GEPA_RUN_FIELDS = (
+    _GEPA_RUN_PATH_FIELDS
+    | _GEPA_RUN_INT_FIELDS
+    | _GEPA_RUN_STRING_FIELDS
+    | {"optimize_targets"}
+)
+
+
+def _expand_gepa_run_value(value: str, *, key: str, config_path: Path) -> str:
+    expanded = os.path.expandvars(value)
+    if "$" in expanded:
+        raise ValueError(
+            f"Unresolved environment variable in GEPA run config {key}: "
+            f"{value!r} ({config_path})"
+        )
+    return expanded
+
+
+def _apply_gepa_run_config(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> dict[str, Any]:
+    """Apply the optional ``run`` section from --gepa-config to parsed arguments."""
+    config = _load_optimizer_config(args.gepa_config)
+    run_config = config.get("run") or {}
+    if not isinstance(run_config, dict):
+        parser.error(f"GEPA config run section must be a mapping: {args.gepa_config}")
+    unknown = sorted(set(run_config) - _GEPA_RUN_FIELDS)
+    if unknown:
+        parser.error(
+            "Unknown GEPA run config key(s): " + ", ".join(unknown)
+        )
+
+    for key, value in run_config.items():
+        if key == "optimize_targets":
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                parser.error("GEPA run config optimize_targets must be a list of strings")
+            args.optimize_targets = tuple(value)
+            continue
+        if key in _GEPA_RUN_PATH_FIELDS:
+            if not isinstance(value, str) or not value.strip():
+                parser.error(f"GEPA run config {key} must be a non-empty path string")
+            setattr(
+                args,
+                key,
+                Path(_expand_gepa_run_value(value, key=key, config_path=args.gepa_config)),
+            )
+            continue
+        if key in _GEPA_RUN_INT_FIELDS:
+            if isinstance(value, bool) or not isinstance(value, int):
+                parser.error(f"GEPA run config {key} must be an integer")
+            setattr(args, key, value)
+            continue
+        if not isinstance(value, str) or not value.strip():
+            parser.error(f"GEPA run config {key} must be a non-empty string")
+        if key == "algorithm" and value not in {"copro", "simba", "miprov2", "gepa"}:
+            parser.error(f"GEPA run config algorithm is unsupported: {value!r}")
+        setattr(
+            args,
+            key,
+            _expand_gepa_run_value(value, key=key, config_path=args.gepa_config),
+        )
+    return run_config
 
 
 def _config_value(config: dict[str, Any], key: str, fallback: Any) -> Any:
@@ -2190,7 +2298,7 @@ def parse_optimize_args() -> argparse.Namespace:
             "ask_caption provides the actual caption."
         ),
     )
-    parser.add_argument("--output-program", type=Path, required=True)
+    parser.add_argument("--output-program", type=Path, default=None)
     parser.add_argument(
         "--initial-program",
         type=Path,
@@ -2270,6 +2378,12 @@ def parse_optimize_args() -> argparse.Namespace:
         help="Skip cuts with missing captions/audio/options instead of failing fast.",
     )
     parser.add_argument(
+        "--planner-config-yaml",
+        type=Path,
+        default=None,
+        help="Optional YAML file with explicit planner model and sampling parameters.",
+    )
+    parser.add_argument(
         "--perception-config-yaml",
         type=Path,
         default=None,
@@ -2347,6 +2461,12 @@ def parse_optimize_args() -> argparse.Namespace:
     parser.add_argument("--miprov2-no-track-stats", action="store_true")
     parser.add_argument("--miprov2-log-dir", type=str, default=None)
     parser.add_argument("--gepa-config", type=Path, default=None, help="JSON/YAML file with GEPA optimizer parameters.")
+    parser.add_argument(
+        "--gepa-reflection-config-yaml",
+        type=Path,
+        default=None,
+        help="Optional reasoner YAML whose model/sampling values override the GEPA reflection LM.",
+    )
     parser.add_argument("--gepa-auto", choices=("none", "light", "medium", "heavy"), default="none")
     parser.add_argument("--gepa-max-full-evals", type=int, default=6)
     parser.add_argument("--gepa-max-metric-calls", type=int, default=None)
@@ -2366,8 +2486,16 @@ def parse_optimize_args() -> argparse.Namespace:
     )
     parser.add_argument("--gepa-track-stats", action="store_true")
     parser.add_argument("--gepa-track-best-outputs", action="store_true")
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print the same redacted resolved experiment config saved beside output-program.",
+    )
     args = parser.parse_args()
+    _apply_gepa_run_config(args, parser)
     args.optimize_targets = tuple(args.optimize_targets or ("planner.workflow_prompt",))
+    if args.output_program is None:
+        parser.error("--output-program is required unless supplied by --gepa-config run.output_program")
     if args.inference_only and args.final_eval_output_jsonl is None:
         parser.error("--inference-only requires --final-eval-output-jsonl")
     if args.inference_only and args.optimization_train_only:
@@ -3274,17 +3402,32 @@ def run_optimization() -> None:
             f"Optimization is not complete: compiled program does not exist at {args.output_program}"
         )
 
+    planner_source_config = load_reasoner_config_yaml(
+        getattr(args, "planner_config_yaml", None),
+        role="planner",
+    )
+    reflection_source_config = (
+        load_reasoner_config_yaml(
+            getattr(args, "gepa_reflection_config_yaml", None),
+            role="reflection",
+        )
+        if getattr(args, "algorithm", None) == "gepa"
+        else {}
+    )
+
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
     caption_cache_dir = getattr(args, "caption_cache_dir", None)
     if caption_cache_dir is not None:
         args.caption_cache_dir = caption_cache_dir.expanduser().resolve()
-    load_perception_config_yaml(args.perception_config_yaml)
+    perception_source_config = load_perception_config_yaml(args.perception_config_yaml)
     if caption_cache_dir is None:
-        load_captioner_config_yaml(args.captioner_config_yaml)
+        captioner_source_config = load_captioner_config_yaml(args.captioner_config_yaml)
+    else:
+        captioner_source_config = {}
     configure_gemini_api_backend(args)
-    load_prompt_config(args.prompt_yaml)
+    prompt_source_config = load_prompt_config(args.prompt_yaml)
     args.requested_audio_caption_dir = args.audio_caption_dir
     args.audio_caption_dir, args.audio_caption_skip_reason = resolve_preloaded_audio_caption_dir(
         args.audio_caption_dir,
@@ -3436,6 +3579,56 @@ def run_optimization() -> None:
     if args.algorithm == "gepa" and not gepa_config.get("track_stats"):
         print("GEPA track_stats was false; enabling it so candidate-level optimizer logs can be saved.")
         gepa_config["track_stats"] = True
+
+    resolved_config_path = save_resolved_experiment_config(
+        args.output_program.parent,
+        {
+            "mode": "optimization",
+            "arguments": args,
+            "source_configs": {
+                "planner": {
+                    "path": getattr(args, "planner_config_yaml", None),
+                    "config": planner_source_config,
+                },
+                "gepa_reflection": {
+                    "path": getattr(args, "gepa_reflection_config_yaml", None),
+                    "config": reflection_source_config,
+                },
+                "gepa": {
+                    "path": args.gepa_config,
+                    "config": _load_optimizer_config(args.gepa_config),
+                },
+                "perception": {
+                    "path": args.perception_config_yaml,
+                    "config": perception_source_config,
+                },
+                "captioner": {
+                    "path": args.captioner_config_yaml,
+                    "config": captioner_source_config,
+                },
+                "prompt": {
+                    "path": active_prompt_yaml_path(),
+                    "config": prompt_source_config,
+                },
+            },
+            "effective": {
+                "planner": planner_effective_config(context),
+                "reflection_lm": lm_effective_config(gepa_reflection_lm)
+                if args.algorithm == "gepa"
+                else None,
+                "gepa": gepa_config if args.algorithm == "gepa" else None,
+                "miprov2": miprov2_config if args.algorithm == "miprov2" else None,
+                "reflection_template": gepa_reflection_template,
+                "allowed_tools": context.allowed_tools,
+                "caption_placement": context.caption_placement,
+                "max_turns": context.max_turns,
+                "perception_model": args.perception_model,
+                "gemini_api_backend": args.gemini_api_backend,
+            },
+        },
+        print_config=getattr(args, "print_config", False),
+    )
+    print(f"Saved resolved experiment config to {resolved_config_path}")
 
     if args.algorithm == "copro":
         print(

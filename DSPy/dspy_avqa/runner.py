@@ -13,6 +13,11 @@ import yaml
 from .caption_cache import validate_caption_cache_coverage
 from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
 from .deepseek_dspy_lm import consume_planner_call_trace
+from .experiment_config import (
+    load_reasoner_config_yaml,
+    planner_effective_config,
+    save_resolved_experiment_config,
+)
 from .data import (
     build_input_state,
     build_result_row,
@@ -171,6 +176,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--planner-config-yaml",
+        type=Path,
+        default=None,
+        help="Optional YAML file with explicit planner model and sampling parameters.",
+    )
+    parser.add_argument(
         "--perception-config-yaml",
         type=Path,
         default=None,
@@ -223,6 +234,11 @@ def parse_args() -> argparse.Namespace:
             "Use 'conversation_state' for the current behavior or 'task' to move "
             "the caption into Coarse video/audio description."
         ),
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print the same redacted resolved experiment config saved in the output directory.",
     )
     return parser.parse_args()
 
@@ -333,10 +349,12 @@ def gemini_backend_log_lines() -> list[str]:
     return lines
 
 
-def _load_qwen_config_yaml(path: Path | None, *, prefix: str, preserve_base_url_override: bool) -> dict[str, Any]:
-    """Load Qwen runtime parameters into env vars, optionally under a prefix."""
-    base_url_key = f"{prefix}_BASE_URL"
-    qwen_base_url_override = os.environ.get(base_url_key) if preserve_base_url_override else None
+def _load_qwen_config_yaml(
+    path: Path | None,
+    *,
+    prefix: str,
+) -> dict[str, Any]:
+    """Load Qwen runtime parameters into env vars under the requested prefix."""
     if path is None:
         return {}
     with path.open("r", encoding="utf-8") as f:
@@ -387,9 +405,6 @@ def _load_qwen_config_yaml(path: Path | None, *, prefix: str, preserve_base_url_
             "qwen_api_key": f"{prefix}_API_KEY",
         },
     )
-    if qwen_base_url_override:
-        os.environ[base_url_key] = qwen_base_url_override
-
     _set_env_from_mapping(
         sampling,
         {
@@ -415,7 +430,10 @@ def load_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
     ).strip().lower()
     if backend == "gemini":
         return load_gemini_captioner_config_yaml(path)
-    return _load_qwen_config_yaml(path, prefix="CAPTIONER_QWEN", preserve_base_url_override=True)
+    return _load_qwen_config_yaml(
+        path,
+        prefix="CAPTIONER_QWEN",
+    )
 
 
 def load_gemini_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
@@ -480,7 +498,6 @@ def load_gemini_captioner_config_yaml(path: Path | None) -> dict[str, Any]:
 
 def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
     """Load perception backend parameters from a baseline-style YAML config."""
-    qwen_base_url_override = os.environ.get("QWEN_BASE_URL")
     if path is None:
         return {}
     with path.open("r", encoding="utf-8") as f:
@@ -563,9 +580,6 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "qwen_api_key": "QWEN_API_KEY",
         },
     )
-    if qwen_base_url_override:
-        os.environ["QWEN_BASE_URL"] = qwen_base_url_override
-
     _set_env_from_mapping(
         sampling,
         {
@@ -744,16 +758,22 @@ def run_batch() -> None:
         raise ValueError("--inference-num-threads must be >= 1")
     if args.inference_batch_size is not None and args.inference_batch_size < 1:
         raise ValueError("--inference-batch-size must be >= 1")
+    planner_source_config = load_reasoner_config_yaml(
+        args.planner_config_yaml,
+        role="planner",
+    )
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
     if args.caption_cache_dir is not None:
         args.caption_cache_dir = args.caption_cache_dir.expanduser().resolve()
-    load_perception_config_yaml(args.perception_config_yaml)
+    perception_source_config = load_perception_config_yaml(args.perception_config_yaml)
     if args.caption_cache_dir is None:
-        load_captioner_config_yaml(args.captioner_config_yaml)
+        captioner_source_config = load_captioner_config_yaml(args.captioner_config_yaml)
+    else:
+        captioner_source_config = {}
     configure_gemini_api_backend(args)
-    load_prompt_config(args.prompt_yaml)
+    prompt_source_config = load_prompt_config(args.prompt_yaml)
     audio_caption_dir, audio_caption_skip_reason = resolve_preloaded_audio_caption_dir(
         args.audio_caption_dir,
         caption_placement=args.caption_placement,
@@ -805,6 +825,42 @@ def run_batch() -> None:
         caption_cache_dir=args.caption_cache_dir,
     )
     program = AVQADSPyReActProgram(context=context)
+
+    resolved_config_path = save_resolved_experiment_config(
+        args.output_dir or args.output_jsonl.parent,
+        {
+            "mode": "inference",
+            "arguments": args,
+            "source_configs": {
+                "planner": {
+                    "path": args.planner_config_yaml,
+                    "config": planner_source_config,
+                },
+                "perception": {
+                    "path": args.perception_config_yaml,
+                    "config": perception_source_config,
+                },
+                "captioner": {
+                    "path": args.captioner_config_yaml,
+                    "config": captioner_source_config,
+                },
+                "prompt": {
+                    "path": active_prompt_yaml_path(),
+                    "config": prompt_source_config,
+                },
+            },
+            "effective": {
+                "planner": planner_effective_config(context),
+                "allowed_tools": context.allowed_tools,
+                "caption_placement": context.caption_placement,
+                "max_turns": context.max_turns,
+                "perception_model": args.perception_model,
+                "gemini_api_backend": args.gemini_api_backend,
+            },
+        },
+        print_config=args.print_config,
+    )
+    print(f"Saved resolved experiment config to {resolved_config_path}")
 
     print(f"Loaded cuts: {len(cuts)}")
     if args.debug:

@@ -1,0 +1,27 @@
+max_full_evals: 16
+reflection_minibatch_size: 16
+candidate_selection_strategy: pareto
+max_merge_invocations: 5
+track_stats: true
+track_best_outputs: true
+
+run:
+  algorithm: gepa
+  optimize_targets:
+    - planner.workflow_prompt
+  trainset_jsonl: /mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_selectedTrain125.jsonl
+  valset_jsonl: /mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_selectedVal125.jsonl
+  daily_omni_root: /mnt/ceph_rbd/data/avqa_project/daily_omni
+  output_program: ${GEPA_RUN_DIR}/compiled_gepa.json
+  initial_program: ${GEPA_RUN_DIR}/initial_gepa_program.json
+  metadata_json: ${GEPA_RUN_DIR}/compiled_gepa_metadata.json
+  signature_search_json: ${GEPA_RUN_DIR}/compiled_gepa_signature_search.json
+  trajectory_jsonl: ${GEPA_RUN_DIR}/optimized_trainset_trajectories.jsonl
+  optimizer_log_dir: ${GEPA_RUN_DIR}/optimizer_logs
+  optimized_prompt_config_yaml: ${GEPA_RUN_DIR}/planner_workflow_prompt_GEPA_daily_qa_prompt_v8_caption_in_task.yaml
+  final_eval_output_jsonl: ${GEPA_RUN_DIR}/output_test.jsonl
+  final_eval_output_dir: ${GEPA_RUN_DIR}
+  train_limit: 64
+  gepa_reflection_template_yaml: ./DSPy/dspy_avqa/yamls/DSPy/reflection_template.yaml
+  gepa_reflection_template_version: auto
+  gepa_log_dir: ${GEPA_RUN_DIR}/gepa_logs
