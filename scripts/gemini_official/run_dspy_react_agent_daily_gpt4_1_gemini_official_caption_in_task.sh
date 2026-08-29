@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-ORIGINAL_SCRIPT="${REPO_DIR}/scripts/run_dspy_react_agent_daily_qwen_v8_GPT4.1_gemini_captionInTask.sh"
+ORIGINAL_SCRIPT="${REPO_DIR}/scripts/01_run_dspy_react_agent_daily_qwen_v8_GPT4.1_gemini_captionInTask.sh"
 OFFICIAL_GEMINI_CONFIG_YAML="${OFFICIAL_GEMINI_CONFIG_YAML:-/mnt/ceph_rbd/workspace/avqa_project/demos/yamls/gemini_qa/daily_125_gemini2.5_official_cold.yaml}"
 
 # Keep the original ReAct experiment settings, changing only the Gemini

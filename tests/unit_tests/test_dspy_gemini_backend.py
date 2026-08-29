@@ -464,6 +464,69 @@ sampling_params:
     assert os.environ["VERTEXAI_LOCATION"] == "europe-west4"
 
 
+def test_perception_connection_yaml_overrides_env(monkeypatch, tmp_path):
+    runner = _load_runner()
+    config_path = tmp_path / "perception.yaml"
+    config_path.write_text(
+        """
+model:
+  gemini_base_url: https://yaml-gemini.invalid
+  gemini_api_key: yaml-gemini-key
+  qwen_base_url: https://yaml-qwen.invalid/v1
+  qwen_api_key: yaml-qwen-key
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://env-gemini.invalid")
+    monkeypatch.setenv("GEMINI_API_KEY", "env-gemini-key")
+    monkeypatch.setenv("QWEN_BASE_URL", "https://env-qwen.invalid/v1")
+    monkeypatch.setenv("QWEN_API_KEY", "env-qwen-key")
+
+    runner.load_perception_config_yaml(config_path)
+
+    assert os.environ["GEMINI_BASE_URL"] == "https://yaml-gemini.invalid"
+    assert os.environ["GEMINI_API_KEY"] == "yaml-gemini-key"
+    assert os.environ["QWEN_BASE_URL"] == "https://yaml-qwen.invalid/v1"
+    assert os.environ["QWEN_API_KEY"] == "yaml-qwen-key"
+
+
+def test_captioner_connection_yaml_overrides_env(monkeypatch, tmp_path):
+    runner = _load_runner()
+    gemini_path = tmp_path / "gemini-captioner.yaml"
+    gemini_path.write_text(
+        """
+model:
+  gemini_base_url: https://yaml-gemini.invalid
+  gemini_api_key: yaml-gemini-key
+""".strip(),
+        encoding="utf-8",
+    )
+    qwen_path = tmp_path / "qwen-captioner.yaml"
+    qwen_path.write_text(
+        """
+model:
+  qwen_base_url: https://yaml-qwen.invalid/v1
+  qwen_api_key: yaml-qwen-key
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://env-gemini.invalid")
+    monkeypatch.setenv("GEMINI_API_KEY", "env-gemini-key")
+    monkeypatch.setenv("QWEN_BASE_URL", "https://env-qwen.invalid/v1")
+    monkeypatch.setenv("QWEN_API_KEY", "env-qwen-key")
+
+    runner.load_gemini_captioner_config_yaml(gemini_path)
+    runner._load_qwen_config_yaml(
+        qwen_path,
+        prefix="CAPTIONER_QWEN",
+    )
+
+    assert os.environ["CAPTIONER_GEMINI_BASE_URL"] == "https://yaml-gemini.invalid"
+    assert os.environ["CAPTIONER_GEMINI_API_KEY"] == "yaml-gemini-key"
+    assert os.environ["CAPTIONER_QWEN_BASE_URL"] == "https://yaml-qwen.invalid/v1"
+    assert os.environ["CAPTIONER_QWEN_API_KEY"] == "yaml-qwen-key"
+
+
 def test_runner_cached_captioner_does_not_initialize_gemini(monkeypatch, tmp_path):
     runner = _load_runner()
     monkeypatch.setenv("PERCEPTION_MODEL", "qwen")

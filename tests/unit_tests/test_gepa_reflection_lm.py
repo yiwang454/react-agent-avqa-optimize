@@ -1,4 +1,5 @@
 import importlib.util
+import argparse
 import json
 import os
 import sys
@@ -160,6 +161,42 @@ def test_gepa_reflection_can_override_model_and_effort_while_omitting_temperatur
         "seed": 1234,
         "reasoning_effort": "medium",
     }
+
+
+def test_gepa_reflection_can_override_max_tokens_and_seed(monkeypatch):
+    optimize = _load_optimize_module()
+    planner_lm = _PlannerLM(
+        "openai/gpt-4.1",
+        {"api_key": "elm-key", "max_tokens": 2048, "seed": 9},
+    )
+    monkeypatch.setenv("GEPA_REFLECTION_MAX_TOKENS", "32768")
+    monkeypatch.setenv("GEPA_REFLECTION_SEED", "1234")
+
+    reflection_lm = optimize.build_gepa_reflection_lm(planner_lm)
+
+    assert reflection_lm.kwargs["max_tokens"] == 32768
+    assert reflection_lm.kwargs["seed"] == 1234
+
+
+def test_gepa_run_config_supplies_paths_and_preserves_cli_seed(monkeypatch, tmp_path):
+    optimize = _load_optimize_module()
+    monkeypatch.setenv("GEPA_RUN_DIR", str(tmp_path / "g0"))
+    args = argparse.Namespace(
+        gepa_config=OPTIMIZE_PATH.parent / "yamls" / "gepa_g0_planner.yaml",
+        algorithm="copro",
+        optimize_targets=None,
+        gepa_seed=18,
+    )
+    parser = argparse.ArgumentParser()
+
+    run_config = optimize._apply_gepa_run_config(args, parser)
+
+    assert args.algorithm == "gepa"
+    assert args.optimize_targets == ("planner.workflow_prompt",)
+    assert args.gepa_seed == 18
+    assert args.output_program == tmp_path / "g0" / "compiled_gepa.json"
+    assert args.final_eval_output_jsonl == tmp_path / "g0" / "output_test.jsonl"
+    assert run_config["train_limit"] == 64
 
 
 def test_gepa_reflection_model_override_does_not_inherit_deepseek_connection(monkeypatch):
