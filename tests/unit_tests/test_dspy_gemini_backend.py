@@ -143,6 +143,25 @@ def test_legacy_gemini_keeps_native_contents(monkeypatch):
     assert tools.consume_last_perception_metadata()["api_backend"] == "legacy"
 
 
+def test_legacy_gemini_first_prompt_prints_resolved_request_url(monkeypatch, capsys):
+    _install_package_stubs()
+    _load_module("dspy_avqa.response_quality", PACKAGE_DIR / "response_quality.py")
+    module = _load_module("dspy_avqa.gemini_api_logging_test", PACKAGE_DIR / "gemini_api.py")
+    monkeypatch.setenv("GEMINI_PRINT_FIRST_PROMPT", "true")
+
+    module._maybe_print_first_prompt(
+        {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+        "https://api.openlux.ai/v1beta/models/gemini-2.5-flash:generateContent",
+    )
+
+    output = capsys.readouterr().out
+    assert "[Gemini first prompt]" in output
+    assert (
+        "Request URL: https://api.openlux.ai/v1beta/models/"
+        "gemini-2.5-flash:generateContent"
+    ) in output
+
+
 def test_qwen_split_audio_keeps_standalone_audio_and_retry_fallback(monkeypatch):
     tools = _load_tools()
     captured = {}

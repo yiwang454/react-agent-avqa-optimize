@@ -131,11 +131,12 @@ def _redact_inline_data(value: Any) -> Any:
     return value
 
 
-def _maybe_print_first_prompt(data: Dict[str, Any]) -> None:
+def _maybe_print_first_prompt(data: Dict[str, Any], url: str) -> None:
     global _PRINTED_FIRST_PROMPT
     if _PRINTED_FIRST_PROMPT or not _env_flag("GEMINI_PRINT_FIRST_PROMPT"):
         return
     print("[Gemini first prompt]", flush=True)
+    print(f"Request URL: {url}", flush=True)
     print(json.dumps(_redact_inline_data(data), ensure_ascii=False, indent=2), flush=True)
     _PRINTED_FIRST_PROMPT = True
 
@@ -276,7 +277,7 @@ def call_gemini_messages(
         data["systemInstruction"] = {"parts": [{"text": system_prompt}]}
     if include_thoughts:
         data["generationConfig"]["thinkingConfig"] = {"includeThoughts": True}
-    _maybe_print_first_prompt(data)
+    _maybe_print_first_prompt(data, url)
 
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
