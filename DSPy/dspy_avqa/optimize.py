@@ -3830,6 +3830,7 @@ def run_optimization() -> None:
                 if getattr(args, "caption_cache_dir", None)
                 else None
             ),
+            "caption_cache_scope": getattr(args, "caption_cache_scope", "all"),
             "caption_cache_coverage": dataset_info["caption_cache_coverage"],
             "daily_omni_root": (
                 str(args.daily_omni_root)
