@@ -79,6 +79,7 @@ print_run_info() {
   echo "A forced final action, if needed, is outside the tool-call budget."
   echo "Qwen perception base URL: ${QWEN_BASE_URL_OVERRIDE}"
   echo "Caption cache: ${CAPTION_CACHE_DIR}"
+  echo "Caption cache scope: all ask_caption calls (engineering-limited reference; live Qwen captions can be brittle or too short)"
   echo "Input: ${INPUT_JSONL} (${actual_count} rows)"
   echo "Output: ${OUTPUT_JSONL}"
   echo "Log file: ${LOG_FILE}"
@@ -98,6 +99,7 @@ cmd=(
   --prompt-yaml "${PROMPT_YAML}"
   --allowed-tools "${DSPY_AVQA_ALLOWED_TOOLS}"
   --caption-cache-dir "${CAPTION_CACHE_DIR}"
+  --caption-cache-scope all
   --ignore-audio-caption-dir
   --signature-in-system-prompt
   --caption-placement task

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import per-question Qwen captions into the validated DSPy ReAct cache."""
+"""Import per-question captions into the validated DSPy ReAct cache."""
 
 from __future__ import annotations
 

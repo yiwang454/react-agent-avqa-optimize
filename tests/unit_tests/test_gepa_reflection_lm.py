@@ -48,6 +48,7 @@ def _load_optimize_module():
 
     context = types.ModuleType("dspy_avqa.context")
     context.AVQARuntimeContext = object
+    context.CAPTION_CACHE_SCOPE_CHOICES = ("all", "first_call_only")
     context.CAPTION_PLACEMENT_CHOICES = ()
     context.normalize_caption_placement = lambda value=None: value
     context.resolve_allowed_tools = lambda value=None: ()
@@ -1340,7 +1341,9 @@ def test_optimizer_caption_cache_requires_explicit_cli_argument(monkeypatch, tmp
         ],
     )
 
-    assert optimize.parse_optimize_args().caption_cache_dir is None
+    parsed = optimize.parse_optimize_args()
+    assert parsed.caption_cache_dir is None
+    assert parsed.caption_cache_scope == "all"
 
 
 def test_optimization_train_only_rejects_final_eval_output(monkeypatch, tmp_path):

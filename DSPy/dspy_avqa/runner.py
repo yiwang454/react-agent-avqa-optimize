@@ -11,7 +11,13 @@ from typing import Any
 import yaml
 
 from .caption_cache import validate_caption_cache_coverage
-from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
+from .context import (
+    AVQARuntimeContext,
+    CAPTION_CACHE_SCOPE_CHOICES,
+    CAPTION_PLACEMENT_CHOICES,
+    normalize_caption_placement,
+    resolve_allowed_tools,
+)
 from .deepseek_dspy_lm import consume_planner_call_trace
 from .experiment_config import (
     load_reasoner_config_yaml,
@@ -140,7 +146,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Question-scoped cache used only when the planner calls ask_caption. "
-            "Cache misses and prompt mismatches fail; there is no live fallback."
+            "A cache-routed call never falls back to live captioning when its "
+            "entry is missing or its prompt does not match."
+        ),
+    )
+    parser.add_argument(
+        "--caption-cache-scope",
+        choices=CAPTION_CACHE_SCOPE_CHOICES,
+        default="all",
+        help=(
+            "Use the caption cache for all ask_caption calls (default), or only "
+            "for the first call and dispatch later calls to the live captioner."
         ),
     )
     parser.add_argument(
@@ -305,9 +321,10 @@ def configure_gemini_api_backend(args: argparse.Namespace) -> bool:
             os.environ[env_name] = str(value).strip()
 
     perception_is_gemini = os.environ.get("PERCEPTION_MODEL", "qwen").strip().lower() == "gemini"
-    captioner_is_gemini = (
-        _selected_captioner_model() == "gemini"
-        and not bool(getattr(args, "caption_cache_dir", None))
+    caption_cache_scope = getattr(args, "caption_cache_scope", "all")
+    captioner_is_gemini = _selected_captioner_model() == "gemini" and (
+        not bool(getattr(args, "caption_cache_dir", None))
+        or caption_cache_scope == "first_call_only"
     )
     gemini_is_active = perception_is_gemini or captioner_is_gemini
     if backend != "dspy" or not gemini_is_active:
@@ -772,10 +789,11 @@ def run_batch() -> None:
     os.environ["PERCEPTION_MODEL"] = args.perception_model
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
+    caption_cache_scope = getattr(args, "caption_cache_scope", "all")
     if args.caption_cache_dir is not None:
         args.caption_cache_dir = args.caption_cache_dir.expanduser().resolve()
     perception_source_config = load_perception_config_yaml(args.perception_config_yaml)
-    if args.caption_cache_dir is None:
+    if args.caption_cache_dir is None or caption_cache_scope == "first_call_only":
         captioner_source_config = load_captioner_config_yaml(args.captioner_config_yaml)
     else:
         captioner_source_config = {}
@@ -795,6 +813,8 @@ def run_batch() -> None:
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
     if args.caption_cache_dir is not None and "ask_caption" not in allowed_tools:
         raise ValueError("--caption-cache-dir requires ask_caption in --allowed-tools")
+    if args.caption_cache_dir is None and caption_cache_scope != "all":
+        raise ValueError("--caption-cache-scope first_call_only requires --caption-cache-dir")
     cuts = read_jsonl(args.input_jsonl)
     requested_sample_ids = {
         sample_id
@@ -831,6 +851,7 @@ def run_batch() -> None:
         allowed_tools=allowed_tools,
         caption_placement=args.caption_placement,
         caption_cache_dir=args.caption_cache_dir,
+        caption_cache_scope=caption_cache_scope,
     )
     program = AVQADSPyReActProgram(context=context)
 
@@ -861,6 +882,7 @@ def run_batch() -> None:
                 "planner": planner_effective_config(context),
                 "allowed_tools": context.allowed_tools,
                 "caption_placement": context.caption_placement,
+                "caption_cache_scope": context.caption_cache_scope,
                 "max_turns": context.max_turns,
                 "perception_model": args.perception_model,
                 "gemini_api_backend": args.gemini_api_backend,
@@ -882,6 +904,7 @@ def run_batch() -> None:
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
     print(f"Signature in system prompt: {args.signature_in_system_prompt}")
     print(f"Caption placement: {context.caption_placement}")
+    print(f"Caption cache scope: {context.caption_cache_scope}")
     if caption_cache_coverage is not None:
         print(
             "Caption cache: "
@@ -901,7 +924,9 @@ def run_batch() -> None:
         print("Audio caption dir: <none; use captioner tool if needed>")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
-    if args.captioner_config_yaml and args.caption_cache_dir is None:
+    if args.captioner_config_yaml and (
+        args.caption_cache_dir is None or caption_cache_scope == "first_call_only"
+    ):
         print(f"Captioner config yaml: {args.captioner_config_yaml}")
     print(
         "Qwen perception config: "

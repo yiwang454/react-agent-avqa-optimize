@@ -490,11 +490,16 @@ class AVQADSPyReActProgram(dspy.Module):
         audio_path: str | None,
         tool_query: str,
         question_id: str | None = None,
+        caption_call_index: int | None = None,
     ) -> str:
         """Dispatch one planner tool call."""
         if tool_name == "ask_caption":
             caption_cache_dir = getattr(self.context, "caption_cache_dir", None)
-            if caption_cache_dir is not None:
+            caption_cache_scope = getattr(self.context, "caption_cache_scope", "all")
+            use_caption_cache = caption_cache_dir is not None and (
+                caption_cache_scope == "all" or caption_call_index == 1
+            )
+            if use_caption_cache:
                 prompt = build_caption_prompt(tool_query)
                 try:
                     cached = load_cached_caption(
@@ -663,6 +668,17 @@ class AVQADSPyReActProgram(dspy.Module):
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
             tool_query = _tool_query(payload, tool_name, source_question=question)
+            caption_call_index = (
+                1
+                + sum(
+                    1
+                    for turn in turn_trace
+                    if turn.get("planner_action") == "tool"
+                    and turn.get("tool_name") == "ask_caption"
+                )
+                if tool_name == "ask_caption"
+                else None
+            )
             default_perception_backend = (
                 selected_captioner_model()
                 if tool_name == "ask_caption"
@@ -674,6 +690,7 @@ class AVQADSPyReActProgram(dspy.Module):
                 audio_path=audio_path,
                 tool_query=tool_query,
                 question_id=question_id,
+                caption_call_index=caption_call_index,
             )
             perception_metadata = consume_last_perception_metadata()
             perception_backend = (
@@ -710,6 +727,15 @@ class AVQADSPyReActProgram(dspy.Module):
                     ),
                     "caption_cache_source_token_usage": perception_metadata.get(
                         "caption_cache_source_token_usage"
+                    ),
+                    "caption_call_index": caption_call_index,
+                    "caption_source_mode": (
+                        "cache"
+                        if tool_name == "ask_caption"
+                        and perception_metadata.get("backend") == "caption_cache"
+                        else "live"
+                        if tool_name == "ask_caption"
+                        else None
                     ),
                     "reliable_qwen_profile": perception_metadata.get("reliable_qwen_profile"),
                     "qwen_response_empty": perception_metadata.get("qwen_response_empty"),

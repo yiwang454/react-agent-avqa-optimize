@@ -18,6 +18,8 @@ SUPPORTED_TOOL_NAMES = ("ask_caption", "ask_perception", "temporal_ground_video"
 _SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
 CAPTION_PLACEMENT_CHOICES = ("conversation_state", "task")
 _CAPTION_PLACEMENT_SET = set(CAPTION_PLACEMENT_CHOICES)
+CAPTION_CACHE_SCOPE_CHOICES = ("all", "first_call_only")
+_CAPTION_CACHE_SCOPE_SET = set(CAPTION_CACHE_SCOPE_CHOICES)
 PLANNER_PROVIDER_DEEPSEEK = "deepseek"
 PLANNER_PROVIDER_ELM_GPT = "elm_gpt"
 _PLANNER_PROVIDER_SET = {PLANNER_PROVIDER_DEEPSEEK, PLANNER_PROVIDER_ELM_GPT}
@@ -34,6 +36,17 @@ def default_planner_workflow_prompt() -> str:
         except KeyError:
             continue
     return ""
+
+
+def normalize_caption_cache_scope(value: str | None = None) -> str:
+    """Normalize whether a caption cache serves every call or only the first."""
+    normalized = str(value or "all").strip().lower()
+    if normalized not in _CAPTION_CACHE_SCOPE_SET:
+        raise ValueError(
+            f"Unsupported caption cache scope {value!r}; "
+            f"expected one of {list(CAPTION_CACHE_SCOPE_CHOICES)}"
+        )
+    return normalized
 
 
 def pick_env(*keys: str, default: str) -> str:
@@ -235,12 +248,14 @@ class AVQARuntimeContext:
     allowed_tools: tuple[str, ...] = field(default_factory=resolve_allowed_tools)
     caption_placement: str = field(default_factory=normalize_caption_placement)
     caption_cache_dir: Path | None = None
+    caption_cache_scope: str = "all"
 
     def __post_init__(self) -> None:
         self.planner_provider = normalize_planner_provider(self.planner_provider)
         if not self.planner_model.strip():
             self.planner_model = resolve_planner_model(self.planner_provider)
         self.caption_placement = normalize_caption_placement(self.caption_placement)
+        self.caption_cache_scope = normalize_caption_cache_scope(self.caption_cache_scope)
         if self.caption_cache_dir is not None:
             self.caption_cache_dir = self.caption_cache_dir.expanduser().resolve()
 

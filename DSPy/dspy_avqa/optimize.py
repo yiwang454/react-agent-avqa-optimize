@@ -20,7 +20,13 @@ import dspy
 import yaml
 
 from .caption_cache import validate_caption_cache_coverage
-from .context import AVQARuntimeContext, CAPTION_PLACEMENT_CHOICES, normalize_caption_placement, resolve_allowed_tools
+from .context import (
+    AVQARuntimeContext,
+    CAPTION_CACHE_SCOPE_CHOICES,
+    CAPTION_PLACEMENT_CHOICES,
+    normalize_caption_placement,
+    resolve_allowed_tools,
+)
 from .deepseek_dspy_lm import consume_planner_call_trace
 from .experiment_config import (
     lm_effective_config,
@@ -2237,8 +2243,18 @@ def parse_optimize_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Question-scoped cache used by ask_caption. Cache misses and prompt "
-            "mismatches fail; there is no live captioner fallback."
+            "Question-scoped cache used by ask_caption. A cache-routed call never "
+            "falls back to live captioning when its entry is missing or its prompt "
+            "does not match."
+        ),
+    )
+    parser.add_argument(
+        "--caption-cache-scope",
+        choices=CAPTION_CACHE_SCOPE_CHOICES,
+        default="all",
+        help=(
+            "Use the caption cache for all ask_caption calls (default), or only "
+            "for the first call and dispatch later calls to the live captioner."
         ),
     )
     parser.add_argument(
@@ -3435,10 +3451,11 @@ def run_optimization() -> None:
     os.environ["DSPY_AVQA_SIGNATURE_IN_SYSTEM_PROMPT"] = _env_bool(args.signature_in_system_prompt)
     os.environ["DSPY_AVQA_CAPTION_PLACEMENT"] = args.caption_placement
     caption_cache_dir = getattr(args, "caption_cache_dir", None)
+    caption_cache_scope = getattr(args, "caption_cache_scope", "all")
     if caption_cache_dir is not None:
         args.caption_cache_dir = caption_cache_dir.expanduser().resolve()
     perception_source_config = load_perception_config_yaml(args.perception_config_yaml)
-    if caption_cache_dir is None:
+    if caption_cache_dir is None or caption_cache_scope == "first_call_only":
         captioner_source_config = load_captioner_config_yaml(args.captioner_config_yaml)
     else:
         captioner_source_config = {}
@@ -3467,11 +3484,14 @@ def run_optimization() -> None:
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
     if caption_cache_dir is not None and "ask_caption" not in allowed_tools:
         raise ValueError("--caption-cache-dir requires ask_caption in --allowed-tools")
+    if caption_cache_dir is None and caption_cache_scope != "all":
+        raise ValueError("--caption-cache-scope first_call_only requires --caption-cache-dir")
     context = AVQARuntimeContext(
         max_turns=args.max_turns,
         allowed_tools=allowed_tools,
         caption_placement=args.caption_placement,
         caption_cache_dir=getattr(args, "caption_cache_dir", None),
+        caption_cache_scope=caption_cache_scope,
     )
     base_program = AVQADSPyReActProgram(context=context)
     program: dspy.Module = PromptTargetProgram(
@@ -3584,6 +3604,7 @@ def run_optimization() -> None:
         print("Audio caption dir: <none; use captioner tool if needed>")
     print(f"Allowed tools: {','.join(context.allowed_tools)}")
     print(f"Max turns: {context.max_turns}")
+    print(f"Caption cache scope: {context.caption_cache_scope}")
     if args.perception_config_yaml:
         print(f"Perception config yaml: {args.perception_config_yaml}")
     if args.captioner_config_yaml:
@@ -3639,6 +3660,7 @@ def run_optimization() -> None:
                 "reflection_template": gepa_reflection_template,
                 "allowed_tools": context.allowed_tools,
                 "caption_placement": context.caption_placement,
+                "caption_cache_scope": context.caption_cache_scope,
                 "max_turns": context.max_turns,
                 "perception_model": args.perception_model,
                 "gemini_api_backend": args.gemini_api_backend,

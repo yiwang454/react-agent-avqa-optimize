@@ -227,6 +227,7 @@ class _FakeRuntimeContext:
     caption_placement = "conversation_state"
     system_prompt = "workflow instruction"
     caption_cache_dir = None
+    caption_cache_scope = "all"
 
 
 def _run_caption_then_perception(tmp_path, caption_placement: str):
@@ -248,7 +249,10 @@ def _run_caption_then_perception(tmp_path, caption_placement: str):
             return '{"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"what key detail distinguishes the options?"}}', [], None
         return '{"action":"final","answer":"A"}', [], None
 
-    def fake_call_tool(*, tool_name, video_path, audio_path, tool_query, question_id=None):
+    def fake_call_tool(
+        *, tool_name, video_path, audio_path, tool_query, question_id=None,
+        caption_call_index=None,
+    ):
         if tool_name == "ask_caption":
             return long_caption
         return "perception observation"
@@ -337,6 +341,116 @@ def test_cached_caption_preserves_v8_tool_flow_without_live_captioner(tmp_path, 
     assert "fixed cached caption" not in planner_inputs[0][0]
     assert "fixed cached caption" in planner_inputs[1][0]
     assert program.CAPTION_MOVED_TO_TASK_MARKER in planner_inputs[1][1]
+
+
+def test_all_caption_cache_scope_serves_later_caption_calls_from_cache(tmp_path, monkeypatch):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=True)
+    prompt_config.load_prompt_config(prompt_yaml)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "sample-1.json").write_text(
+        """{
+  "question_id": "sample-1",
+  "response": "fixed cached caption",
+  "caption_prompt": "default caption instruction",
+  "source_results_file": "cached/captions",
+  "source_rank": 1,
+  "source_backend": "qwen",
+  "source_model": "qwen3-omni-instruct"
+}
+""",
+        encoding="utf-8",
+    )
+
+    context = _FakeRuntimeContext()
+    context.caption_cache_dir = cache_dir
+    context.caption_cache_scope = "all"
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    monkeypatch.setattr(
+        program,
+        "ask_caption",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("all-scope cache must never call the live captioner")
+        ),
+    )
+
+    observations = [
+        avqa_program._call_tool(
+            tool_name="ask_caption",
+            video_path="/tmp/video.mp4",
+            audio_path=None,
+            tool_query="default caption instruction",
+            question_id="sample-1",
+            caption_call_index=index,
+        )
+        for index in (1, 2)
+    ]
+
+    assert observations == ["fixed cached caption", "fixed cached caption"]
+
+
+def test_first_call_only_caption_cache_uses_cache_then_live_captioner(tmp_path, monkeypatch):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=True)
+    prompt_config.load_prompt_config(prompt_yaml)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "sample-1.json").write_text(
+        """{
+  "question_id": "sample-1",
+  "response": "exact cached first caption",
+  "caption_prompt": "default caption instruction",
+  "source_results_file": "seed27/captions",
+  "source_rank": 1,
+  "source_backend": "gemini",
+  "source_model": "gemini-2.5-flash"
+}
+""",
+        encoding="utf-8",
+    )
+
+    context = _FakeRuntimeContext()
+    context.caption_placement = "task"
+    context.caption_cache_dir = cache_dir
+    context.caption_cache_scope = "first_call_only"
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    live_caption_calls = []
+
+    def fake_plan_next_action(*, task, conversation_state, turn_index, max_turns):
+        if turn_index in {"1", "2"}:
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        return '{"action":"final","answer":"A"}', [], None
+
+    def fake_live_caption(*, video_path, audio_path, caption_instruction):
+        live_caption_calls.append(caption_instruction)
+        return "new live caption detail"
+
+    monkeypatch.setattr(program, "ask_caption", fake_live_caption)
+    avqa_program._plan_next_action = fake_plan_next_action
+    result = avqa_program.forward(
+        question_id="sample-1",
+        question="question",
+        options_json='["first", "second"]',
+        video_path="/tmp/video.mp4",
+        audio_path="/tmp/audio.wav",
+        video_id="video",
+        video_description=None,
+        max_turns=3,
+    )
+
+    caption_turns = [
+        turn for turn in result["turn_trace"] if turn["tool_name"] == "ask_caption"
+    ]
+    assert [turn["tool_observation"] for turn in caption_turns] == [
+        "exact cached first caption",
+        "new live caption detail",
+    ]
+    assert [turn["caption_call_index"] for turn in caption_turns] == [1, 2]
+    assert [turn["caption_source_mode"] for turn in caption_turns] == ["cache", "live"]
+    assert caption_turns[0]["caption_cache_hit"] is True
+    assert caption_turns[1]["caption_cache_hit"] is None
+    assert live_caption_calls == ["default caption instruction"]
 
 
 def test_default_caption_placement_keeps_caption_in_conversation_state(tmp_path):
@@ -477,7 +591,10 @@ def test_free_react_enforces_first_caption_then_allows_repeated_free_tools(tmp_p
             return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
         return '{"action":"final","answer":"A"}', [], None
 
-    def fake_call_tool(*, tool_name, video_path, audio_path, tool_query, question_id=None):
+    def fake_call_tool(
+        *, tool_name, video_path, audio_path, tool_query, question_id=None,
+        caption_call_index=None,
+    ):
         tool_calls.append((tool_name, tool_query))
         return f"{tool_name} observation"
 

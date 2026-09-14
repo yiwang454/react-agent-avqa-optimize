@@ -53,6 +53,7 @@ def _load_runner():
 
     context = types.ModuleType("dspy_avqa.context")
     context.AVQARuntimeContext = object
+    context.CAPTION_CACHE_SCOPE_CHOICES = ("all", "first_call_only")
     context.CAPTION_PLACEMENT_CHOICES = ("conversation_state", "task")
     context.normalize_caption_placement = lambda: "conversation_state"
     context.resolve_allowed_tools = lambda value=None: ()
@@ -575,9 +576,27 @@ def test_runner_cached_captioner_does_not_initialize_gemini(monkeypatch, tmp_pat
         gemini_local_data_root=None,
         gemini_gcs_data_root=None,
         caption_cache_dir=tmp_path / "caption-cache",
+        caption_cache_scope="all",
     )
 
     assert runner.configure_gemini_api_backend(args) is False
+
+
+def test_runner_first_call_only_cache_initializes_live_gemini_captioner(monkeypatch, tmp_path):
+    runner = _load_runner()
+    monkeypatch.setenv("PERCEPTION_MODEL", "qwen")
+    monkeypatch.setenv("CAPTIONER_MODEL", "gemini")
+    args = argparse.Namespace(
+        gemini_api_backend="legacy",
+        vertex_project=None,
+        vertex_location=None,
+        gemini_local_data_root=None,
+        gemini_gcs_data_root=None,
+        caption_cache_dir=tmp_path / "caption-cache",
+        caption_cache_scope="first_call_only",
+    )
+
+    assert runner.configure_gemini_api_backend(args) is True
 
 
 def test_runner_caption_cache_requires_explicit_cli_argument(monkeypatch, tmp_path):
@@ -598,7 +617,9 @@ def test_runner_caption_cache_requires_explicit_cli_argument(monkeypatch, tmp_pa
         ],
     )
 
-    assert runner.parse_args().caption_cache_dir is None
+    parsed = runner.parse_args()
+    assert parsed.caption_cache_dir is None
+    assert parsed.caption_cache_scope == "all"
 
 
 def test_precomputed_audio_caption_dir_is_ignored_when_not_rendered(tmp_path):

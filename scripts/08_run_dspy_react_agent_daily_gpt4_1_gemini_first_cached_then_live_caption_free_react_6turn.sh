@@ -20,42 +20,44 @@ if [ ! -x "${PYTHON_BIN}" ]; then
 fi
 
 : "${ELM_API_KEY:?Set ELM_API_KEY for the GPT-4.1 planner.}"
-export QWEN_BASE_URL_OVERRIDE="${QWEN_BASE_URL_OVERRIDE:-http://10.62.206.23:8000/v1}"
-
-case "${QWEN_BASE_URL_OVERRIDE}" in
-  http://*/v1|https://*/v1) ;;
-  *)
-    echo "QWEN_BASE_URL_OVERRIDE must be an http(s) URL ending in /v1." >&2
-    exit 2
-    ;;
-esac
-
+: "${GEMINI_API_KEY:?Set GEMINI_API_KEY for live Gemini captioning and perception.}"
 
 export PLANNER_API_KEY="${ELM_API_KEY}"
 unset DEEPSEEK_API_KEY DEEPSEEK_TOKEN DEEPSEEK_BASE_URL DEEPSEEK_API_BASE PLANNER_API_BASE
 
-export PERCEPTION_MODEL="qwen"
-export CAPTIONER_MODEL="qwen"
-export QWEN_BASE_URL_OVERRIDE
+export PERCEPTION_MODEL="gemini"
+export CAPTIONER_MODEL="gemini"
 export DSPY_AVQA_ALLOWED_TOOLS="ask_caption,ask_perception"
+export GEMINI_API_BACKEND="${GEMINI_API_BACKEND:-legacy}"
+export GEMINI_RESPONSE_ERROR_SENSITIVE="false"
+
+case "${GEMINI_API_BACKEND}" in
+  legacy|dspy) ;;
+  *)
+    echo "GEMINI_API_BACKEND must be either legacy or dspy." >&2
+    exit 2
+    ;;
+esac
 
 PLANNER_CONFIG_YAML="${PLANNER_CONFIG_YAML_OVERRIDE:-${REPO_DIR}/DSPy/dspy_avqa/yamls/reasoner_elm_gpt4_1_none.yaml}"
-PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-${REPO_DIR}/DSPy/dspy_avqa/yamls/config_localqwen_api_instruct.yaml}"
+GEMINI_CONFIG_YAML="${GEMINI_CONFIG_YAML_OVERRIDE:-/mnt/ceph_rbd/workspace/avqa_project/demos/yamls/gemini_qa/daily_125_gemini2.5_cold_captioner.yaml}"
+PERCEPTION_CONFIG_YAML="${PERCEPTION_CONFIG_YAML_OVERRIDE:-${GEMINI_CONFIG_YAML}}"
+CAPTIONER_CONFIG_YAML="${CAPTIONER_CONFIG_YAML_OVERRIDE:-${GEMINI_CONFIG_YAML}}"
 PROMPT_YAML="${PROMPT_YAML_OVERRIDE:-${REPO_DIR}/DSPy/dspy_avqa/yamls/daily_qa_prompt_v8_free_react_caption_in_task.yaml}"
 INPUT_JSONL="${INPUT_JSONL:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_cuts_v3.jsonl}"
-CAPTION_CACHE_DIR="${CAPTION_CACHE_DIR:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_caption_cache_v8_qwen3omni_instruct}"
+CAPTION_CACHE_DIR="${CAPTION_CACHE_DIR:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_caption_cache_v8_gemini2.5flash_seed27}"
 EXPECTED_COUNT="${EXPECTED_COUNT:-1197}"
-MAX_TURNS="${MAX_TURNS:-4}"
+MAX_TURNS="${MAX_TURNS:-6}"
 INFERENCE_NUM_THREADS="${INFERENCE_NUM_THREADS:-4}"
 INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-${INFERENCE_NUM_THREADS}}"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR="${LOG_DIR:-${REPO_DIR}/scripts/logs}"
 LOG_FILE="${LOG_FILE_OVERRIDE:-${LOG_DIR}/${SCRIPT_NAME}.log}"
 
-OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_free_react_gpt4_1_qwen3omni_instruct_cached_qwen_caption_maxturns${MAX_TURNS}}"
+OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_free_react_gpt4_1_gemini_first_cached_then_live_caption_maxturns${MAX_TURNS}}"
 OUTPUT_JSONL="${OUTPUT_JSONL_OVERRIDE:-${OUTPUT_DIR}/output_test.jsonl}"
 
-for required_file in "${PLANNER_CONFIG_YAML}" "${PERCEPTION_CONFIG_YAML}" "${PROMPT_YAML}" "${INPUT_JSONL}" "${CAPTION_CACHE_DIR}/manifest.json"; do
+for required_file in "${PLANNER_CONFIG_YAML}" "${PERCEPTION_CONFIG_YAML}" "${CAPTIONER_CONFIG_YAML}" "${PROMPT_YAML}" "${INPUT_JSONL}" "${CAPTION_CACHE_DIR}/manifest.json"; do
   if [ ! -f "${required_file}" ]; then
     echo "Required file not found: ${required_file}" >&2
     exit 1
@@ -75,13 +77,15 @@ fi
 mkdir -p "$(dirname "${LOG_FILE}")"
 
 print_run_info() {
-  echo "Planner: elm_gpt/gpt-4.1; perception: qwen3-omni-instruct; captions: validated Qwen cache"
+  echo "Planner: elm_gpt/gpt-4.1; perception: live Gemini"
+  echo "Gemini API backend: ${GEMINI_API_BACKEND}"
   echo "Prompt: ${PROMPT_YAML}"
   echo "Tool-call budget: ${MAX_TURNS} calls (including the required first ask_caption call)"
   echo "A forced final action, if needed, is outside the tool-call budget."
-  echo "Qwen perception base URL: ${QWEN_BASE_URL_OVERRIDE}"
+  echo "Perception config: ${PERCEPTION_CONFIG_YAML}"
+  echo "Captioner config: ${CAPTIONER_CONFIG_YAML}"
   echo "Caption cache: ${CAPTION_CACHE_DIR}"
-  echo "Caption cache scope: all ask_caption calls (engineering-limited reference; live Qwen captions can be brittle or too short)"
+  echo "Captioning: first ask_caption uses the exact cache; later ask_caption calls use live Gemini."
   echo "Input: ${INPUT_JSONL} (${actual_count} rows)"
   echo "Output: ${OUTPUT_JSONL}"
   echo "Log file: ${LOG_FILE}"
@@ -98,11 +102,13 @@ cmd=(
   --planner-config-yaml "${PLANNER_CONFIG_YAML}"
   --perception-model "${PERCEPTION_MODEL}"
   --perception-config-yaml "${PERCEPTION_CONFIG_YAML}"
+  --captioner-config-yaml "${CAPTIONER_CONFIG_YAML}"
   --prompt-yaml "${PROMPT_YAML}"
   --allowed-tools "${DSPY_AVQA_ALLOWED_TOOLS}"
   --caption-cache-dir "${CAPTION_CACHE_DIR}"
-  --caption-cache-scope all
+  --caption-cache-scope first_call_only
   --ignore-audio-caption-dir
+  --gemini-api-backend "${GEMINI_API_BACKEND}"
   --signature-in-system-prompt
   --caption-placement task
   --print-config
