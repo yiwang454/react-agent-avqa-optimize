@@ -65,6 +65,7 @@ def _load_runner():
 
     program = types.ModuleType("dspy_avqa.program")
     program.AVQADSPyReActProgram = object
+    program.caption_cache_missing_as_observation = lambda: False
     program.normalize_option_letter = lambda value: value
     sys.modules["dspy_avqa.program"] = program
 
@@ -507,6 +508,23 @@ model:
     assert os.environ["GEMINI_API_KEY"] == "yaml-gemini-key"
     assert os.environ["QWEN_BASE_URL"] == "https://yaml-qwen.invalid/v1"
     assert os.environ["QWEN_API_KEY"] == "yaml-qwen-key"
+
+
+def test_qwen_base_url_override_wins_over_perception_yaml(monkeypatch, tmp_path):
+    runner = _load_runner()
+    config_path = tmp_path / "perception.yaml"
+    config_path.write_text(
+        """
+model:
+  qwen_base_url: https://stale-yaml.invalid/v1
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("QWEN_BASE_URL_OVERRIDE", "http://legal-qwen-host:8000/v1")
+
+    runner.load_perception_config_yaml(config_path)
+
+    assert os.environ["QWEN_BASE_URL"] == "http://legal-qwen-host:8000/v1"
 
 
 def test_captioner_connection_yaml_overrides_env(monkeypatch, tmp_path):

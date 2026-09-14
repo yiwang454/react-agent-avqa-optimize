@@ -168,8 +168,9 @@ def validate_caption_cache_coverage(
     question_ids: Iterable[str],
     *,
     expected_prompt: str,
+    allow_entry_errors: bool = False,
 ) -> dict[str, Any]:
-    """Fail fast unless every requested ID has a valid exact cache entry."""
+    """Validate cache integrity and optionally report absent requested entries."""
     root = cache_dir.expanduser().resolve()
     manifest = load_caption_cache_manifest(root)
     manifest_prompt = str(manifest.get("caption_prompt") or "").strip()
@@ -200,12 +201,28 @@ def validate_caption_cache_coverage(
     duplicates = sorted(value for value, count in Counter(ids).items() if count > 1)
     if duplicates:
         raise ValueError(f"Duplicate question IDs in cache coverage request, e.g. {duplicates[:5]}")
+    missing: list[str] = []
+    invalid: dict[str, str] = {}
     for question_id in ids:
-        load_cached_caption(root, question_id, expected_prompt=expected_prompt)
+        try:
+            load_cached_caption(root, question_id, expected_prompt=expected_prompt)
+        except FileNotFoundError:
+            if not allow_entry_errors:
+                raise
+            missing.append(question_id)
+        except ValueError as exc:
+            if not allow_entry_errors:
+                raise
+            invalid[question_id] = str(exc)
     return {
         "cache_dir": str(root),
         "requested": len(ids),
-        "validated": len(ids),
+        "validated": len(ids) - len(missing) - len(invalid),
+        "missing": len(missing),
+        "missing_question_ids": missing,
+        "invalid": len(invalid),
+        "invalid_question_ids": list(invalid),
+        "invalid_errors": invalid,
         "cache_entries": entry_count,
         "manifest_sha256": hashlib.sha256(
             (root / MANIFEST_NAME).read_bytes()
@@ -394,6 +411,121 @@ def extract_caption_cache(
             str(rank): source_counts.get(rank, 0)
             for rank in range(1, len(resolved_sources) + 1)
         },
+        "question_count": len(input_ids),
+        "content_sha256": digest.hexdigest(),
+    }
+    (root / MANIFEST_NAME).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def import_caption_directory_cache(
+    *,
+    source_dir: Path,
+    source_prompt_yaml: Path,
+    source_template_name: str,
+    input_jsonl: Path,
+    prompt_yaml: Path,
+    output_dir: Path,
+    source_backend: str,
+    source_model: str,
+) -> dict[str, Any]:
+    """Import per-question caption JSON files into the strict ReAct cache format."""
+    input_ids = _load_input_ids(input_jsonl)
+    expected_prompt = effective_caption_prompt_from_yaml(prompt_yaml)
+
+    resolved_source_prompt = source_prompt_yaml.expanduser().resolve()
+    with resolved_source_prompt.open("r", encoding="utf-8") as stream:
+        source_prompts = yaml.safe_load(stream) or {}
+    if not isinstance(source_prompts, Mapping):
+        raise ValueError(
+            f"Source caption prompt YAML must contain a mapping: {resolved_source_prompt}"
+        )
+    source_prompt = str(source_prompts.get(source_template_name) or "").strip()
+    if not source_prompt:
+        raise ValueError(
+            f"Caption template {source_template_name!r} not found in {resolved_source_prompt}"
+        )
+    if source_prompt != expected_prompt:
+        raise ValueError(
+            "Source caption prompt does not match the active ReAct caption prompt: "
+            f"source_sha256={_sha256_text(source_prompt)} "
+            f"active_sha256={_sha256_text(expected_prompt)}"
+        )
+
+    backend = str(source_backend or "").strip()
+    model = str(source_model or "").strip()
+    if not backend or not model:
+        raise ValueError("source_backend and source_model must both be non-empty")
+
+    resolved_source_dir = source_dir.expanduser().resolve()
+    if not resolved_source_dir.is_dir():
+        raise FileNotFoundError(f"Caption source directory not found: {resolved_source_dir}")
+    selected: dict[str, dict[str, Any]] = {}
+    for question_id in input_ids:
+        source_path = _safe_cache_path(resolved_source_dir, question_id)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Caption source entry not found: {source_path}")
+        with source_path.open("r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"Caption source entry must be a JSON object: {source_path}")
+        cached_id = str(payload.get("question_id") or "").strip()
+        if cached_id != question_id:
+            raise ValueError(
+                f"Caption source question_id mismatch at {source_path}: "
+                f"expected {question_id!r}, found {cached_id!r}"
+            )
+        response = str(payload.get("response") or "").strip()
+        if not response:
+            raise ValueError(f"Caption source response is empty: {source_path}")
+        selected[question_id] = {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "question_id": question_id,
+            "response": response,
+            "caption_prompt": expected_prompt,
+            "source_results_file": str(source_path),
+            "source_rank": 1,
+            "source_backend": backend,
+            "source_model": model,
+            "source_token_usage": payload.get("token_usage"),
+        }
+
+    root = output_dir.expanduser().resolve()
+    if root.exists() and any(root.iterdir()):
+        raise ValueError(f"Caption cache output directory is not empty: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha256()
+    for question_id in sorted(selected):
+        entry_text = json.dumps(
+            selected[question_id],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest.update(question_id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(entry_text.encode("utf-8"))
+        digest.update(b"\n")
+        _safe_cache_path(root, question_id).write_text(
+            json.dumps(selected[question_id], ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    manifest = {
+        "schema_version": CACHE_SCHEMA_VERSION,
+        "input_jsonl": str(input_jsonl.expanduser().resolve()),
+        "prompt_yaml": str(prompt_yaml.expanduser().resolve()),
+        "caption_prompt": expected_prompt,
+        "prompt_sha256": _sha256_text(expected_prompt),
+        "source_caption_dir": str(resolved_source_dir),
+        "source_prompt_yaml": str(resolved_source_prompt),
+        "source_template_name": source_template_name,
+        "source_backend": backend,
+        "source_model": model,
         "question_count": len(input_ids),
         "content_sha256": digest.hexdigest(),
     }

@@ -75,6 +75,18 @@ GEPA_CAPTIONER_TARGET_PREFIX = "captioner."
 GEPA_PLANNER_TARGET_PREFIX = "planner."
 GEPA_CAPTION_SUPERVISION_CHOICES = ("auto", "none", "privileged")
 
+
+def _caption_cache_allows_missing() -> bool:
+    """Read the missing-caption behavior from the active prompt config."""
+    captioner_config = prompt_config().get("captioner") or {}
+    if not isinstance(captioner_config, dict):
+        raise ValueError("Prompt config captioner section must be a mapping")
+    value = captioner_config.get("cache_missing_as_observation", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 GEPA_CAPTIONER_REFLECTION_PROMPT_TEMPLATE = """I provided an assistant with the following captioning instruction:
 ```
 <curr_instructions>
@@ -3008,6 +3020,7 @@ def resolve_optimization_datasets(args: argparse.Namespace) -> dict[str, Any]:
             args.caption_cache_dir,
             cache_question_ids,
             expected_prompt=build_caption_prompt(),
+            allow_entry_errors=_caption_cache_allows_missing(),
         )
 
     return {
@@ -3349,6 +3362,7 @@ def _run_inference_only(
             args.caption_cache_dir,
             [cut_id(cut) for cut in cuts],
             expected_prompt=build_caption_prompt(),
+            allow_entry_errors=_caption_cache_allows_missing(),
         )
     print(f"Inference-only mode: loaded optimized program from {args.output_program}")
     print(f"Loaded final-test cuts: {len(cuts)}")
@@ -3360,6 +3374,8 @@ def _run_inference_only(
             f"{caption_cache_coverage['cache_dir']} "
             f"(validated={caption_cache_coverage['validated']}/"
             f"{caption_cache_coverage['requested']}, "
+            f"missing={caption_cache_coverage['missing']}, "
+            f"invalid={caption_cache_coverage['invalid']}, "
             f"manifest_sha256={caption_cache_coverage['manifest_sha256']}, "
             f"content_sha256={caption_cache_coverage['content_sha256']})"
         )
@@ -3501,6 +3517,8 @@ def run_optimization() -> None:
             f"{caption_cache_coverage['cache_dir']} "
             f"(validated={caption_cache_coverage['validated']}/"
             f"{caption_cache_coverage['requested']}, "
+            f"missing={caption_cache_coverage['missing']}, "
+            f"invalid={caption_cache_coverage['invalid']}, "
             f"manifest_sha256={caption_cache_coverage['manifest_sha256']}, "
             f"content_sha256={caption_cache_coverage['content_sha256']})"
         )

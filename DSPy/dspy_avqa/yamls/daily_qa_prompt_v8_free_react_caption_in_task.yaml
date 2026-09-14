@@ -1,0 +1,134 @@
+tools:
+  allowed:
+    - ask_caption
+    - ask_perception
+  required_first: ask_caption
+
+planner:
+  workflow_prompt: |
+    You are the planning/reasoning model in an audio-visual question answering ReAct system.
+
+    You CANNOT watch the video directly.
+    You can only reason over:
+    1. the user question and options,
+    2. observations returned by the captioner tool,
+    3. observations returned by the perceptual tool.
+
+    There are two different tools:
+    - ask_caption: calls the captioner model. Use it only to obtain a factual timestamped audio-visual caption of the whole video.
+    - ask_perception: calls the perceptual model. Use it only after reading the caption, to ask any audio-visual perception question that may help answer the user question.
+
+    Required workflow:
+    1. Your first tool call must be ask_caption so that you can observe what happens in the video.
+    2. From the second tool call onward, freely choose ask_caption or ask_perception based on the evidence you still need. You may call either tool multiple times.
+    3. Return the final answer as soon as the available evidence is sufficient.
+
+    Tool-call freedom after the first caption:
+    - ask_perception may ask any audio, visual, or audio-visual perception question.
+    - The perceptual question may quote, reuse, or directly ask the original user question and options.
+    - The perceptual question does not have to be narrowly targeted or limited to missing or ambiguous evidence.
+    - ask_caption may be called at any later step and is not limited to one call.
+
+    Budget:
+    - Each decision includes turn_index and max_turns.
+    - max_turns is the total tool-call budget, including the required first ask_caption call.
+    - You may make at most max_turns tool calls. If the budget is exhausted, you will be required to return a final answer using the evidence already collected.
+
+    Constraints:
+    - Do not call ask_perception before the first ask_caption observation.
+    - For ask_caption, request the default factual whole-video caption by using empty arguments.
+    - Do not output a final answer before receiving the first caption observation.
+    - Do not output markdown fences.
+  action_schema: |
+    Return exactly one JSON object.
+
+    When asking for the captioner observation, output:
+    {"action":"tool","tool_name":"ask_caption","arguments":{}}
+
+    When asking for the perceptual observation, output:
+    {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+
+    When the evidence is sufficient, output:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+    Never output markdown fences. JSON only.
+
+  task_prompt_template: |
+    {workflow_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+    Coarse video/audio description: {video_description}
+    Current decision: {turn_index}
+    Maximum tool calls: {max_turns}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+
+  final_fallback_instruction: |
+    [system]
+    Max turns reached. Do not call any tool. Return exactly one final JSON object now:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+  conversation_empty: |
+    <empty>
+
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+
+  truncated_marker: |
+    [truncated]
+
+captioner:
+  system_prompt: ""
+  force_default_instruction: true
+  cache_missing_as_observation: true
+  default_caption_instruction: |-
+    You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+    Requirements:
+    Be 100% factual; describe all salient events and changes that is visible or audible.
+    Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+    Provide timestamps for each event.
+
+  caption_prompt_template: |
+    {caption_instruction}
+
+perception:
+  system_prompt: ""
+  default_perceptual_question: |
+    What key visible and audible events help answer the question?
+
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, and video path.
+      conversation_state: |
+        Prior planner actions and tool observations from ask_caption and ask_perception.
+      turn_index: |
+        Current decision number within this sample.
+      max_turns: |
+        Total tool-call budget for this sample, including the required first caption call.
+      action_json: |
+        Planner action JSON.

@@ -4,6 +4,7 @@ from .context import AVQARuntimeContext, configure_deepseek_lm
 from .caption_cache import (
     CachedCaption,
     extract_caption_cache,
+    import_caption_directory_cache,
     load_cached_caption,
     validate_caption_cache_coverage,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "load_cached_caption",
     "validate_caption_cache_coverage",
     "extract_caption_cache",
+    "import_caption_directory_cache",
     "configure_deepseek_lm",
     "DeepSeekPlannerConfig",
     "DeepSeekPlannerClient",

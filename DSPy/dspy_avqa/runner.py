@@ -25,7 +25,11 @@ from .data import (
     read_jsonl,
     write_results_jsonl,
 )
-from .program import AVQADSPyReActProgram, normalize_option_letter
+from .program import (
+    AVQADSPyReActProgram,
+    caption_cache_missing_as_observation,
+    normalize_option_letter,
+)
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config
 from .reliable_qwen import (
     ReliableQwenExecutor,
@@ -580,6 +584,9 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "qwen_api_key": "QWEN_API_KEY",
         },
     )
+    qwen_base_url_override = os.environ.get("QWEN_BASE_URL_OVERRIDE", "").strip()
+    if qwen_base_url_override:
+        os.environ["QWEN_BASE_URL"] = qwen_base_url_override
     _set_env_from_mapping(
         sampling,
         {
@@ -816,6 +823,7 @@ def run_batch() -> None:
             args.caption_cache_dir,
             [cut_id(cut) for cut in selected],
             expected_prompt=build_caption_prompt(),
+            allow_entry_errors=caption_cache_missing_as_observation(),
         )
 
     context = AVQARuntimeContext(
@@ -880,6 +888,8 @@ def run_batch() -> None:
             f"{caption_cache_coverage['cache_dir']} "
             f"(validated={caption_cache_coverage['validated']}/"
             f"{caption_cache_coverage['requested']}, "
+            f"missing={caption_cache_coverage['missing']}, "
+            f"invalid={caption_cache_coverage['invalid']}, "
             f"manifest_sha256={caption_cache_coverage['manifest_sha256']}, "
             f"content_sha256={caption_cache_coverage['content_sha256']})"
         )

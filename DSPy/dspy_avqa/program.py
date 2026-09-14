@@ -11,7 +11,7 @@ import dspy
 from .caption_cache import load_cached_caption
 from .context import AVQARuntimeContext, configure_deepseek_lm, resolve_allowed_tools
 from .deepseek_dspy_lm import clear_planner_call_trace, consume_planner_call_trace
-from .prompt_config import prompt_value, render_prompt
+from .prompt_config import prompt_config, prompt_value, render_prompt
 from .signatures import PlanNextAction
 from .tools import (
     ask_caption,
@@ -201,6 +201,8 @@ def _build_task_text(
     video_path: str,
     video_id: str | None,
     video_description: str | None,
+    turn_index: str = "unknown",
+    max_turns: str = "unknown",
 ) -> str:
     """Build the compact planner task used inside DSPy."""
     return render_prompt(
@@ -212,6 +214,8 @@ def _build_task_text(
         video_id=video_id or "unknown",
         video_path=video_path,
         video_description=video_description or "unknown",
+        turn_index=turn_index,
+        max_turns=max_turns,
         question=question,
         formatted_options=_format_options(options_json),
     )
@@ -304,6 +308,32 @@ def _canonical_tool_name(raw_tool_name: str) -> str:
     return "ask_perception"
 
 
+def _required_first_tool() -> str | None:
+    """Return an optional prompt-configured first tool requirement."""
+    tools_config = prompt_config().get("tools") or {}
+    if not isinstance(tools_config, dict):
+        raise ValueError("Prompt config tools section must be a mapping")
+    raw_tool_name = str(tools_config.get("required_first") or "").strip()
+    if not raw_tool_name:
+        return None
+    normalized = raw_tool_name.lower()
+    known_names = {
+        "ask_caption",
+        "ask_captioner",
+        "caption_video",
+        "captioner",
+        "ask_perception",
+        "ask_qwen_perception",
+        "ask_gemini_perception",
+        "temporal_ground_video",
+    }
+    if normalized not in known_names:
+        raise ValueError(
+            f"Unsupported prompt config tools.required_first={raw_tool_name!r}"
+        )
+    return _canonical_tool_name(normalized)
+
+
 def _normalize_tool_name(raw_tool_name: str, allowed_tools: tuple[str, ...]) -> str:
     """Map planner tool names onto enabled DSPy tool functions."""
     value = _canonical_tool_name(raw_tool_name)
@@ -346,8 +376,28 @@ def _default_caption_instruction() -> str:
         return "Produce a detailed timestamped audio-visual caption of the video."
 
 
+def _captioner_flag(name: str, *, default: bool = False) -> bool:
+    """Read a boolean behavior flag from the active captioner prompt config."""
+    captioner_config = prompt_config().get("captioner") or {}
+    if not isinstance(captioner_config, dict):
+        raise ValueError("Prompt config captioner section must be a mapping")
+    value = captioner_config.get(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def caption_cache_missing_as_observation() -> bool:
+    """Return whether a missing cached caption should become a tool observation."""
+    return _captioner_flag("cache_missing_as_observation")
+
+
 def _caption_instruction(payload: dict[str, Any]) -> str:
     """Extract the captioner instruction from the compact action payload."""
+    if _captioner_flag("force_default_instruction"):
+        return _default_caption_instruction()
     arguments = payload.get("arguments")
     if not isinstance(arguments, dict):
         arguments = {}
@@ -446,11 +496,30 @@ class AVQADSPyReActProgram(dspy.Module):
             caption_cache_dir = getattr(self.context, "caption_cache_dir", None)
             if caption_cache_dir is not None:
                 prompt = build_caption_prompt(tool_query)
-                cached = load_cached_caption(
-                    caption_cache_dir,
-                    str(question_id or ""),
-                    expected_prompt=prompt,
-                )
+                try:
+                    cached = load_cached_caption(
+                        caption_cache_dir,
+                        str(question_id or ""),
+                        expected_prompt=prompt,
+                    )
+                except (FileNotFoundError, ValueError) as exc:
+                    if not caption_cache_missing_as_observation():
+                        raise
+                    error_observation = (
+                        "[ERROR] No usable cached caption is available for this question sample. "
+                        "Continue the ReAct workflow with ask_perception or answer from other "
+                        f"available evidence. Details: {exc}"
+                    )
+                    record_perception_metadata(
+                        backend="caption_cache",
+                        system_prompt=captioner_system_prompt(),
+                        prompt=prompt,
+                        model=None,
+                        env_prefix="CAPTION_CACHE",
+                        caption_cache_hit=False,
+                        caption_cache_error=str(exc),
+                    )
+                    return error_observation
                 record_perception_metadata(
                     backend="caption_cache",
                     system_prompt=captioner_system_prompt(),
@@ -501,9 +570,15 @@ class AVQADSPyReActProgram(dspy.Module):
         turn_trace: list[dict[str, Any]] = []
         caption_task_description: str | None = None
         workflow_prompt = self._workflow_prompt()
+        required_first_tool = _required_first_tool()
+        if required_first_tool not in (None, *self.context.allowed_tools):
+            raise ValueError(
+                f"Prompt requires first tool {required_first_tool!r}, but it is not enabled in "
+                f"allowed_tools={self.context.allowed_tools!r}"
+            )
         clear_planner_call_trace()
 
-        def current_task_text() -> str:
+        def current_task_text(turn_index: str) -> str:
             active_video_description = (
                 caption_task_description
                 if self.context.caption_placement == "task" and caption_task_description is not None
@@ -516,10 +591,12 @@ class AVQADSPyReActProgram(dspy.Module):
                 video_path=video_path,
                 video_id=video_id,
                 video_description=active_video_description,
+                turn_index=turn_index,
+                max_turns=str(max_iters),
             )
 
         for turn_idx in range(1, max_iters + 1):
-            task = current_task_text()
+            task = current_task_text(str(turn_idx))
             raw_action, planner_calls, planner_error = self._plan_next_action(
                 task=task,
                 conversation_state=_conversation_state(
@@ -531,6 +608,23 @@ class AVQADSPyReActProgram(dspy.Module):
             )
             payload = _coerce_action_payload(raw_action)
             action_name = str(payload.get("action") or "tool").strip().lower()
+            requested_action = action_name
+            requested_tool_name = str(payload.get("tool_name") or "").strip() or None
+            first_tool_enforced = False
+            if turn_idx == 1 and required_first_tool is not None:
+                canonical_requested_tool = (
+                    _canonical_tool_name(requested_tool_name)
+                    if requested_action == "tool" and requested_tool_name
+                    else None
+                )
+                if canonical_requested_tool != required_first_tool:
+                    payload = {
+                        "action": "tool",
+                        "tool_name": required_first_tool,
+                        "arguments": {},
+                    }
+                    action_name = "tool"
+                    first_tool_enforced = True
 
             if action_name == "final":
                 raw_answer = str(payload.get("answer") or raw_action).strip()
@@ -546,6 +640,10 @@ class AVQADSPyReActProgram(dspy.Module):
                         "planner_raw": raw_action,
                         "planner_calls": {"action_decision": planner_calls},
                         "planner_parse_error": planner_error,
+                        "required_first_tool": required_first_tool,
+                        "first_tool_enforced": first_tool_enforced,
+                        "planner_requested_action": requested_action,
+                        "planner_requested_tool_name": requested_tool_name,
                         "final_answer": final_answer,
                         "video_id": video_id,
                     }
@@ -599,6 +697,7 @@ class AVQADSPyReActProgram(dspy.Module):
                     "perception_thinking": perception_metadata.get("thinking_text", ""),
                     "perception_token_usage": perception_metadata.get("token_usage"),
                     "caption_cache_hit": perception_metadata.get("caption_cache_hit"),
+                    "caption_cache_error": perception_metadata.get("caption_cache_error"),
                     "caption_cache_path": perception_metadata.get("caption_cache_path"),
                     "caption_cache_source_results": perception_metadata.get(
                         "caption_cache_source_results"
@@ -617,12 +716,16 @@ class AVQADSPyReActProgram(dspy.Module):
                     "planner_raw": raw_action,
                     "planner_calls": {"action_decision": planner_calls},
                     "planner_parse_error": planner_error,
+                    "required_first_tool": required_first_tool,
+                    "first_tool_enforced": first_tool_enforced,
+                    "planner_requested_action": requested_action,
+                    "planner_requested_tool_name": requested_tool_name,
                     "final_answer": None,
                     "video_id": video_id,
                 }
             )
 
-        task = current_task_text()
+        task = current_task_text("final")
         fallback_state = (
             f"{_conversation_state(turn_trace, caption_placement=self.context.caption_placement)}\n\n"
             + prompt_value("planner", "final_fallback_instruction").strip()

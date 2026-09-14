@@ -369,6 +369,25 @@ def test_caption_instruction_still_falls_back_to_yaml_default(tmp_path):
     assert program._caption_instruction({"arguments": {}}) == "default caption instruction"
 
 
+def test_caption_instruction_is_forced_to_default_when_configured(tmp_path):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=False)
+    text = prompt_yaml.read_text(encoding="utf-8")
+    prompt_yaml.write_text(
+        text.replace(
+            "captioner:\n",
+            "captioner:\n  force_default_instruction: true\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    prompt_config.load_prompt_config(prompt_yaml)
+
+    assert program._caption_instruction(
+        {"arguments": {"caption_instruction": "planner-written instruction"}}
+    ) == "default caption instruction"
+
+
 
 def test_conversation_state_caption_placement_allows_unrendered_video_description(tmp_path):
     prompt_yaml = tmp_path / "prompt.yaml"
@@ -425,3 +444,175 @@ def test_task_caption_placement_rejects_template_without_video_description(tmp_p
         assert "{video_description}" in message
     else:
         raise AssertionError("Expected ValueError when task placement cannot render caption")
+
+
+def test_free_react_enforces_first_caption_then_allows_repeated_free_tools(tmp_path):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=False)
+    text = prompt_yaml.read_text(encoding="utf-8")
+    prompt_yaml.write_text(
+        "tools:\n  required_first: ask_caption\n" + text,
+        encoding="utf-8",
+    )
+    prompt_config.load_prompt_config(prompt_yaml)
+
+    context = _FakeRuntimeContext()
+    context.max_turns = 6
+    context.caption_placement = "conversation_state"
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    tool_calls = []
+
+    def fake_plan_next_action(*, task, conversation_state, turn_index, max_turns):
+        assert max_turns == "6"
+        if turn_index == "1":
+            return '{"action":"final","answer":"B"}', [], None
+        if turn_index == "2":
+            return (
+                '{"action":"tool","tool_name":"ask_perception",'
+                '"arguments":{"perceptual_question":"Which original option is correct?"}}',
+                [],
+                None,
+            )
+        if turn_index == "3":
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        return '{"action":"final","answer":"A"}', [], None
+
+    def fake_call_tool(*, tool_name, video_path, audio_path, tool_query, question_id=None):
+        tool_calls.append((tool_name, tool_query))
+        return f"{tool_name} observation"
+
+    avqa_program._plan_next_action = fake_plan_next_action
+    avqa_program._call_tool = fake_call_tool
+    result = avqa_program.forward(
+        question="Which original option is correct?",
+        options_json='["first", "second"]',
+        video_path="/tmp/video.mp4",
+        max_turns=6,
+    )
+
+    assert [name for name, _ in tool_calls] == [
+        "ask_caption",
+        "ask_perception",
+        "ask_caption",
+    ]
+    assert tool_calls[1][1] == "Which original option is correct?"
+    assert result["answer"] == "A"
+    assert result["turn_trace"][0]["first_tool_enforced"] is True
+    assert result["turn_trace"][0]["planner_requested_action"] == "final"
+    assert result["turn_trace"][1]["first_tool_enforced"] is False
+
+
+def test_missing_cached_caption_becomes_observation_without_live_fallback(tmp_path, monkeypatch):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=False)
+    text = prompt_yaml.read_text(encoding="utf-8")
+    prompt_yaml.write_text(
+        text.replace(
+            "captioner:\n",
+            "captioner:\n  force_default_instruction: true\n"
+            "  cache_missing_as_observation: true\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    prompt_config.load_prompt_config(prompt_yaml)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    context = _FakeRuntimeContext()
+    context.caption_cache_dir = cache_dir
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    planner_inputs = []
+
+    def fake_plan_next_action(*, task, conversation_state, turn_index, max_turns):
+        planner_inputs.append((task, conversation_state))
+        if turn_index == "1":
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        if turn_index == "2":
+            return (
+                '{"action":"tool","tool_name":"ask_perception",'
+                '"arguments":{"perceptual_question":"inspect the video directly"}}',
+                [],
+                None,
+            )
+        return '{"action":"final","answer":"B"}', [], None
+
+    monkeypatch.setattr(
+        program,
+        "ask_caption",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing cache must never fall back to live caption")
+        ),
+    )
+    monkeypatch.setattr(program, "ask_perception", lambda *args, **kwargs: "visible evidence")
+    avqa_program._plan_next_action = fake_plan_next_action
+    result = avqa_program.forward(
+        question_id="missing-sample",
+        question="question",
+        options_json='["first", "second"]',
+        video_path="/tmp/video.mp4",
+        max_turns=3,
+    )
+
+    assert result["answer"] == "B"
+    assert result["turn_trace"][0]["caption_cache_hit"] is False
+    assert "No usable cached caption" in result["turn_trace"][0]["tool_observation"]
+    assert "No usable cached caption" in planner_inputs[1][1]
+    assert result["turn_trace"][1]["tool_name"] == "ask_perception"
+
+
+def test_max_turns_is_rendered_and_forced_final_is_outside_tool_budget(tmp_path):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=False)
+    text = prompt_yaml.read_text(encoding="utf-8")
+    prompt_yaml.write_text(
+        "tools:\n  required_first: ask_caption\n"
+        + text.replace(
+            "    Question: {question}\n",
+            "    Current decision: {turn_index}\n"
+            "    Maximum tool calls: {max_turns}\n"
+            "    Question: {question}\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    prompt_config.load_prompt_config(prompt_yaml)
+
+    context = _FakeRuntimeContext()
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    planner_inputs = []
+
+    def fake_plan_next_action(*, task, conversation_state, turn_index, max_turns):
+        planner_inputs.append((task, turn_index, max_turns))
+        if turn_index == "final":
+            return '{"action":"final","answer":"A"}', [], None
+        if turn_index == "1":
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        return (
+            '{"action":"tool","tool_name":"ask_perception",'
+            '"arguments":{"perceptual_question":"more evidence"}}',
+            [],
+            None,
+        )
+
+    avqa_program._plan_next_action = fake_plan_next_action
+    avqa_program._call_tool = lambda **kwargs: "observation"
+    result = avqa_program.forward(
+        question="question",
+        options_json='["first", "second"]',
+        video_path="/tmp/video.mp4",
+        max_turns=3,
+    )
+
+    assert [turn["planner_action"] for turn in result["turn_trace"]] == [
+        "tool",
+        "tool",
+        "tool",
+        "final",
+    ]
+    assert result["turn_trace"][0]["tool_name"] == "ask_caption"
+    assert [turn_id for _, turn_id, _ in planner_inputs] == ["1", "2", "3", "final"]
+    assert all(max_turns == "3" for _, _, max_turns in planner_inputs)
+    assert "Current decision: 1" in planner_inputs[0][0]
+    assert "Maximum tool calls: 3" in planner_inputs[0][0]
+    assert "Current decision: final" in planner_inputs[-1][0]

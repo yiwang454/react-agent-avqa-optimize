@@ -14,6 +14,7 @@ sys.modules[SPEC.name] = caption_cache
 assert SPEC.loader is not None
 SPEC.loader.exec_module(caption_cache)
 extract_caption_cache = caption_cache.extract_caption_cache
+import_caption_directory_cache = caption_cache.import_caption_directory_cache
 load_cached_caption = caption_cache.load_cached_caption
 validate_caption_cache_coverage = caption_cache.validate_caption_cache_coverage
 
@@ -291,3 +292,142 @@ def test_question_scoped_cache_is_thread_safe_for_multi_question_video(tmp_path)
         )
         for question_id in question_ids
     ]
+
+
+def test_import_caption_directory_cache_validates_prompt_and_provenance(tmp_path):
+    input_jsonl = tmp_path / "input.jsonl"
+    prompt_yaml = tmp_path / "prompt.yaml"
+    source_prompt_yaml = tmp_path / "source_prompts.yaml"
+    source_dir = tmp_path / "qwen-captions"
+    output_dir = tmp_path / "react-cache"
+    _write_input(input_jsonl)
+    _write_prompt_yaml(prompt_yaml)
+    source_prompt_yaml.write_text("CAPTION_TEMPLATE: fixed caption prompt\n", encoding="utf-8")
+    source_dir.mkdir()
+    for question_id, response in (("video-1", "one"), ("video-2", "two")):
+        (source_dir / f"{question_id}.json").write_text(
+            json.dumps(
+                {
+                    "question_id": question_id,
+                    "response": response,
+                    "token_usage": {"total_tokens": 12},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    manifest = import_caption_directory_cache(
+        source_dir=source_dir,
+        source_prompt_yaml=source_prompt_yaml,
+        source_template_name="CAPTION_TEMPLATE",
+        input_jsonl=input_jsonl,
+        prompt_yaml=prompt_yaml,
+        output_dir=output_dir,
+        source_backend="qwen",
+        source_model="qwen3-omni-instruct",
+    )
+
+    assert manifest["question_count"] == 2
+    assert manifest["source_backend"] == "qwen"
+    assert manifest["source_model"] == "qwen3-omni-instruct"
+    cached = load_cached_caption(output_dir, "video-1", expected_prompt=PROMPT)
+    assert cached.response == "one"
+    assert cached.source_backend == "qwen"
+    assert cached.source_model == "qwen3-omni-instruct"
+    assert cached.source_token_usage == {"total_tokens": 12}
+    assert validate_caption_cache_coverage(
+        output_dir,
+        ["video-1", "video-2"],
+        expected_prompt=PROMPT,
+    )["validated"] == 2
+
+
+def test_import_caption_directory_cache_rejects_source_prompt_mismatch(tmp_path):
+    input_jsonl = tmp_path / "input.jsonl"
+    prompt_yaml = tmp_path / "prompt.yaml"
+    source_prompt_yaml = tmp_path / "source_prompts.yaml"
+    source_dir = tmp_path / "qwen-captions"
+    _write_input(input_jsonl)
+    _write_prompt_yaml(prompt_yaml)
+    source_prompt_yaml.write_text("CAPTION_TEMPLATE: different prompt\n", encoding="utf-8")
+    source_dir.mkdir()
+
+    with pytest.raises(ValueError, match="does not match"):
+        import_caption_directory_cache(
+            source_dir=source_dir,
+            source_prompt_yaml=source_prompt_yaml,
+            source_template_name="CAPTION_TEMPLATE",
+            input_jsonl=input_jsonl,
+            prompt_yaml=prompt_yaml,
+            output_dir=tmp_path / "react-cache",
+            source_backend="qwen",
+            source_model="qwen3-omni-instruct",
+        )
+
+
+def test_coverage_can_report_requested_entry_missing_from_valid_cache(tmp_path):
+    input_jsonl = tmp_path / "input.jsonl"
+    prompt_yaml = tmp_path / "prompt.yaml"
+    results = tmp_path / "results.jsonl"
+    cache_dir = tmp_path / "cache"
+    _write_input(input_jsonl)
+    _write_prompt_yaml(prompt_yaml)
+    _write_results(results, {"video-1": "one", "video-2": "two"})
+    extract_caption_cache(
+        primary_results=results,
+        fallback_results=[],
+        input_jsonl=input_jsonl,
+        prompt_yaml=prompt_yaml,
+        output_dir=cache_dir,
+    )
+
+    coverage = validate_caption_cache_coverage(
+        cache_dir,
+        ["video-1", "video-2", "video-3"],
+        expected_prompt=PROMPT,
+        allow_entry_errors=True,
+    )
+
+    assert coverage["requested"] == 3
+    assert coverage["validated"] == 2
+    assert coverage["missing"] == 1
+    assert coverage["missing_question_ids"] == ["video-3"]
+    assert coverage["invalid"] == 0
+
+
+def test_coverage_can_report_empty_entry_without_aborting_other_samples(tmp_path):
+    input_jsonl = tmp_path / "input.jsonl"
+    prompt_yaml = tmp_path / "prompt.yaml"
+    results = tmp_path / "results.jsonl"
+    cache_dir = tmp_path / "cache"
+    _write_input(input_jsonl)
+    _write_prompt_yaml(prompt_yaml)
+    _write_results(results, {"video-1": "one", "video-2": "two"})
+    extract_caption_cache(
+        primary_results=results,
+        fallback_results=[],
+        input_jsonl=input_jsonl,
+        prompt_yaml=prompt_yaml,
+        output_dir=cache_dir,
+    )
+    entry_path = cache_dir / "video-2.json"
+    entry = json.loads(entry_path.read_text(encoding="utf-8"))
+    entry["response"] = ""
+    entry_path.write_text(json.dumps(entry), encoding="utf-8")
+    manifest_path = cache_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["content_sha256"] = caption_cache._cache_content_sha256(cache_dir)[0]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    coverage = validate_caption_cache_coverage(
+        cache_dir,
+        ["video-1", "video-2"],
+        expected_prompt=PROMPT,
+        allow_entry_errors=True,
+    )
+
+    assert coverage["validated"] == 1
+    assert coverage["missing"] == 0
+    assert coverage["invalid"] == 1
+    assert coverage["invalid_question_ids"] == ["video-2"]
+    assert "response is empty" in coverage["invalid_errors"]["video-2"]
