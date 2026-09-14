@@ -13,32 +13,6 @@ fi
 
 cd "${PROJECT_DIR_OVERRIDE:-${REPO_DIR}}"
 
-PYTHON_BIN="${PYTHON_BIN:-/mnt/ceph_rbd/applications/anaconda3/envs/react-avqa-dspy/bin/python}"
-if [ ! -x "${PYTHON_BIN}" ]; then
-  echo "Python interpreter is not executable: ${PYTHON_BIN}" >&2
-  exit 1
-fi
-
-: "${ELM_API_KEY:?Set ELM_API_KEY for the GPT-4.1 planner and reflection model.}"
-: "${GEMINI_API_KEY:?Set GEMINI_API_KEY for live Gemini captioning and perception.}"
-
-export PLANNER_API_KEY="${ELM_API_KEY}"
-unset DEEPSEEK_API_KEY DEEPSEEK_TOKEN DEEPSEEK_BASE_URL DEEPSEEK_API_BASE PLANNER_API_BASE
-
-export PERCEPTION_MODEL="gemini"
-export CAPTIONER_MODEL="gemini"
-export DSPY_AVQA_ALLOWED_TOOLS="ask_caption,ask_perception"
-export GEMINI_API_BACKEND="${GEMINI_API_BACKEND:-legacy}"
-export GEMINI_RESPONSE_ERROR_SENSITIVE="false"
-
-case "${GEMINI_API_BACKEND}" in
-  legacy|dspy) ;;
-  *)
-    echo "GEMINI_API_BACKEND must be either legacy or dspy." >&2
-    exit 2
-    ;;
-esac
-
 PLANNER_CONFIG_YAML="${PLANNER_CONFIG_YAML_OVERRIDE:-${REPO_DIR}/DSPy/dspy_avqa/yamls/reasoner_elm_gpt4_1_none.yaml}"
 REFLECTION_CONFIG_YAML="${REFLECTION_CONFIG_YAML_OVERRIDE:-${REPO_DIR}/DSPy/dspy_avqa/yamls/reasoner_elm_gpt4_1_none.yaml}"
 GEPA_CONFIG_YAML="${GEPA_CONFIG_YAML_OVERRIDE:-${REPO_DIR}/DSPy/dspy_avqa/yamls/gepa_free_react_planner_2500.yaml}"
@@ -64,8 +38,39 @@ GEPA_RUN_DIR="${GEPA_RUN_DIR_OVERRIDE:-/mnt/ceph_rbd/data/avqa_project/daily_omn
 export GEPA_RUN_DIR
 
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}" .sh)"
-LOG_DIR="${LOG_DIR:-${REPO_DIR}/scripts/logs}"
-LOG_FILE="${LOG_FILE_OVERRIDE:-${LOG_DIR}/${SCRIPT_NAME}.log}"
+LOG_FILE="${LOG_FILE_OVERRIDE:-${GEPA_RUN_DIR}/${SCRIPT_NAME}.log}"
+
+mkdir -p "${GEPA_RUN_DIR}"
+mkdir -p "$(dirname "${LOG_FILE}")"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+echo "Log file: ${LOG_FILE}"
+
+PYTHON_BIN="${PYTHON_BIN:-/mnt/ceph_rbd/applications/anaconda3/envs/react-avqa-dspy/bin/python}"
+if [ ! -x "${PYTHON_BIN}" ]; then
+  echo "Python interpreter is not executable: ${PYTHON_BIN}" >&2
+  exit 1
+fi
+
+: "${ELM_API_KEY:?Set ELM_API_KEY for the GPT-4.1 planner and reflection model.}"
+: "${GEMINI_API_KEY:?Set GEMINI_API_KEY for live Gemini captioning and perception.}"
+
+export PLANNER_API_KEY="${ELM_API_KEY}"
+unset DEEPSEEK_API_KEY DEEPSEEK_TOKEN DEEPSEEK_BASE_URL DEEPSEEK_API_BASE PLANNER_API_BASE
+
+export PERCEPTION_MODEL="gemini"
+export CAPTIONER_MODEL="gemini"
+export DSPY_AVQA_ALLOWED_TOOLS="ask_caption,ask_perception"
+export GEMINI_API_BACKEND="${GEMINI_API_BACKEND:-legacy}"
+export GEMINI_RESPONSE_ERROR_SENSITIVE="false"
+
+case "${GEMINI_API_BACKEND}" in
+  legacy|dspy) ;;
+  *)
+    echo "GEMINI_API_BACKEND must be either legacy or dspy." >&2
+    exit 2
+    ;;
+esac
 
 for required_file in \
   "${PLANNER_CONFIG_YAML}" \
@@ -107,8 +112,6 @@ if [ "${FINAL_EVAL_NUM_THREADS}" -lt 1 ] || [ "${FINAL_EVAL_BATCH_SIZE}" -lt 1 ]
   echo "FINAL_EVAL_NUM_THREADS and FINAL_EVAL_BATCH_SIZE must be >= 1." >&2
   exit 2
 fi
-
-mkdir -p "$(dirname "${LOG_FILE}")"
 
 print_run_info() {
   echo "Workflow: GEPA training followed by full-v3 inference"
@@ -157,22 +160,17 @@ cmd=(
 )
 
 if [ "${DRY_RUN:-false}" = "true" ]; then
-  {
-    echo "Dry run: no optimization or inference request will be sent."
-    print_run_info
-    printf 'Command:'
-    printf ' %q' "${cmd[@]}" "$@"
-    printf '\n'
-  } | tee -a "${LOG_FILE}"
+  echo "Dry run: no optimization or inference request will be sent."
+  print_run_info
+  printf 'Command:'
+  printf ' %q' "${cmd[@]}" "$@"
+  printf '\n'
   exit 0
 fi
 
-echo "Log file: ${LOG_FILE}"
 echo "Follow live output with: tail -f ${LOG_FILE}"
 
-{
-  echo "Started: $(date -Is)"
-  print_run_info
-  "${cmd[@]}" "$@"
-  echo "Finished: $(date -Is)"
-} 2>&1 | tee -a "${LOG_FILE}"
+echo "Started: $(date -Is)"
+print_run_info
+"${cmd[@]}" "$@"
+echo "Finished: $(date -Is)"
