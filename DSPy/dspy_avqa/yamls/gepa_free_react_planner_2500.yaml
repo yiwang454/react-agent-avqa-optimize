@@ -21,7 +21,6 @@ run:
   optimized_prompt_config_yaml: ${GEPA_RUN_DIR}/planner_workflow_prompt_GEPA_daily_qa_prompt_v8_free_react_caption_in_task.yaml
   final_eval_output_jsonl: ${GEPA_RUN_DIR}/output_test.jsonl
   final_eval_output_dir: ${GEPA_RUN_DIR}
-  train_limit: 64
   gepa_reflection_template_yaml: ./DSPy/dspy_avqa/yamls/DSPy/reflection_template.yaml
   gepa_reflection_template_version: auto
   gepa_log_dir: ${GEPA_RUN_DIR}/gepa_logs
