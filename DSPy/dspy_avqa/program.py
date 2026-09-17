@@ -19,6 +19,8 @@ from .tools import (
     build_caption_prompt,
     captioner_system_prompt,
     consume_last_perception_metadata,
+    is_budget_exempt_observation,
+    omni_clip_caption,
     record_perception_metadata,
     selected_captioner_model,
     selected_perception_model,
@@ -301,6 +303,8 @@ def _canonical_tool_name(raw_tool_name: str) -> str:
     value = raw_tool_name.strip().lower()
     if value in {"ask_caption", "ask_captioner", "caption_video", "captioner"}:
         return "ask_caption"
+    if value in {"omni_clip_caption", "video_clip_caption", "clip_caption", "video_clip_qa"}:
+        return "omni_clip_caption"
     if value == "temporal_ground_video":
         return "temporal_ground_video"
     if value in {"ask_qwen_perception", "ask_gemini_perception", "ask_perception"}:
@@ -325,6 +329,10 @@ def _required_first_tool() -> str | None:
         "ask_perception",
         "ask_qwen_perception",
         "ask_gemini_perception",
+        "omni_clip_caption",
+        "video_clip_caption",
+        "clip_caption",
+        "video_clip_qa",
         "temporal_ground_video",
     }
     if normalized not in known_names:
@@ -414,15 +422,46 @@ def _caption_instruction(payload: dict[str, Any]) -> str:
 
 
 def _tool_query(payload: dict[str, Any], tool_name: str, source_question: str | None = None) -> str:
-    if tool_name == "ask_caption":
+    if tool_name in {"ask_caption", "omni_clip_caption"}:
         return _caption_instruction(payload)
     return _perceptual_question(payload, source_question=source_question)
 
 
-def _tool_args(tool_name: str, video_path: str, audio_path: str | None, query: str) -> dict[str, Any]:
+def _time_range(payload: dict[str, Any]) -> Any:
+    """Extract a planner-provided clip time range without validating it."""
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    for candidate in (
+        arguments.get("time_range"),
+        arguments.get("clip_time_range"),
+        arguments.get("timestamp_range"),
+        arguments.get("timestamps"),
+        payload.get("time_range"),
+    ):
+        if candidate is not None:
+            return candidate
+    start = arguments.get("start_time", payload.get("start_time"))
+    end = arguments.get("end_time", payload.get("end_time"))
+    if start is not None or end is not None:
+        return [start, end]
+    return None
+
+
+def _tool_args(
+    tool_name: str,
+    video_path: str,
+    audio_path: str | None,
+    query: str,
+    *,
+    time_range: Any = None,
+) -> dict[str, Any]:
     args: dict[str, Any] = {"video_path": video_path, "audio_path": audio_path}
     if tool_name == "ask_caption":
         args["caption_instruction"] = query
+    elif tool_name == "omni_clip_caption":
+        args["caption_instruction"] = query
+        args["time_range"] = time_range
     else:
         args["perceptual_question"] = query
     return args
@@ -489,9 +528,10 @@ class AVQADSPyReActProgram(dspy.Module):
         video_path: str,
         audio_path: str | None,
         tool_query: str,
+        time_range: Any = None,
         question_id: str | None = None,
         caption_call_index: int | None = None,
-    ) -> str:
+    ) -> Any:
         """Dispatch one planner tool call."""
         if tool_name == "ask_caption":
             caption_cache_dir = getattr(self.context, "caption_cache_dir", None)
@@ -543,6 +583,13 @@ class AVQADSPyReActProgram(dspy.Module):
                 video_path=video_path,
                 audio_path=audio_path,
                 caption_instruction=tool_query,
+            )
+        if tool_name == "omni_clip_caption":
+            return omni_clip_caption(
+                video_path=video_path,
+                audio_path=audio_path,
+                caption_instruction=tool_query,
+                time_range=time_range,
             )
         if tool_name == "temporal_ground_video":
             return temporal_ground_video(
@@ -600,15 +647,20 @@ class AVQADSPyReActProgram(dspy.Module):
                 max_turns=str(max_iters),
             )
 
-        for turn_idx in range(1, max_iters + 1):
-            task = current_task_text(str(turn_idx))
+        used_tool_calls = 0
+        budget_exempt_turns = 0
+        max_budget_exempt_turns = 8
+        while used_tool_calls < max_iters:
+            budget_turn_index = used_tool_calls + 1
+            trace_turn_id = len(turn_trace) + 1
+            task = current_task_text(str(budget_turn_index))
             raw_action, planner_calls, planner_error = self._plan_next_action(
                 task=task,
                 conversation_state=_conversation_state(
                     turn_trace,
                     caption_placement=self.context.caption_placement,
                 ),
-                turn_index=str(turn_idx),
+                turn_index=str(budget_turn_index),
                 max_turns=str(max_iters),
             )
             payload = _coerce_action_payload(raw_action)
@@ -616,7 +668,7 @@ class AVQADSPyReActProgram(dspy.Module):
             requested_action = action_name
             requested_tool_name = str(payload.get("tool_name") or "").strip() or None
             first_tool_enforced = False
-            if turn_idx == 1 and required_first_tool is not None:
+            if used_tool_calls == 0 and required_first_tool is not None:
                 canonical_requested_tool = (
                     _canonical_tool_name(requested_tool_name)
                     if requested_action == "tool" and requested_tool_name
@@ -636,7 +688,7 @@ class AVQADSPyReActProgram(dspy.Module):
                 final_answer = normalize_option_letter(raw_answer)
                 turn_trace.append(
                     {
-                        "turn_id": turn_idx,
+                        "turn_id": trace_turn_id,
                         "planner_action": "final",
                         "tool_name": None,
                         "raw_tool_name": None,
@@ -668,6 +720,7 @@ class AVQADSPyReActProgram(dspy.Module):
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
             tool_query = _tool_query(payload, tool_name, source_question=question)
+            tool_time_range = _time_range(payload) if tool_name == "omni_clip_caption" else None
             caption_call_index = (
                 1
                 + sum(
@@ -681,17 +734,21 @@ class AVQADSPyReActProgram(dspy.Module):
             )
             default_perception_backend = (
                 selected_captioner_model()
-                if tool_name == "ask_caption"
+                if tool_name in {"ask_caption", "omni_clip_caption"}
                 else selected_perception_model()
             )
-            tool_observation = self._call_tool(
-                tool_name=tool_name,
-                video_path=video_path,
-                audio_path=audio_path,
-                tool_query=tool_query,
-                question_id=question_id,
-                caption_call_index=caption_call_index,
-            )
+            call_tool_kwargs: dict[str, Any] = {
+                "tool_name": tool_name,
+                "video_path": video_path,
+                "audio_path": audio_path,
+                "tool_query": tool_query,
+                "question_id": question_id,
+                "caption_call_index": caption_call_index,
+            }
+            if tool_name == "omni_clip_caption":
+                call_tool_kwargs["time_range"] = tool_time_range
+            tool_observation = self._call_tool(**call_tool_kwargs)
+            budget_exempt = is_budget_exempt_observation(tool_observation)
             perception_metadata = consume_last_perception_metadata()
             perception_backend = (
                 perception_metadata.get("backend") or default_perception_backend
@@ -701,13 +758,21 @@ class AVQADSPyReActProgram(dspy.Module):
 
             turn_trace.append(
                 {
-                    "turn_id": turn_idx,
+                    "turn_id": trace_turn_id,
+                    "budget_turn_index": budget_turn_index,
                     "planner_action": "tool",
                     "tool_name": tool_name,
                     "raw_tool_name": raw_tool_name,
                     "perception_backend": perception_backend,
-                    "tool_args": _tool_args(tool_name, video_path, audio_path, tool_query),
+                    "tool_args": _tool_args(
+                        tool_name,
+                        video_path,
+                        audio_path,
+                        tool_query,
+                        time_range=tool_time_range,
+                    ),
                     "tool_observation": tool_observation,
+                    "budget_exempt": budget_exempt,
                     "perception_system_prompt": perception_metadata.get("system_prompt", ""),
                     "perception_prompt": perception_metadata.get("prompt", ""),
                     "perception_model": perception_metadata.get("model"),
@@ -750,6 +815,12 @@ class AVQADSPyReActProgram(dspy.Module):
                     "video_id": video_id,
                 }
             )
+            if budget_exempt:
+                budget_exempt_turns += 1
+                if budget_exempt_turns >= max_budget_exempt_turns:
+                    break
+            else:
+                used_tool_calls += 1
 
         task = current_task_text("final")
         fallback_state = (

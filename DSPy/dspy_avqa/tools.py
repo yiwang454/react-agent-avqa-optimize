@@ -6,6 +6,7 @@ import base64
 import json
 import mimetypes
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,25 @@ SUPPORTED_PERCEPTION_MODELS = {"qwen", "gemini"}
 _PERCEPTION_METADATA_STATE = threading.local()
 _DSPY_GEMINI_PROMPT_LOCK = threading.Lock()
 _PRINTED_DSPY_GEMINI_PROMPT = False
+BUDGET_EXEMPT_KEY = "_dspy_avqa_budget_exempt"
 
 
 class GeminiResponseCircuitBreak(BaseException):
     """Fatal Gemini-only circuit breaker that bypasses normal per-sample error saves."""
+
+
+def invalid_tool_input(message: str) -> dict[str, Any]:
+    """Return a retryable tool observation that should not spend tool budget."""
+    return {
+        "error": message,
+        "retryable": True,
+        BUDGET_EXEMPT_KEY: True,
+    }
+
+
+def is_budget_exempt_observation(observation: Any) -> bool:
+    """Return whether a structured observation is exempt from tool budget."""
+    return isinstance(observation, dict) and observation.get(BUDGET_EXEMPT_KEY) is True
 
 
 def _gemini_response_error_sensitive() -> bool:
@@ -631,6 +647,145 @@ def ask_perception(
     """Tool: ask the selected backend for perceptual evidence from audio-video input."""
     prompt = build_perception_prompt(perceptual_question, start_time, end_time)
     return call_perception(video_path=video_path, audio_path=audio_path, prompt=prompt)
+
+
+def _coerce_time_range(time_range: Any) -> tuple[float, float] | dict[str, Any]:
+    try:
+        start = float(time_range[0])
+        end = float(time_range[1])
+    except (TypeError, ValueError, IndexError) as exc:
+        return invalid_tool_input(
+            "Invalid clip time_range: expected two numeric values "
+            f"(start, end). Details: {exc}"
+        )
+    if end <= start:
+        return invalid_tool_input(
+            "Invalid clip duration: end <= start "
+            f"({end:g} <= {start:g}). Choose a new time_range whose end is "
+            "greater than its start."
+        )
+    return start, end
+
+
+def legalize_time_range(t_start: float, t_end: float, video_end: float) -> tuple[float, float]:
+    """Return a valid clip range while preserving fully out-of-bounds duration."""
+    original_start = float(t_start)
+    original_end = float(t_end)
+    video_end = float(video_end)
+    original_duration = original_end - original_start
+
+    if video_end <= 0:
+        raise ValueError(f"Video duration must be positive, got {video_end}")
+    if original_duration <= 0:
+        raise ValueError(
+            "Clip end time must be greater than start time, got "
+            f"({original_start}, {original_end})"
+        )
+
+    if original_start >= video_end:
+        legal_end = video_end
+        legal_start = max(0.0, video_end - original_duration)
+    elif original_end <= 0:
+        legal_start = 0.0
+        legal_end = min(original_duration, video_end)
+    else:
+        legal_start = max(original_start, 0.0)
+        legal_end = min(original_end, video_end)
+
+    if legal_end <= legal_start:
+        raise ValueError(
+            f"Could not construct a valid clip range from ({original_start}, "
+            f"{original_end}) for a {video_end}-second video"
+        )
+    return legal_start, legal_end
+
+
+def cut_video_clip(in_path: str, out_path: str, t_start: float, t_end: float) -> tuple[float, float]:
+    """Cut a local video clip and return the legalized source time range."""
+    try:
+        from moviepy import VideoFileClip
+    except ImportError:
+        from moviepy.editor import VideoFileClip  # type: ignore[no-redef]
+
+    with VideoFileClip(in_path) as video:
+        legal_start, legal_end = legalize_time_range(t_start, t_end, video.duration)
+        subclip_method = getattr(video, "subclipped", None) or getattr(video, "subclip")
+        sub = subclip_method(legal_start, legal_end)
+        sub.write_videofile(out_path, codec="libx264", audio=False, logger=None)
+    return legal_start, legal_end
+
+
+def build_omni_clip_caption_prompt(
+    caption_instruction: str | None,
+    *,
+    start_time: float,
+    end_time: float,
+) -> str:
+    """Build a clip-focused caption prompt for the captioner backend."""
+    instruction = str(caption_instruction or "").strip()
+    if not instruction:
+        instruction = (
+            "Produce a detailed factual caption of this short video clip, focusing "
+            "on visible actions, objects, scene changes, and temporal order."
+        )
+    return (
+        "You are analyzing a short VIDEO CLIP cut from a longer video.\n"
+        f"The clip corresponds to roughly {start_time:.2f}s to {end_time:.2f}s "
+        "in the original video.\n"
+        "Answer only about what is visible in this clip. If an event is not visible "
+        "inside the clip, say it is not visible in this clip.\n\n"
+        f"Caption instruction:\n{instruction}"
+    )
+
+
+def omni_clip_caption(
+    video_path: str,
+    time_range: Any,
+    caption_instruction: str | None = None,
+    audio_path: str | None = None,
+) -> str | dict[str, Any]:
+    """Tool: caption a selected video clip using the configured captioner backend."""
+    coerced_range = _coerce_time_range(time_range)
+    if isinstance(coerced_range, dict):
+        return coerced_range
+    original_start, original_end = coerced_range
+
+    cache_dir = Path(os.environ.get("DSPY_AVQA_CLIP_CACHE_DIR", "Cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="omni_clip_", suffix=".mp4", dir=cache_dir, delete=False
+        ) as clip_file:
+            clip_path = clip_file.name
+        start, end = cut_video_clip(video_path, clip_path, original_start, original_end)
+        prompt = build_omni_clip_caption_prompt(
+            caption_instruction,
+            start_time=start,
+            end_time=end,
+        )
+        if selected_captioner_model() == "gemini":
+            return call_gemini_perception(
+                video_path=clip_path,
+                audio_path=None,
+                prompt=prompt,
+                system_prompt=captioner_system_prompt(),
+                env_prefix="CAPTIONER_GEMINI",
+            )
+        return call_qwen_perception(
+            video_path=clip_path,
+            audio_path=None,
+            prompt=prompt,
+            system_prompt=captioner_system_prompt(),
+            env_prefix="CAPTIONER_QWEN",
+        )
+    finally:
+        if clip_path and os.path.exists(clip_path):
+            try:
+                os.remove(clip_path)
+            except OSError:
+                pass
+
 
 def temporal_ground_video(
     video_path: str,

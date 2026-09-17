@@ -1,0 +1,16 @@
+task:
+  video_only: true
+  batch_size: 1
+  timeout: 180
+  max_retries: 4
+  print_first_prompt: true
+  retry_delay_s: 30
+
+model:
+  gemini_model: gemini-2.5-flash
+
+sampling_params:
+  temperature: 0.0
+  top_p: 1.0
+  top_k: 0
+  max_tokens: 4096

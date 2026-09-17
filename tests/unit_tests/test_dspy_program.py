@@ -46,8 +46,13 @@ def _install_program_import_stubs() -> None:
     tools = types.ModuleType("dspy_avqa.tools")
     tools.ask_caption = lambda *args, **kwargs: ""
     tools.ask_perception = lambda *args, **kwargs: ""
+    tools.omni_clip_caption = lambda *args, **kwargs: ""
     tools.build_caption_prompt = lambda instruction=None: str(instruction or "").strip()
     tools.captioner_system_prompt = lambda: ""
+    tools.is_budget_exempt_observation = (
+        lambda observation: isinstance(observation, dict)
+        and observation.get("_dspy_avqa_budget_exempt") is True
+    )
     tools._metadata = {}
     tools.record_perception_metadata = lambda **kwargs: tools._metadata.update(kwargs)
     def consume_metadata():
@@ -733,3 +738,97 @@ def test_max_turns_is_rendered_and_forced_final_is_outside_tool_budget(tmp_path)
     assert "Current decision: 1" in planner_inputs[0][0]
     assert "Maximum tool calls: 3" in planner_inputs[0][0]
     assert "Current decision: final" in planner_inputs[-1][0]
+
+
+def test_omni_clip_caption_invalid_input_does_not_spend_tool_budget(tmp_path):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    _write_planner_prompt_yaml(prompt_yaml, include_video_description=False)
+    prompt_yaml.write_text(
+        "tools:\n  allowed:\n    - omni_clip_caption\n    - ask_perception\n"
+        + prompt_yaml.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    prompt_config.load_prompt_config(prompt_yaml)
+
+    context = _FakeRuntimeContext()
+    context.allowed_tools = ("omni_clip_caption", "ask_perception")
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    planner_inputs = []
+    tool_calls = []
+
+    def fake_plan_next_action(*, task, conversation_state, turn_index, max_turns):
+        planner_inputs.append((turn_index, conversation_state))
+        if len(planner_inputs) == 1:
+            return (
+                '{"action":"tool","tool_name":"omni_clip_caption",'
+                '"arguments":{"time_range":[5,5],"caption_instruction":"describe this clip"}}',
+                [],
+                None,
+            )
+        if len(planner_inputs) == 2:
+            assert turn_index == "1"
+            assert "Invalid clip duration" in conversation_state
+            return (
+                '{"action":"tool","tool_name":"ask_perception",'
+                '"arguments":{"perceptual_question":"recover with full-video evidence"}}',
+                [],
+                None,
+            )
+        if turn_index == "2":
+            return (
+                '{"action":"tool","tool_name":"ask_perception",'
+                '"arguments":{"perceptual_question":"more evidence"}}',
+                [],
+                None,
+            )
+        return '{"action":"final","answer":"B"}', [], None
+
+    def fake_call_tool(**kwargs):
+        tool_calls.append(kwargs["tool_name"])
+        if kwargs["tool_name"] == "omni_clip_caption":
+            return {
+                "error": "Invalid clip duration: end <= start",
+                "retryable": True,
+                "_dspy_avqa_budget_exempt": True,
+            }
+        return "observation"
+
+    avqa_program._plan_next_action = fake_plan_next_action
+    avqa_program._call_tool = fake_call_tool
+    result = avqa_program.forward(
+        question="question",
+        options_json='["first", "second"]',
+        video_path="/tmp/video.mp4",
+        max_turns=2,
+    )
+
+    assert result["answer"] == "B"
+    assert tool_calls == ["omni_clip_caption", "ask_perception", "ask_perception"]
+    assert [turn_id for turn_id, _ in planner_inputs] == ["1", "1", "2", "final"]
+    assert result["turn_trace"][0]["budget_exempt"] is True
+    assert result["turn_trace"][1]["budget_turn_index"] == 1
+    assert result["turn_trace"][2]["budget_turn_index"] == 2
+
+
+def test_omni_clip_caption_tool_args_include_time_range():
+    payload = {
+        "arguments": {
+            "clip_time_range": [12, 15],
+            "caption_instruction": "describe the interaction",
+        }
+    }
+
+    assert program._tool_query(payload, "omni_clip_caption") == "describe the interaction"
+    assert program._time_range(payload) == [12, 15]
+    assert program._tool_args(
+        "omni_clip_caption",
+        "/tmp/video.mp4",
+        None,
+        "describe",
+        time_range=[12, 15],
+    ) == {
+        "video_path": "/tmp/video.mp4",
+        "audio_path": None,
+        "caption_instruction": "describe",
+        "time_range": [12, 15],
+    }
