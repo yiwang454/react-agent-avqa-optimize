@@ -55,6 +55,18 @@ class PerceptionCall:
     option_answer_match: bool
 
     @property
+    def verbatim_match(self) -> bool:
+        return bool(self.original_question) and (
+            self.original_question in self.perception_question
+        )
+
+    @property
+    def casefold_verbatim_match(self) -> bool:
+        return bool(self.original_question) and (
+            self.original_question.casefold() in self.perception_question.casefold()
+        )
+
+    @property
     def edge_match(self) -> bool:
         return self.first_edge_match or self.last_edge_match
 
@@ -227,6 +239,8 @@ def build_summary(
     perception_question_ids = {call.question_id for call in calls}
 
     predicates = {
+        "verbatim_original_question": lambda call: call.verbatim_match,
+        "casefold_verbatim_original_question": lambda call: call.casefold_verbatim_match,
         "exact_original_question": lambda call: call.exact_match,
         "first_edge": lambda call: call.first_edge_match,
         "last_edge": lambda call: call.last_edge_match,
@@ -285,7 +299,9 @@ def percent_text(item: dict[str, Any]) -> str:
 def render_markdown(source: Path, edge_word_count: int, summary: dict[str, Any]) -> str:
     rows = []
     labels = {
-        "exact_original_question": "Exact normalized original question",
+        "verbatim_original_question": "Verbatim original question (case-sensitive)",
+        "casefold_verbatim_original_question": "Verbatim original question (case-insensitive)",
+        "exact_original_question": "Full normalized original question",
         "first_edge": f"First {edge_word_count} words (includes exact)",
         "last_edge": f"Last {edge_word_count} words (includes exact)",
         "first_or_last_edge": f"First or last {edge_word_count} words (includes exact)",
@@ -300,11 +316,23 @@ def render_markdown(source: Path, edge_word_count: int, summary: dict[str, Any])
             f"{percent_text(value['perception_calls'])} |"
         )
     tool_usage = summary["tool_usage"]
-    tool_rows = [
-        f"| `{tool_name}` | {call_count} | "
-        f"{tool_usage['samples_by_tool'].get(tool_name, 0)} |"
-        for tool_name, call_count in tool_usage["calls_by_tool"].items()
-    ]
+    tool_rows = []
+    for tool_name, call_count in tool_usage["calls_by_tool"].items():
+        sample_count = tool_usage["samples_by_tool"].get(tool_name, 0)
+        call_share = (
+            100 * call_count / tool_usage["total_tool_calls"]
+            if tool_usage["total_tool_calls"]
+            else 0.0
+        )
+        sample_coverage = (
+            100 * sample_count / summary["total_samples"]
+            if summary["total_samples"]
+            else 0.0
+        )
+        tool_rows.append(
+            f"| `{tool_name}` | {call_count} | {call_share:.2f}% | "
+            f"{sample_count} | {sample_coverage:.2f}% |"
+        )
     return "\n".join(
         [
             "# ReAct original-question usage audit",
@@ -320,8 +348,8 @@ def render_markdown(source: Path, edge_word_count: int, summary: dict[str, Any])
             f"Total tool calls: {tool_usage['total_tool_calls']}; "
             f"budget-exempt calls: {tool_usage['budget_exempt_calls']}.",
             "",
-            "| Tool | Calls | Samples using tool |",
-            "| --- | ---: | ---: |",
+            "| Tool | Calls | Share of tool calls | Samples using tool | Sample coverage |",
+            "| --- | ---: | ---: | ---: | ---: |",
             *tool_rows,
             "",
             "## Perception-question reuse",
@@ -351,6 +379,8 @@ def write_calls_csv(path: Path, calls: list[PerceptionCall]) -> None:
     fieldnames = [
         "question_id",
         "turn_id",
+        "verbatim_match",
+        "casefold_verbatim_match",
         "exact_match",
         "first_edge_match",
         "last_edge_match",
@@ -366,6 +396,8 @@ def write_calls_csv(path: Path, calls: list[PerceptionCall]) -> None:
         writer.writeheader()
         for call in calls:
             row = asdict(call)
+            row["verbatim_match"] = call.verbatim_match
+            row["casefold_verbatim_match"] = call.casefold_verbatim_match
             row["edge_match"] = call.edge_match
             row["detected"] = call.detected
             writer.writerow(row)
