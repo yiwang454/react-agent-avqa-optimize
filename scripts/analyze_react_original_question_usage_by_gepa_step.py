@@ -25,6 +25,7 @@ from analyze_react_original_question_usage import (
     contains_words,
     extract_explicit_option,
     normalized_words,
+    summarize_tool_usage,
 )
 
 
@@ -128,6 +129,7 @@ def main() -> int:
     metric_calls = metric_calls_by_program(args.gepa_state)
     frontier: dict[int, tuple[int, int, Path, dict[str, Any]]] = {}
     trend: list[dict[str, Any]] = []
+    tool_usage_trend: list[dict[str, Any]] = []
     all_calls: list[dict[str, Any]] = []
 
     for iteration in sorted(records):
@@ -159,6 +161,20 @@ def main() -> int:
                 )
                 all_calls.append(row)
         summary = build_summary([item[0] for item in questions], current_calls)
+        tool_usage = summarize_tool_usage(
+            [item[0] for item in questions],
+            (
+                (questions[task_index][0], output.get("turn_trace"))
+                for task_index, (_, _, _, output) in sorted(frontier.items())
+            ),
+        )
+        tool_usage_trend.append({"gepa_iteration": iteration, **tool_usage})
+        calls_by_tool = tool_usage["calls_by_tool"]
+        samples_by_tool = tool_usage["samples_by_tool"]
+        known_tool_calls = sum(
+            calls_by_tool.get(name, 0)
+            for name in ("ask_caption", "ask_perception", "omni_clip_caption")
+        )
         metrics = summary["metrics"]
         programs = sorted({record[1] for record in records[iteration]})
         trend.append(
@@ -175,6 +191,15 @@ def main() -> int:
                 ),
                 "samples_with_ask_perception": summary["samples_with_perception"],
                 "ask_perception_calls": summary["total_perception_calls"],
+                "total_tool_calls": tool_usage["total_tool_calls"],
+                "ask_caption_calls": calls_by_tool.get("ask_caption", 0),
+                "omni_clip_caption_calls": calls_by_tool.get("omni_clip_caption", 0),
+                "samples_with_omni_clip_caption": samples_by_tool.get(
+                    "omni_clip_caption", 0
+                ),
+                "other_tool_calls": tool_usage["total_tool_calls"]
+                - known_tool_calls,
+                "budget_exempt_calls": tool_usage["budget_exempt_calls"],
                 "exact_match_calls": metrics["exact_original_question"]["perception_calls"]["count"],
                 "first_edge_match_calls": metrics["first_edge"]["perception_calls"]["count"],
                 "last_edge_match_calls": metrics["last_edge"]["perception_calls"]["count"],
@@ -208,6 +233,20 @@ def main() -> int:
     (output_dir / "record_inventory.json").write_text(
         json.dumps(inventory, indent=2) + "\n", encoding="utf-8"
     )
+    (output_dir / "tool_usage_by_step.json").write_text(
+        json.dumps(tool_usage_trend, indent=2) + "\n", encoding="utf-8"
+    )
+    tool_table = [
+        "| GEPA iteration | Total tool calls | `ask_caption` | `ask_perception` | `omni_clip_caption` | Samples using clip caption | Other | Budget-exempt |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in trend:
+        tool_table.append(
+            "| {gepa_iteration} | {total_tool_calls} | {ask_caption_calls} | "
+            "{ask_perception_calls} | {omni_clip_caption_calls} | "
+            "{samples_with_omni_clip_caption}/{total} | {other_tool_calls} | "
+            "{budget_exempt_calls} |".format(total=len(questions), **row)
+        )
     table = [
         "| GEPA iteration | Program adding best output | Metric calls at discovery | Updated tasks vs c0 | Samples using `ask_perception` | Calls | Exact | First 3 words | Last 3 words | First or last 3 words | Broad combined |",
         "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -245,11 +284,16 @@ def main() -> int:
             "Matching uses the companion analyzer: exact normalized-question containment is the strict "
             "lower bound; first/last-three-word matches and the broad combined value are lexical heuristics.",
             "",
+            "## Tool usage",
+            "",
+            *tool_table,
+            "",
             "## Trend",
             "",
             *table,
             "",
-            "Artifacts: `trend.csv`, `perception_calls_by_step.csv`, and `record_inventory.json`.",
+            "Artifacts: `trend.csv`, `tool_usage_by_step.json`, "
+            "`perception_calls_by_step.csv`, and `record_inventory.json`.",
             "",
         ]
     )

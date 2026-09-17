@@ -21,7 +21,7 @@ import csv
 import json
 import random
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -126,15 +126,49 @@ def iter_records(path: Path) -> Iterable[dict[str, Any]]:
             yield record
 
 
-def analyze(path: Path, edge_word_count: int) -> tuple[list[str], list[PerceptionCall]]:
+def summarize_tool_usage(
+    question_ids: list[str], traces: Iterable[tuple[str, Any]]
+) -> dict[str, Any]:
+    call_counts: Counter[str] = Counter()
+    sample_ids_by_tool: dict[str, set[str]] = defaultdict(set)
+    samples_with_any_tool: set[str] = set()
+    budget_exempt_calls = 0
+    for question_id, trace in traces:
+        for turn in trace or []:
+            if not isinstance(turn, dict):
+                continue
+            tool_name = str(turn.get("tool_name") or "").strip()
+            if not tool_name:
+                continue
+            call_counts[tool_name] += 1
+            sample_ids_by_tool[tool_name].add(question_id)
+            samples_with_any_tool.add(question_id)
+            budget_exempt_calls += bool(turn.get("budget_exempt"))
+    return {
+        "total_tool_calls": sum(call_counts.values()),
+        "samples_with_any_tool": len(samples_with_any_tool),
+        "samples_without_any_tool": len(question_ids) - len(samples_with_any_tool),
+        "budget_exempt_calls": budget_exempt_calls,
+        "calls_by_tool": dict(sorted(call_counts.items())),
+        "samples_by_tool": {
+            name: len(sample_ids_by_tool[name]) for name in sorted(sample_ids_by_tool)
+        },
+    }
+
+
+def analyze(
+    path: Path, edge_word_count: int
+) -> tuple[list[str], list[PerceptionCall], dict[str, Any]]:
     question_ids: list[str] = []
     calls: list[PerceptionCall] = []
+    traces: list[tuple[str, Any]] = []
     for record in iter_records(path):
         question_data = record.get("question_data") or {}
         question_id = str(question_data.get("question_id") or "").strip()
         if not question_id:
             raise ValueError("Every result row must have question_data.question_id")
         question_ids.append(question_id)
+        traces.append((question_id, question_data.get("turn_trace")))
         original_question = str(question_data.get("question") or "").strip()
         original_words = normalized_words(original_question)
         for turn_index, turn in enumerate(question_data.get("turn_trace") or [], 1):
@@ -171,7 +205,7 @@ def analyze(path: Path, edge_word_count: int) -> tuple[list[str], list[Perceptio
             item for item, count in Counter(question_ids).items() if count > 1
         ]
         raise ValueError(f"Duplicate question IDs: {duplicates[:5]}")
-    return question_ids, calls
+    return question_ids, calls, summarize_tool_usage(question_ids, traces)
 
 
 def metric(count: int, denominator: int) -> dict[str, int | float]:
@@ -265,6 +299,12 @@ def render_markdown(source: Path, edge_word_count: int, summary: dict[str, Any])
             f"{percent_text(value['samples_with_perception'])} | "
             f"{percent_text(value['perception_calls'])} |"
         )
+    tool_usage = summary["tool_usage"]
+    tool_rows = [
+        f"| `{tool_name}` | {call_count} | "
+        f"{tool_usage['samples_by_tool'].get(tool_name, 0)} |"
+        for tool_name, call_count in tool_usage["calls_by_tool"].items()
+    ]
     return "\n".join(
         [
             "# ReAct original-question usage audit",
@@ -274,6 +314,17 @@ def render_markdown(source: Path, edge_word_count: int, summary: dict[str, Any])
             f"- Total samples: {summary['total_samples']}",
             f"- Samples calling `ask_perception`: {summary['samples_with_perception']}",
             f"- Total `ask_perception` calls: {summary['total_perception_calls']}",
+            "",
+            "## Tool usage",
+            "",
+            f"Total tool calls: {tool_usage['total_tool_calls']}; "
+            f"budget-exempt calls: {tool_usage['budget_exempt_calls']}.",
+            "",
+            "| Tool | Calls | Samples using tool |",
+            "| --- | ---: | ---: |",
+            *tool_rows,
+            "",
+            "## Perception-question reuse",
             "",
             "| Detection signal | All samples | Samples with perception | Perception calls |",
             "| --- | ---: | ---: | ---: |",
@@ -339,7 +390,7 @@ def main() -> int:
     source = args.input_jsonl.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    question_ids, calls = analyze(source, args.edge_word_count)
+    question_ids, calls, tool_usage = analyze(source, args.edge_word_count)
     edge_only = [call for call in calls if call.edge_match and not call.exact_match]
     summary = build_summary(question_ids, calls)
     summary.update(
@@ -348,6 +399,7 @@ def main() -> int:
             "edge_word_count": args.edge_word_count,
             "review_seed": args.review_seed,
             "review_sample_size": min(args.review_sample_size, len(edge_only)),
+            "tool_usage": tool_usage,
         }
     )
     rng = random.Random(args.review_seed)
