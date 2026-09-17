@@ -14,7 +14,12 @@ from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 from .deepseek_dspy_lm import DeepSeekDSPyLM, FIXED_PLANNER_SYSTEM_PROMPT, append_planner_call_trace
 from .prompt_config import prompt_config, prompt_value
 
-SUPPORTED_TOOL_NAMES = ("ask_caption", "ask_perception", "temporal_ground_video")
+SUPPORTED_TOOL_NAMES = (
+    "ask_caption",
+    "ask_perception",
+    "omni_clip_caption",
+    "temporal_ground_video",
+)
 _SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
 CAPTION_PLACEMENT_CHOICES = ("conversation_state", "task")
 _CAPTION_PLACEMENT_SET = set(CAPTION_PLACEMENT_CHOICES)
@@ -152,6 +157,8 @@ def resolve_allowed_tools(value: str | Iterable[str] | None = None) -> tuple[str
             normalized_name = "ask_caption"
         if normalized_name in {"ask_qwen_perception", "ask_gemini_perception"}:
             normalized_name = "ask_perception"
+        if normalized_name in {"video_clip_caption", "clip_caption", "video_clip_qa"}:
+            normalized_name = "omni_clip_caption"
         if normalized_name not in _SUPPORTED_TOOL_SET:
             raise ValueError(
                 f"Unsupported DSPy AVQA tool {tool_name!r}; "
