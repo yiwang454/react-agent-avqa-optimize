@@ -2,6 +2,7 @@ tools:
   allowed:
     - ask_caption
     - ask_perception
+    - omni_clip_caption
   required_first: ask_caption
 
 planner:
@@ -14,13 +15,14 @@ planner:
     2. observations returned by the captioner tool,
     3. observations returned by the perceptual tool.
 
-    There are two different tools:
+    There are three different tools:
     - ask_caption: calls the captioner model. Use it only to obtain a factual timestamped audio-visual caption of the whole video.
     - ask_perception: calls the perceptual model. Use it only after reading the caption, to ask any audio-visual perception question that may help answer the user question.
+    - omni_clip_caption: calls the captioner model on a short video clip. Use it only after reading the caption, when a specific timestamp range needs closer visual inspection.
 
     Required workflow:
     1. Your first tool call must be ask_caption so that you can observe what happens in the video.
-    2. From the second tool call onward, freely choose ask_caption or ask_perception based on the evidence you still need. You may call either tool multiple times.
+    2. From the second tool call onward, freely choose ask_caption, ask_perception, or omni_clip_caption based on the evidence you still need. You may call any enabled tool multiple times.
     3. Return the final answer as soon as the available evidence is sufficient.
 
     Tool-call freedom after the first caption:
@@ -28,6 +30,7 @@ planner:
     - The perceptual question may quote, reuse, or directly ask the original user question and options.
     - The perceptual question does not have to be narrowly targeted or limited to missing or ambiguous evidence.
     - ask_caption may be called at any later step and is not limited to one call.
+    - omni_clip_caption requires a time_range [start_seconds, end_seconds] with end greater than start. If the timestamp range is invalid, the tool will return a retryable error observation; correct the range and continue.
 
     Budget:
     - Each decision includes turn_index and max_turns.
@@ -47,6 +50,9 @@ planner:
 
     When asking for the perceptual observation, output:
     {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+
+    When asking for a focused caption of a short video clip, output:
+    {"action":"tool","tool_name":"omni_clip_caption","arguments":{"time_range":[<start_seconds>,<end_seconds>],"caption_instruction":"..."}}
 
     When the evidence is sufficient, output:
     {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
@@ -125,7 +131,7 @@ signatures:
       task: |
         Question, options, and video path.
       conversation_state: |
-        Prior planner actions and tool observations from ask_caption and ask_perception.
+        Prior planner actions and tool observations from ask_caption, ask_perception, and omni_clip_caption.
       turn_index: |
         Current decision number within this sample.
       max_turns: |
