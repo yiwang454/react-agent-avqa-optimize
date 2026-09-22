@@ -1,0 +1,8 @@
+model:
+  provider: elm_gpt
+  name: o3
+sampling_params:
+  temperature: 1
+  max_tokens: null
+  reasoning_effort: high
+  seed: null

@@ -84,6 +84,21 @@ def test_reasoner_yaml_can_configure_reflection_lm(monkeypatch):
     assert experiment_config.os.environ["GEPA_REFLECTION_SEED"] == "1234"
 
 
+def test_reasoner_yaml_null_sampling_values_explicitly_omit_planner_parameters(monkeypatch):
+    monkeypatch.setenv("PLANNER_OUTPUT_SEQ_LEN", "32768")
+    monkeypatch.setenv("PLANNER_SEED", "1234")
+
+    payload = experiment_config.load_reasoner_config_yaml(
+        YAML_DIR / "reasoner_elm_o3_high_server_default.yaml",
+        role="planner",
+    )
+
+    assert payload["sampling_params"]["max_tokens"] is None
+    assert payload["sampling_params"]["seed"] is None
+    assert experiment_config.os.environ["PLANNER_OUTPUT_SEQ_LEN"] == "EMPTY"
+    assert experiment_config.os.environ["PLANNER_SEED"] == "EMPTY"
+
+
 def test_reasoner_yaml_rejects_unknown_keys(tmp_path):
     path = tmp_path / "bad.yaml"
     path.write_text("model:\n  name: gpt-4.1\n  api_key: do-not-allow\n", encoding="utf-8")

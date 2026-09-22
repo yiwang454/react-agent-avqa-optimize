@@ -12,6 +12,7 @@ import dspy
 
 from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 from .deepseek_dspy_lm import DeepSeekDSPyLM, FIXED_PLANNER_SYSTEM_PROMPT, append_planner_call_trace
+from .gemini_dspy_lm import GeminiDSPyLM
 from .prompt_config import prompt_config, prompt_value
 
 SUPPORTED_TOOL_NAMES = (
@@ -27,7 +28,8 @@ CAPTION_CACHE_SCOPE_CHOICES = ("all", "first_call_only")
 _CAPTION_CACHE_SCOPE_SET = set(CAPTION_CACHE_SCOPE_CHOICES)
 PLANNER_PROVIDER_DEEPSEEK = "deepseek"
 PLANNER_PROVIDER_ELM_GPT = "elm_gpt"
-_PLANNER_PROVIDER_SET = {PLANNER_PROVIDER_DEEPSEEK, PLANNER_PROVIDER_ELM_GPT}
+PLANNER_PROVIDER_GEMINI = "gemini"
+_PLANNER_PROVIDER_SET = {PLANNER_PROVIDER_DEEPSEEK, PLANNER_PROVIDER_ELM_GPT, PLANNER_PROVIDER_GEMINI}
 
 
 def default_planner_workflow_prompt() -> str:
@@ -72,6 +74,20 @@ def pick_optional_int_env(*keys: str) -> int | None:
     return None
 
 
+def pick_planner_max_tokens_env() -> int | None:
+    """Return the planner output cap, preserving the legacy default when unset.
+
+    ``EMPTY`` is written by an explicit ``max_tokens: null`` reasoner YAML and
+    means that the OpenAI-compatible request must omit ``max_tokens`` entirely.
+    """
+    value = os.environ.get("PLANNER_OUTPUT_SEQ_LEN")
+    if value is None:
+        return 2048
+    if not value.strip() or value.strip().upper() == "EMPTY":
+        return None
+    return int(value)
+
+
 def normalize_planner_provider(value: str | None = None) -> str:
     """Resolve and validate the planner provider selected by the environment."""
     provider = (value or os.environ.get("PLANNER_PROVIDER") or PLANNER_PROVIDER_DEEPSEEK).strip().lower()
@@ -87,6 +103,8 @@ def resolve_planner_model(provider: str) -> str:
     """Resolve a provider-specific planner model while retaining legacy fallback."""
     if provider == PLANNER_PROVIDER_ELM_GPT:
         return pick_env("PLANNER_MODEL", "DEEPSEEK_MODEL", default="gpt-5-mini")
+    if provider == PLANNER_PROVIDER_GEMINI:
+        return pick_env("PLANNER_MODEL", "GEMINI_MODEL", default="gemini-2.5-flash")
     return pick_env("DEEPSEEK_MODEL", "PLANNER_MODEL", default="deepseek-v4-pro")
 
 
@@ -227,8 +245,8 @@ class AVQARuntimeContext:
     planner_repetition_penalty: float = field(
         default_factory=lambda: float(os.environ.get("PLANNER_REPETITION_PENALTY", "1.05"))
     )
-    planner_max_tokens: int = field(
-        default_factory=lambda: int(os.environ.get("PLANNER_OUTPUT_SEQ_LEN", "2048"))
+    planner_max_tokens: int | None = field(
+        default_factory=pick_planner_max_tokens_env
     )
     planner_max_input_seq_len: int = field(
         default_factory=lambda: int(os.environ.get("PLANNER_MAX_INPUT_SEQ_LEN", "30000"))
@@ -467,11 +485,12 @@ def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
     lm_kwargs: dict[str, Any] = {
         "model_type": "chat",
         "api_key": api_key,
-        "max_tokens": context.planner_max_tokens,
         "timeout": context.planner_timeout,
         "num_retries": context.planner_max_retries,
         "cache": False,
     }
+    if context.planner_max_tokens is not None:
+        lm_kwargs["max_tokens"] = context.planner_max_tokens
     if context.planner_provider == PLANNER_PROVIDER_DEEPSEEK:
         lm_kwargs["api_base"] = context.planner_api_base
     if _env_is_set("PLANNER_TEMPERATURE"):
@@ -539,6 +558,26 @@ def _configure_custom_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
     return lm
 
 
+def _configure_gemini_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
+    """Configure the planner through the same native Gemini API used by tools."""
+    api_key = pick_env("GEMINI_API_KEY", "PLANNER_API_KEY", default="EMPTY")
+    base_url = pick_env("GEMINI_BASE_URL", "PLANNER_API_BASE", default="")
+    if api_key == "EMPTY" or not base_url:
+        raise ValueError("Gemini planner requires GEMINI_API_KEY and GEMINI_BASE_URL.")
+    lm = GeminiDSPyLM(
+        model=context.planner_model, api_key=api_key, base_url=base_url,
+        provider=pick_env("GEMINI_PROVIDER", default="apiplus"),
+        auth_mode=pick_env("GEMINI_AUTH_MODE", default="bearer"),
+        timeout=context.planner_timeout, max_retries=context.planner_max_retries,
+        retry_delay_s=context.planner_retry_delay_s, temperature=context.planner_temperature,
+        top_p=context.planner_top_p, max_tokens=context.planner_max_tokens or 32768,
+        seed=context.planner_seed,
+        include_thoughts=env_flag("PLANNER_GEMINI_INCLUDE_THOUGHTS", "false"),
+    )
+    dspy.configure(lm=lm)
+    return lm
+
+
 def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
     """Configure DSPy's planner LM.
 
@@ -548,6 +587,8 @@ def configure_deepseek_lm(context: AVQARuntimeContext) -> dspy.BaseLM:
     an API base URL. Set DSPY_PLANNER_LM_BACKEND=custom only for the legacy
     one-completion DeepSeekDSPyLM wrapper.
     """
+    if context.planner_provider == PLANNER_PROVIDER_GEMINI:
+        return _configure_gemini_lm(context)
     backend = os.environ.get("DSPY_PLANNER_LM_BACKEND", "native_litellm").strip().lower()
     if backend in {"custom", "deepseek_custom", "legacy"}:
         if context.planner_provider != PLANNER_PROVIDER_DEEPSEEK:

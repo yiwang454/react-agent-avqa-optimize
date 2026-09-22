@@ -246,7 +246,7 @@ def call_gemini_messages(
     temperature: float = 0.6,
     gemini_seed: Optional[int] = None,
     top_p: float = 0.95,
-    top_k: int = 20,
+    top_k: int | None = 20,
     max_tokens: int = 1024,
     retry_degenerate_response: bool = False,
 ) -> Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], str]:
@@ -267,10 +267,11 @@ def call_gemini_messages(
         "generationConfig": {
             "temperature": temperature,
             "topP": top_p,
-            "topK": top_k,
             "maxOutputTokens": max_tokens,
         },
     }
+    if top_k is not None:
+        data["generationConfig"]["topK"] = top_k
     if gemini_seed is not None:
         data["generationConfig"]["seed"] = gemini_seed
     if system_prompt:

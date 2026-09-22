@@ -1,0 +1,8 @@
+model:
+  provider: gemini
+  name: gemini-2.5-flash
+sampling_params:
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 32768
+  include_thoughts: false

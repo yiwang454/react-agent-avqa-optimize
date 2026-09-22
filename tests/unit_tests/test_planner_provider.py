@@ -126,6 +126,25 @@ def test_elm_gpt_uses_planner_model_and_omits_api_base(monkeypatch):
     assert state["configured_lm"] is lm
 
 
+def test_elm_gpt_omits_explicitly_null_output_cap_and_seed(monkeypatch):
+    context, _ = _load_context()
+    monkeypatch.setenv("PLANNER_PROVIDER", "elm_gpt")
+    monkeypatch.setenv("PLANNER_MODEL", "o3")
+    monkeypatch.setenv("PLANNER_API_KEY", "elm-key")
+    monkeypatch.setenv("PLANNER_OUTPUT_SEQ_LEN", "EMPTY")
+    monkeypatch.setenv("PLANNER_SEED", "EMPTY")
+    monkeypatch.delenv("PLANNER_TEMPERATURE", raising=False)
+    monkeypatch.delenv("PLANNER_TOP_P", raising=False)
+
+    runtime = _runtime_context(context)
+    lm = context.configure_deepseek_lm(runtime)
+
+    assert runtime.planner_max_tokens is None
+    assert runtime.planner_seed is None
+    assert "max_tokens" not in lm.kwargs
+    assert "seed" not in lm.kwargs
+
+
 def test_api_key_mapping_keeps_existing_deepseek_precedence(monkeypatch):
     context, _ = _load_context()
     monkeypatch.setenv("PLANNER_PROVIDER", "elm_gpt")

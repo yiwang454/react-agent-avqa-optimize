@@ -14,9 +14,11 @@ _REASONER_TOP_LEVEL_KEYS = {"model", "sampling_params"}
 _REASONER_MODEL_KEYS = {"provider", "name"}
 _REASONER_SAMPLING_KEYS = {
     "temperature",
+    "top_p",
     "max_tokens",
     "reasoning_effort",
     "seed",
+    "include_thoughts",
 }
 _SENSITIVE_KEY_PARTS = ("api_key", "token", "password", "secret", "credential")
 
@@ -59,8 +61,12 @@ def _validate_reasoner_config(config: dict[str, Any], path: Path) -> None:
         or not isinstance(sampling["temperature"], (int, float))
     ):
         raise ValueError(f"Reasoner sampling_params.temperature must be numeric: {path}")
+    if "top_p" in sampling and (
+        isinstance(sampling["top_p"], bool) or not isinstance(sampling["top_p"], (int, float))
+    ):
+        raise ValueError(f"Reasoner sampling_params.top_p must be numeric: {path}")
     for key in ("max_tokens", "seed"):
-        if key in sampling and (
+        if key in sampling and sampling[key] is not None and (
             isinstance(sampling[key], bool) or not isinstance(sampling[key], int)
         ):
             raise ValueError(f"Reasoner sampling_params.{key} must be an integer: {path}")
@@ -70,6 +76,8 @@ def _validate_reasoner_config(config: dict[str, Any], path: Path) -> None:
         raise ValueError(
             f"Reasoner sampling_params.reasoning_effort must be a string: {path}"
         )
+    if "include_thoughts" in sampling and not isinstance(sampling["include_thoughts"], bool):
+        raise ValueError(f"Reasoner sampling_params.include_thoughts must be a boolean: {path}")
 
 
 def load_reasoner_config_yaml(path: Path | None, *, role: str) -> dict[str, Any]:
@@ -89,9 +97,11 @@ def load_reasoner_config_yaml(path: Path | None, *, role: str) -> dict[str, Any]
             "provider": "PLANNER_PROVIDER",
             "name": "PLANNER_MODEL",
             "temperature": "PLANNER_TEMPERATURE",
+            "top_p": "PLANNER_TOP_P",
             "max_tokens": "PLANNER_OUTPUT_SEQ_LEN",
             "reasoning_effort": "PLANNER_REASONING_EFFORT",
             "seed": "PLANNER_SEED",
+            "include_thoughts": "PLANNER_GEMINI_INCLUDE_THOUGHTS",
         }
     elif role == "reflection":
         env_mapping = {
@@ -111,7 +121,9 @@ def load_reasoner_config_yaml(path: Path | None, *, role: str) -> dict[str, Any]
     for key, value in sampling.items():
         env_name = env_mapping.get(key)
         if env_name is not None:
-            os.environ[env_name] = str(value)
+            # An explicit YAML null means omit the parameter from the provider
+            # request, rather than inheriting a process-level default.
+            os.environ[env_name] = "EMPTY" if value is None else str(value)
     return config
 
 
