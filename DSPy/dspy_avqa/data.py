@@ -94,8 +94,6 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path | None) -> di
             f"Missing required AVQA fields in cut_id={cut.get('id')}: "
             f"question={bool(question)}, options={bool(options)}, video_path={bool(video_path)}"
         )
-    if not audio_path:
-        raise ValueError(f"Missing required audio_path in cut_id={cut.get('id')}")
     if audio_caption_dir is not None and not audio_caption:
         raise ValueError(f"Audio caption is empty for question_id={question_id}")
 
