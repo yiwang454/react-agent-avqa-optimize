@@ -10,6 +10,7 @@ spec.loader.exec_module(data_module)
 
 maybe_dump_question_data = data_module.maybe_dump_question_data
 write_results_jsonl = data_module.write_results_jsonl
+build_input_state = data_module.build_input_state
 
 
 class TokenDetailsWrapper:
@@ -56,3 +57,26 @@ def test_write_results_jsonl_serializes_sdk_wrappers(tmp_path):
     assert data["question_data"]["turn_trace"][0]["perception_token_usage"]["prompt_tokens_details"] == {
         "prompt_tokens": 3
     }
+
+
+def test_build_input_state_allows_video_only_cut_without_audio_path():
+    cut = {
+        "id": "worldsense-0",
+        "supervisions": [
+            {
+                "id": "0",
+                "text": "What happens?",
+                "custom": {
+                    "video_id": "worldsense",
+                    "options": ["A. One", "B. Two"],
+                    "video_path": "/videos/worldsense.mp4",
+                },
+            }
+        ],
+        "recording": {"sources": [{"source": "/videos/worldsense.mp4"}]},
+    }
+
+    state = build_input_state(cut, audio_caption_dir=None)
+
+    assert state["video_path"] == "/videos/worldsense.mp4"
+    assert state["audio_path"] is None
