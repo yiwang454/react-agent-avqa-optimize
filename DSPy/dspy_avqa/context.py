@@ -36,6 +36,7 @@ def default_planner_workflow_prompt() -> str:
     """Return the planner workflow prompt from the active prompt config."""
     for keys in (
         ("planner", "workflow_prompt"),
+        ("planner", "workflow_contract"),
         ("planner", "system_prompt"),
     ):
         try:

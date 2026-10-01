@@ -197,7 +197,8 @@ def _validate_caption_placement_inputs(*, caption_placement: str, video_descript
 
 def _build_task_text(
     *,
-    workflow_prompt: str,
+    workflow_contract: str,
+    optimization_guidance: str,
     question: str,
     options_json: str,
     video_path: str,
@@ -210,8 +211,10 @@ def _build_task_text(
     return render_prompt(
         "planner",
         "task_prompt_template",
-        system_prompt=workflow_prompt,
-        workflow_prompt=workflow_prompt,
+        system_prompt=workflow_contract,
+        workflow_prompt=workflow_contract,
+        workflow_contract=workflow_contract,
+        optimization_guidance=optimization_guidance,
         planner_action_schema=prompt_value("planner", "action_schema").strip(),
         video_id=video_id or "unknown",
         video_path=video_path,
@@ -484,9 +487,19 @@ class AVQADSPyReActProgram(dspy.Module):
 
     def _workflow_prompt(self) -> str:
         try:
-            return prompt_value("planner", "workflow_prompt").strip()
+            return prompt_value("planner", "workflow_contract").strip()
         except KeyError:
-            return self.context.system_prompt
+            try:
+                return prompt_value("planner", "workflow_prompt").strip()
+            except KeyError:
+                return self.context.system_prompt
+
+    @staticmethod
+    def _optimization_guidance() -> str:
+        try:
+            return prompt_value("planner", "optimization_guidance").strip()
+        except KeyError:
+            return ""
 
     def _plan_next_action(
         self,
@@ -621,7 +634,8 @@ class AVQADSPyReActProgram(dspy.Module):
         )
         turn_trace: list[dict[str, Any]] = []
         caption_task_description: str | None = None
-        workflow_prompt = self._workflow_prompt()
+        workflow_contract = self._workflow_prompt()
+        optimization_guidance = self._optimization_guidance()
         required_first_tool = _required_first_tool()
         if required_first_tool not in (None, *self.context.allowed_tools):
             raise ValueError(
@@ -637,7 +651,8 @@ class AVQADSPyReActProgram(dspy.Module):
                 else video_description
             )
             return _build_task_text(
-                workflow_prompt=workflow_prompt,
+                workflow_contract=workflow_contract,
+                optimization_guidance=optimization_guidance,
                 question=question,
                 options_json=options_json,
                 video_path=video_path,
