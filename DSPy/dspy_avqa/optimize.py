@@ -640,6 +640,12 @@ def _is_planner_target(target_path: str) -> bool:
 
 
 def _target_component_role(target_path: str) -> str:
+    if target_path == "planner.optimization_guidance":
+        return (
+            "Advisory AVQA ReAct planning strategy appended after an immutable workflow "
+            "contract. Improve evidence gathering and reasoning without restating, removing, "
+            "or contradicting the fixed contract."
+        )
     if _is_captioner_target(target_path):
         return (
             "Captioner tool instruction for ask_caption. Produce factual timestamped "
@@ -654,6 +660,12 @@ def _target_component_role(target_path: str) -> str:
 
 
 def _target_output_contract(target_path: str) -> str:
+    if target_path == "planner.optimization_guidance":
+        return (
+            "Output concise strategy guidance only. The fixed workflow contract controls "
+            "identity, observable-information boundaries, tool definitions, required workflow, "
+            "tool-call freedom, budget, and hard constraints; do not override any of them."
+        )
     if _is_captioner_target(target_path):
         return (
             "Output a timestamped shot list/caption with observable visual events, "
@@ -1290,6 +1302,7 @@ def _resolve_gepa_config(args: argparse.Namespace) -> dict[str, Any]:
 
 PROMPT_OPTIMIZE_TARGETS = {
     "planner.workflow_prompt",
+    "planner.optimization_guidance",
     "captioner.default_caption_instruction",
     "captioner.caption_prompt_template",
     "perception.default_perceptual_question",
@@ -1297,6 +1310,7 @@ PROMPT_OPTIMIZE_TARGETS = {
 }
 PROMPT_OPTIMIZE_EXCLUDED_TARGETS = {
     "signatures.PlanNextAction.instructions",
+    "planner.workflow_contract",
     "captioner.system_prompt",
     "perception.system_prompt",
     "planner.action_schema",
