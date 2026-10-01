@@ -200,6 +200,31 @@ def test_gepa_run_config_supplies_paths_and_preserves_cli_seed(monkeypatch, tmp_
     assert run_config["train_limit"] == 64
 
 
+def test_guidance_is_optimizable_but_workflow_contract_is_fixed(monkeypatch):
+    optimize = _load_optimize_module()
+    monkeypatch.setattr(
+        optimize,
+        "prompt_config",
+        lambda: {
+            "planner": {
+                "workflow_contract": "fixed contract",
+                "optimization_guidance": "initial strategy",
+            }
+        },
+    )
+
+    optimize.validate_optimize_targets(("planner.optimization_guidance",))
+    assert "immutable workflow contract" in optimize._target_component_role(
+        "planner.optimization_guidance"
+    )
+    assert "do not override" in optimize._target_output_contract(
+        "planner.optimization_guidance"
+    )
+
+    with pytest.raises(ValueError, match="intentionally fixed"):
+        optimize.validate_optimize_targets(("planner.workflow_contract",))
+
+
 def test_gepa_reflection_model_override_does_not_inherit_deepseek_connection(monkeypatch):
     optimize = _load_optimize_module()
     planner_lm = _PlannerLM(
