@@ -18,6 +18,7 @@ SUPPORTED_TOOL_NAMES = (
     "ask_caption",
     "ask_perception",
     "omni_clip_caption",
+    "omni_clip_perception",
     "temporal_ground_video",
 )
 _SUPPORTED_TOOL_SET = set(SUPPORTED_TOOL_NAMES)
@@ -159,6 +160,8 @@ def resolve_allowed_tools(value: str | Iterable[str] | None = None) -> tuple[str
             normalized_name = "ask_perception"
         if normalized_name in {"video_clip_caption", "clip_caption", "video_clip_qa"}:
             normalized_name = "omni_clip_caption"
+        if normalized_name in {"video_clip_perception", "clip_perception"}:
+            normalized_name = "omni_clip_perception"
         if normalized_name not in _SUPPORTED_TOOL_SET:
             raise ValueError(
                 f"Unsupported DSPy AVQA tool {tool_name!r}; "

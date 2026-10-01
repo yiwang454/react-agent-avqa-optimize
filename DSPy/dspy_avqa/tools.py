@@ -787,6 +787,37 @@ def omni_clip_caption(
                 pass
 
 
+def omni_clip_perception(
+    video_path: str,
+    time_range: Any,
+    perceptual_question: str,
+    audio_path: str | None = None,
+) -> str | dict[str, Any]:
+    """Tool: ask the perceptual backend a question about a selected video clip."""
+    coerced_range = _coerce_time_range(time_range)
+    if isinstance(coerced_range, dict):
+        return coerced_range
+    original_start, original_end = coerced_range
+
+    cache_dir = Path(os.environ.get("DSPY_AVQA_CLIP_CACHE_DIR", "Cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="omni_clip_", suffix=".mp4", dir=cache_dir, delete=False
+        ) as clip_file:
+            clip_path = clip_file.name
+        start, end = cut_video_clip(video_path, clip_path, original_start, original_end)
+        prompt = build_perception_prompt(perceptual_question, start, end)
+        return call_perception(video_path=clip_path, audio_path=None, prompt=prompt)
+    finally:
+        if clip_path and os.path.exists(clip_path):
+            try:
+                os.remove(clip_path)
+            except OSError:
+                pass
+
+
 def temporal_ground_video(
     video_path: str,
     perceptual_question: str,

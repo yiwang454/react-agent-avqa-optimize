@@ -21,6 +21,7 @@ from .tools import (
     consume_last_perception_metadata,
     is_budget_exempt_observation,
     omni_clip_caption,
+    omni_clip_perception,
     record_perception_metadata,
     selected_captioner_model,
     selected_perception_model,
@@ -305,6 +306,8 @@ def _canonical_tool_name(raw_tool_name: str) -> str:
         return "ask_caption"
     if value in {"omni_clip_caption", "video_clip_caption", "clip_caption", "video_clip_qa"}:
         return "omni_clip_caption"
+    if value in {"omni_clip_perception", "video_clip_perception", "clip_perception"}:
+        return "omni_clip_perception"
     if value == "temporal_ground_video":
         return "temporal_ground_video"
     if value in {"ask_qwen_perception", "ask_gemini_perception", "ask_perception"}:
@@ -333,6 +336,9 @@ def _required_first_tool() -> str | None:
         "video_clip_caption",
         "clip_caption",
         "video_clip_qa",
+        "omni_clip_perception",
+        "video_clip_perception",
+        "clip_perception",
         "temporal_ground_video",
     }
     if normalized not in known_names:
@@ -462,6 +468,9 @@ def _tool_args(
     elif tool_name == "omni_clip_caption":
         args["caption_instruction"] = query
         args["time_range"] = time_range
+    elif tool_name == "omni_clip_perception":
+        args["perceptual_question"] = query
+        args["time_range"] = time_range
     else:
         args["perceptual_question"] = query
     return args
@@ -589,6 +598,13 @@ class AVQADSPyReActProgram(dspy.Module):
                 video_path=video_path,
                 audio_path=audio_path,
                 caption_instruction=tool_query,
+                time_range=time_range,
+            )
+        if tool_name == "omni_clip_perception":
+            return omni_clip_perception(
+                video_path=video_path,
+                audio_path=audio_path,
+                perceptual_question=tool_query,
                 time_range=time_range,
             )
         if tool_name == "temporal_ground_video":
@@ -720,7 +736,11 @@ class AVQADSPyReActProgram(dspy.Module):
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
             tool_query = _tool_query(payload, tool_name, source_question=question)
-            tool_time_range = _time_range(payload) if tool_name == "omni_clip_caption" else None
+            tool_time_range = (
+                _time_range(payload)
+                if tool_name in {"omni_clip_caption", "omni_clip_perception"}
+                else None
+            )
             caption_call_index = (
                 1
                 + sum(
@@ -745,7 +765,7 @@ class AVQADSPyReActProgram(dspy.Module):
                 "question_id": question_id,
                 "caption_call_index": caption_call_index,
             }
-            if tool_name == "omni_clip_caption":
+            if tool_name in {"omni_clip_caption", "omni_clip_perception"}:
                 call_tool_kwargs["time_range"] = tool_time_range
             tool_observation = self._call_tool(**call_tool_kwargs)
             budget_exempt = is_budget_exempt_observation(tool_observation)

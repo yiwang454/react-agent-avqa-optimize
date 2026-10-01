@@ -47,6 +47,7 @@ def _install_program_import_stubs() -> None:
     tools.ask_caption = lambda *args, **kwargs: ""
     tools.ask_perception = lambda *args, **kwargs: ""
     tools.omni_clip_caption = lambda *args, **kwargs: ""
+    tools.omni_clip_perception = lambda *args, **kwargs: ""
     tools.build_caption_prompt = lambda instruction=None: str(instruction or "").strip()
     tools.captioner_system_prompt = lambda: ""
     tools.is_budget_exempt_observation = (
@@ -831,4 +832,63 @@ def test_omni_clip_caption_tool_args_include_time_range():
         "audio_path": None,
         "caption_instruction": "describe",
         "time_range": [12, 15],
+    }
+
+
+def test_omni_clip_perception_tool_args_include_time_range(tmp_path):
+    prompt_yaml = tmp_path / "prompt.yaml"
+    prompt_yaml.write_text("""
+perception:
+  default_perceptual_question: default question
+""")
+    prompt_config.load_prompt_config(prompt_yaml)
+    payload = {
+        "arguments": {
+            "time_range": [2, 4.5],
+            "perceptual_question": "Which object is picked up?",
+        }
+    }
+
+    assert program._canonical_tool_name("clip_perception") == "omni_clip_perception"
+    assert program._tool_query(payload, "omni_clip_perception") == "Which object is picked up?"
+    assert program._time_range(payload) == [2, 4.5]
+    assert program._tool_args(
+        "omni_clip_perception",
+        "/tmp/video.mp4",
+        None,
+        "Which object is picked up?",
+        time_range=[2, 4.5],
+    ) == {
+        "video_path": "/tmp/video.mp4",
+        "audio_path": None,
+        "perceptual_question": "Which object is picked up?",
+        "time_range": [2, 4.5],
+    }
+
+
+def test_omni_clip_perception_dispatches_to_clip_tool(monkeypatch):
+    context = _FakeRuntimeContext()
+    context.allowed_tools = ("omni_clip_perception",)
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    captured = {}
+
+    def fake_clip_perception(**kwargs):
+        captured.update(kwargs)
+        return "clip evidence"
+
+    monkeypatch.setattr(program, "omni_clip_perception", fake_clip_perception)
+    result = avqa_program._call_tool(
+        tool_name="omni_clip_perception",
+        video_path="/tmp/video.mp4",
+        audio_path="/tmp/audio.wav",
+        tool_query="What happens in this interval?",
+        time_range=[3, 8],
+    )
+
+    assert result == "clip evidence"
+    assert captured == {
+        "video_path": "/tmp/video.mp4",
+        "audio_path": "/tmp/audio.wav",
+        "perceptual_question": "What happens in this interval?",
+        "time_range": [3, 8],
     }
