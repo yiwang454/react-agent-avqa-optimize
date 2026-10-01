@@ -80,6 +80,38 @@ prompt_config = _load_module("dspy_avqa.prompt_config", DSPY_PACKAGE_DIR / "prom
 program = _load_module("dspy_avqa.program", DSPY_PACKAGE_DIR / "program.py")
 
 
+def test_guidance_prompt_preserves_candidate0_contract_and_appends_strategy():
+    yaml_dir = DSPY_PACKAGE_DIR / "yamls"
+    original = prompt_config.load_prompt_config(
+        yaml_dir / "daily_qa_prompt_v8_free_react_caption_in_task.yaml"
+    )
+    original_workflow = original["planner"]["workflow_prompt"].strip()
+
+    scoped = prompt_config.load_prompt_config(
+        yaml_dir / "daily_qa_prompt_v8_free_react_guidance_caption_in_task.yaml"
+    )
+    contract = scoped["planner"]["workflow_contract"].strip()
+    guidance = scoped["planner"]["optimization_guidance"].strip()
+
+    assert contract == original_workflow
+
+    task = program._build_task_text(
+        workflow_contract=contract,
+        optimization_guidance="candidate strategy",
+        question="What happened?",
+        options_json='["A. first", "B. second"]',
+        video_path="/tmp/video.mp4",
+        video_id="video",
+        video_description="caption",
+        turn_index="1",
+        max_turns="4",
+    )
+
+    assert task.index(contract) < task.index("Optimization guidance:")
+    assert task.index("Optimization guidance:") < task.index("candidate strategy")
+    assert guidance not in task
+
+
 def test_perceptual_question_prefers_planner_payload(tmp_path):
     prompt_yaml = tmp_path / "prompt.yaml"
     prompt_yaml.write_text("""
