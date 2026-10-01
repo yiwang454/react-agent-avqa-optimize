@@ -1,142 +1,158 @@
-# DSPy AVQA notes
+# DailyOmni Free-ReAct Experiments
 
-This repository also contains the DSPy AVQA optimizer and inference runner under
-[`DSPy/`](./DSPy/).  Its final-test workflow supports the following:
+This branch contains four inference experiments for evaluating an o3 planner in a
+Free-ReAct audio-visual question answering workflow. The full OmniAgent o3
+system is included as a baseline. A Free-ReAct planner cannot inspect a video
+directly: it must first obtain a whole-video caption and can then decide whether
+to request more evidence or return a final answer.
 
-- `--inference-only` skips optimization, loads `--output-program`, and resumes
-  full-test inference from per-sample output caches. Keep a separate output
-  directory for each compiled program.
-- `--audio-caption-dir` is optional. It is automatically ignored when the
-  active task does not render `{video_description}` or caption placement is not
-  `task`. Use `--ignore-audio-caption-dir` when the initial description is only
-  a placeholder and `ask_caption` produces the actual caption.
+## Results
 
-## GEPA prompt optimization updates
+All systems use the 1,197-question DailyOmni evaluation set. The four Free-ReAct
+experiments use Gemini 2.5 Flash for captioning and perception and allow at most
+six tool calls per question.
 
-Recent GEPA runs support optimizing explicit prompt targets such as
-`planner.workflow_prompt` and `captioner.default_caption_instruction` with
-target-aware reflection feedback.
+| No. | Experiment name | Reasoning effort | Available tools | Input tok. | Thinking output tok. | Non-thinking output tok. | Latency/question | Cost/question | Acc. | Avg. tool calls/question |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | Full OmniAgent (o3) | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 62.7k | 3.6k† | 1.3k† | 71.00 s | $0.0674 | 77.53% | 7.27 |
+| 10 | o3 + Omni Clip Caption | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 9.2k | 0.83k | 0.30k | 11.35 s | $0.0175 | 78.36% | 1.61 |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 7.8k | 0.78k | 0.28k | 11.58 s | $0.0157 | 78.86% | 1.55 |
+| 12 | o3 + Omni Clip Perception | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 8.7k | 0.93k | 0.32k | 12.50 s | $0.0187 | 78.20% | 1.66 |
+| 11b | o3 Basic Tools (High Reasoning) | high | `ask_caption`, `ask_perception` | 9.9k | 1.61k | 0.33k | 14.38 s | $0.0243 | 79.53% | 1.63 |
 
-- Planner optimization still receives planner-oriented feedback, but now uses a
-  custom GEPA reflection prompt that improves the planning and tool-use policy
-  without learning facts from example videos. The reflection prompt asks GEPA to
-  turn example-specific feedback into general rules and avoid copying specific
-  answers, options, timestamps, people, objects, scenes, events, caption text, or
-  tool observations.
-- Captioner optimization receives captioner-oriented feedback. The captioner
-  reflection prompt specifies that `default_caption_instruction` is used by the
-  `ask_caption` tool to obtain factual audio-visual captions, and must not solve
-  the multiple-choice question, choose an option, output a final answer letter,
-  plan tool calls, or instruct another model.
-- Captioner GEPA supervision is controlled by
-  `--gepa-caption-supervision {auto,none,privileged}`:
-  - `none`: original mode; do not load privileged caption files. The supervision
-    signal is downstream answer correctness plus runtime trajectories/feedback.
-  - `privileged`: force loading DailyOmni caption supervision from
-    `--daily-omni-root` / `DAILY_OMNI_ROOT`.
-  - `auto`: default; use privileged supervision only when a DailyOmni root is
-    available, otherwise fall back to `none`.
+`Avg. tool calls/question` uses one definition for every row: it counts only
+turns whose planner action is `tool`. The final decision round performed by the
+reasoner is excluded. The Full OmniAgent value is therefore 8,700 tool calls / 1,197
+questions = 7.27, computed from `OmniAgent_repeat1/output_test.jsonl`.
 
-When using the existing GEPA wrapper scripts, `auto` usually resolves to
-`privileged` because the common wrapper passes `--daily-omni-root`. To rerun the
-original captioner-only mode, append:
+† The Full OmniAgent summary reports 4.9k total output tokens per question. Its
+trace preserves the o3 planner split (3.55k reasoning and 0.69k visible output)
+but does not preserve Gemini tool-call thinking-token metadata (because the original OmniAgent repo doesn't have it). The table assigns
+the remaining reported output to non-thinking output, so the baseline split is
+an approximation. The Free-ReAct rows use the exact persisted o3 reasoning-token
+and Gemini `thoughtsTokenCount` fields.
+
+OmniAgent replication is run with https://github.com/yiwang454/OmniAgent_replicate.git, which is cloned from https://github.com/KD-TAO/OmniAgent.git .
+
+### Why high reasoning has more output tokens
+
+The earlier combined `Out tok.` value included hidden reasoning/thinking tokens.
+Experiment 11b does not make many more tool calls than Experiment 11 (1.63 versus
+1.55 per question), but o3 produces substantially more hidden reasoning on every
+planner decision, including the final decision round. Its thinking output rises
+from 0.78k to 1.61k tokens per question, while visible non-thinking output rises
+only from 0.28k to 0.33k. The increase is therefore primarily reasoning tokens,
+not additional tool calls or longer visible answers.
+
+## Experiment configurations
+
+### Baseline. Full OmniAgent (o3)
+
+The baseline uses the original multi-tool OmniAgent workflow. Its accuracy and
+tool-call count were verified from:
+
+```text
+/mnt/ceph_rbd/data/avqa_project/daily_omni/OmniAgent_repeat1/output_test.jsonl
+```
+
+It answers 928 of 1,197 questions correctly (77.53%) and records 8,700 actual
+tool actions. Final decision rounds are not included in that tool count.
+
+### 10. o3 + Omni Clip Caption
+
+Run with:
 
 ```bash
---gepa-caption-supervision none
+bash scripts/10_run_dspy_react_agent_daily_o3_gemini25flash_omni_clip_caption_free_react_6turn.sh
 ```
 
-See [`DSPy/README.md`](./DSPy/README.md) for the detailed DSPy invocation and
-resume behavior.
+In addition to whole-video captioning and perception, the planner can select a
+time range and ask the captioner for a targeted description of that short clip.
+The planner uses the o3 `medium` reasoning configuration.
 
-# LangGraph ReAct Agent Template
+### 11. o3 Basic Tools
 
-[![CI](https://github.com/langchain-ai/react-agent/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/langchain-ai/react-agent/actions/workflows/unit-tests.yml)
-[![Open in - LangGraph Studio](https://img.shields.io/badge/Open_in-LangGraph_Studio-00324d.svg?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NS4zMzMiIGhlaWdodD0iODUuMzMzIiB2ZXJzaW9uPSIxLjAiIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHBhdGggZD0iTTEzIDcuOGMtNi4zIDMuMS03LjEgNi4zLTYuOCAyNS43LjQgMjQuNi4zIDI0LjUgMjUuOSAyNC41QzU3LjUgNTggNTggNTcuNSA1OCAzMi4zIDU4IDcuMyA1Ni43IDYgMzIgNmMtMTIuOCAwLTE2LjEuMy0xOSAxLjhtMzcuNiAxNi42YzIuOCAyLjggMy40IDQuMiAzLjQgNy42cy0uNiA0LjgtMy40IDcuNkw0Ny4yIDQzSDE2LjhsLTMuNC0zLjRjLTQuOC00LjgtNC44LTEwLjQgMC0xNS4ybDMuNC0zLjRoMzAuNHoiLz48cGF0aCBkPSJNMTguOSAyNS42Yy0xLjEgMS4zLTEgMS43LjQgMi41LjkuNiAxLjcgMS44IDEuNyAyLjcgMCAxIC43IDIuOCAxLjYgNC4xIDEuNCAxLjkgMS40IDIuNS4zIDMuMi0xIC42LS42LjkgMS40LjkgMS41IDAgMi43LS41IDIuNy0xIDAtLjYgMS4xLS44IDIuNi0uNGwyLjYuNy0xLjgtMi45Yy01LjktOS4zLTkuNC0xMi4zLTExLjUtOS44TTM5IDI2YzAgMS4xLS45IDIuNS0yIDMuMi0yLjQgMS41LTIuNiAzLjQtLjUgNC4yLjguMyAyIDEuNyAyLjUgMy4xLjYgMS41IDEuNCAyLjMgMiAyIDEuNS0uOSAxLjItMy41LS40LTMuNS0yLjEgMC0yLjgtMi44LS44LTMuMyAxLjYtLjQgMS42LS41IDAtLjYtMS4xLS4xLTEuNS0uNi0xLjItMS42LjctMS43IDMuMy0yLjEgMy41LS41LjEuNS4yIDEuNi4zIDIuMiAwIC43LjkgMS40IDEuOSAxLjYgMi4xLjQgMi4zLTIuMy4yLTMuMi0uOC0uMy0yLTEuNy0yLjUtMy4xLTEuMS0zLTMtMy4zLTMtLjUiLz48L3N2Zz4=)](https://langgraph-studio.vercel.app/templates/open?githubUrl=https://github.com/langchain-ai/react-agent)
-
-This template showcases a [ReAct agent](https://arxiv.org/abs/2210.03629) implemented using [LangGraph](https://github.com/langchain-ai/langgraph), designed for [LangGraph Studio](https://github.com/langchain-ai/langgraph-studio). ReAct agents are uncomplicated, prototypical agents that can be flexibly extended to many tools.
-
-![Graph view in LangGraph studio UI](./static/studio_ui.png)
-
-The core logic, defined in `src/react_agent/graph.py`, demonstrates a flexible ReAct agent that iteratively reasons about user queries and executes actions, showcasing the power of this approach for complex problem-solving tasks.
-
-## What it does
-
-The ReAct agent:
-
-1. Takes a user **query** as input
-2. Reasons about the query and decides on an action
-3. Executes the chosen action using available tools
-4. Observes the result of the action
-5. Repeats steps 2-4 until it can provide a final answer
-
-By default, it's set up with a basic set of tools, but can be easily extended with custom tools to suit various use cases.
-
-## Getting Started
-
-Assuming you have already [installed LangGraph Studio](https://github.com/langchain-ai/langgraph-studio?tab=readme-ov-file#download), to set up:
-
-1. Create a `.env` file.
+Run with:
 
 ```bash
-cp .env.example .env
+bash scripts/11_run_dspy_react_agent_daily_o3_gemini25flash_basic_tools_free_react_6turn.sh
 ```
 
-2. Define required API keys in your `.env` file.
+This is the basic-tools baseline. The planner can request a whole-video caption
+or ask the perception model a question about the full video. The planner uses
+the o3 `medium` reasoning configuration.
 
-The primary [search tool](./src/react_agent/tools.py) [^1] used is [Tavily](https://tavily.com/). Create an API key [here](https://app.tavily.com/sign-in).
+### 11b. o3 Basic Tools with High Reasoning
 
-### Setup Model
+Run with:
 
-The defaults values for `model` are shown below:
-
-```yaml
-model: claude-sonnet-4-5-20250929
+```bash
+bash scripts/11b_run_dspy_react_agent_daily_o3_gemini25flash_basic_tools_free_react_6turn_highreasoning.sh
 ```
 
-Follow the instructions below to get set up, or pick one of the additional options.
+This experiment keeps the same tools and prompt as Experiment 11 while changing
+the o3 reasoning effort from `medium` to `high`. It isolates the effect of
+additional planner reasoning without introducing another perception tool.
 
-#### Anthropic
+### 12. o3 + Omni Clip Perception
 
-To use Anthropic's chat models:
+Run with:
 
-1. Sign up for an [Anthropic API key](https://console.anthropic.com/) if you haven't already.
-2. Once you have your API key, add it to your `.env` file:
-
-```
-ANTHROPIC_API_KEY=your-api-key
-```
-#### OpenAI
-
-To use OpenAI's chat models:
-
-1. Sign up for an [OpenAI API key](https://platform.openai.com/signup).
-2. Once you have your API key, add it to your `.env` file:
-```
-OPENAI_API_KEY=your-api-key
+```bash
+bash scripts/12_run_dspy_react_agent_daily_o3_gemini25flash_omni_clip_perception_free_react_6turn.sh
 ```
 
-3. Customize whatever you'd like in the code.
-4. Open the folder LangGraph Studio!
+In addition to the basic tools, the planner can select a time range and ask the
+perception model a targeted audio-visual question about that short clip. The
+planner uses the o3 `medium` reasoning configuration.
 
-## How to customize
+## Shared workflow
 
-1. **Add new tools**: Extend the agent's capabilities by adding new tools in [tools.py](./src/react_agent/tools.py). These can be any Python functions that perform specific tasks.
-2. **Select a different model**: We default to Anthropic's Claude 3 Sonnet. You can select a compatible chat model using `provider/model-name` via runtime context. Example: `openai/gpt-4-turbo-preview`.
-3. **Customize the prompt**: We provide a default system prompt in [prompts.py](./src/react_agent/prompts.py). You can easily update this via context in the studio.
+Each experiment follows the same high-level protocol:
 
-You can also quickly extend this template by:
+1. The first tool call must be `ask_caption`.
+2. The first whole-video caption is read from the same exact caption cache.
+3. Later caption or perception requests use live Gemini 2.5 Flash calls.
+4. After observing the first caption, o3 may call any enabled tool repeatedly or
+   return a final answer.
+5. The maximum budget is six tool calls. A final decision is a planner round but
+   does not consume a tool call.
 
-- Modifying the agent's reasoning process in [graph.py](./src/react_agent/graph.py).
-- Adjusting the ReAct loop or adding additional steps to the agent's decision-making process.
+The planner configurations are:
 
-## Development
+- `DSPy/dspy_avqa/yamls/reasoner_elm_o3_medium.yaml`
+- `DSPy/dspy_avqa/yamls/reasoner_elm_o3_high.yaml`
 
-While iterating on your graph, you can edit past state and rerun your app from past states to debug specific nodes. Local changes will be automatically applied via hot reload. Try adding an interrupt before the agent calls tools, updating the default system message in `src/react_agent/context.py` to take on a persona, or adding additional nodes and edges!
+Both use deterministic sampling (`temperature: 0`, `seed: 1234`) and a maximum
+output length of 32,768 tokens.
 
-Follow up requests will be appended to the same thread. You can create an entirely new thread, clearing previous history, using the `+` button in the top right.
+## Metric definitions
 
-You can find the latest (under construction) docs on [LangGraph](https://github.com/langchain-ai/langgraph) here, including examples and other references. Using those guides can help you pick the right patterns to adapt here for your use case.
+- **Input tok.**: average input tokens per question. For the Free-ReAct rows,
+  this is persisted planner input plus live Gemini tool input. The cached first
+  caption is excluded because reading it does not issue a new model request.
+- **Thinking output tok.**: hidden o3 reasoning tokens plus Gemini thinking
+  tokens, when the backend persisted both fields.
+- **Non-thinking output tok.**: output tokens excluding the recorded hidden
+  reasoning/thinking tokens.
+- **Latency/question**: total wall-clock run time divided by 1,197 questions. It
+  represents concurrent experiment throughput, including retries and waiting,
+  rather than the latency of a single serial request.
+- **Cost/question**: estimated standard API cost of the persisted live calls.
+  The calculation uses $2.00/M input and $8.00/M output tokens for o3, and
+  $0.30/M text/image/video input, $1.00/M audio input, and $2.50/M output tokens
+  for Gemini 2.5 Flash. It excludes the historical cost of generating the
+  shared caption cache, cache storage, and unpersisted failed retries.
+- **Acc.**: exact multiple-choice accuracy over all 1,197 questions.
+- **Avg. tool calls/question**: total recorded tool actions divided by 1,197;
+  final-answer planner rounds performed by the reasoner are excluded for every
+  system, including Full OmniAgent.
 
-LangGraph Studio also integrates with [LangSmith](https://smith.langchain.com/) for more in-depth tracing and collaboration with teammates.
+## Summary
 
-[^1]: https://python.langchain.com/docs/concepts/#tools
+The high-reasoning basic-tools run achieved the highest accuracy at 79.53%, with
+higher thinking-token usage, latency, and cost. The medium-reasoning basic-tools
+run was the least expensive system. All four Free-ReAct variants used far fewer
+tool calls than Full OmniAgent. Adding clip-level caption or perception tools did
+not improve aggregate accuracy in these runs, although those tools provide
+additional traces for studying time-localized evidence requests.
