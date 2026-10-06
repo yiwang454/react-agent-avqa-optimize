@@ -7,6 +7,8 @@ from typing import Any, List, Optional
 
 from openai import OpenAI
 
+from .latency import finish_model_attempt, start_model_attempt
+
 
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -72,6 +74,7 @@ def call_deepseek(
 
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
+        start_model_attempt()
         try:
             request_kwargs: dict[str, Any] = {
                 "model": model,
@@ -94,8 +97,10 @@ def call_deepseek(
             content = resp.choices[0].message.content
             if content is None or not str(content).strip():
                 raise ValueError("The LM returned an empty or null response.")
+            finish_model_attempt(success=True)
             return content
         except Exception as exc:
+            finish_model_attempt(success=False)
             last_err = exc
             if attempt < max_retries:
                 print(

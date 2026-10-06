@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from .latency import finish_model_attempt, start_model_attempt
+
 from .response_quality import degenerate_response_reason
 
 API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -281,6 +283,7 @@ def call_gemini_messages(
 
     last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
+        start_model_attempt()
         try:
             resp = requests.post(url, headers=headers, json=data, timeout=timeout)
             if not resp.ok:
@@ -294,6 +297,7 @@ def call_gemini_messages(
                 else None
             )
             if degenerate_reason and attempt < max_retries:
+                finish_model_attempt(success=False)
                 delay_s = _retry_delay(retry_delay_s, attempt)
                 print(
                     f"[warn] Gemini API attempt {attempt}/{max_retries} returned a degenerate "
@@ -308,10 +312,15 @@ def call_gemini_messages(
                     f"perception response: {degenerate_reason}. Keeping the final response.",
                     flush=True,
                 )
+            # A final degenerate response is still an accepted call when the
+            # existing policy keeps it.  Only responses that trigger a retry
+            # are excluded from retry-adjusted latency above.
+            finish_model_attempt(success=True)
             if return_thinking:
                 return response_text, token_usage, thinking_text
             return response_text, token_usage
         except Exception as exc:
+            finish_model_attempt(success=False)
             last_err = exc
             if attempt < max_retries:
                 delay_s = _retry_delay(retry_delay_s, attempt)

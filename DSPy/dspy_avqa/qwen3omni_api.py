@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from .latency import finish_model_attempt, start_model_attempt
+
 from .response_quality import degenerate_response_reason
 
 API_KEY = os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY", os.getenv("QWEN_TOKEN", "")))
@@ -242,6 +244,7 @@ def call_qwen_messages(
     response_attempts: list[dict[str, Any]] = []
     empty_response_retry_count = 0
     for attempt in range(1, max_retries + 1):
+        start_model_attempt()
         try:
             is_empty_response_retry = (
                 retry_degenerate_response and empty_response_retry_count > 0
@@ -323,6 +326,8 @@ def call_qwen_messages(
                 response_text = "".join(content_chunks)
                 reasoning_text = "".join(reasoning_chunks).strip()
                 if stream_empty_fallback and not response_text.strip() and not reasoning_text:
+                    finish_model_attempt(success=False)
+                    start_model_attempt()
                     retry_kwargs = dict(request_kwargs)
                     retry_kwargs["stream"] = False
                     retry_kwargs.pop("stream_options", None)
@@ -366,6 +371,7 @@ def call_qwen_messages(
                 }
             )
             if degenerate_reason and attempt < max_retries:
+                finish_model_attempt(success=False)
                 print(
                     f"[warn] Qwen API attempt {attempt}/{max_retries} returned a degenerate "
                     f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
@@ -383,6 +389,11 @@ def call_qwen_messages(
                 if raise_on_empty_response:
                     raise EmptyQwenResponseError(message, response_attempts)
 
+            # If raise_on_empty_response is enabled, the exception path below
+            # marks the final attempt failed.  Otherwise the existing policy
+            # accepts it, so it counts as the successful terminal call.
+            finish_model_attempt(success=True)
+
             # Preserve the requested cap and server stop reason with the
             # provider usage. GEPA aggregates these fields at the batch level
             # to expose captioner rollouts that are cut off by max_tokens.
@@ -396,8 +407,10 @@ def call_qwen_messages(
                 return response_text, token_usage, reasoning_text
             return response_text, token_usage
         except EmptyQwenResponseError:
+            finish_model_attempt(success=False)
             raise
         except Exception as exc:
+            finish_model_attempt(success=False)
             last_err = exc
             if attempt < max_retries:
                 time.sleep(retry_delay_s)

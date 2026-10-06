@@ -36,6 +36,7 @@ from .program import (
     caption_cache_missing_as_observation,
     normalize_option_letter,
 )
+from .latency import sample_latency
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config
 from .reliable_qwen import (
     ReliableQwenExecutor,
@@ -753,22 +754,27 @@ def run_one(
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]], dict[str, Any], str | None, dict[str, Any] | None]:
     """Run one cut and return response text, trace, and optional error."""
     payload = build_input_state(cut, audio_caption_dir)
+    latency_tracker = None
     try:
-        pred = program(
-            question=payload["question"],
-            options_json=json.dumps(payload["options"], ensure_ascii=False),
-            video_path=payload["video_path"],
-            audio_path=payload["audio_path"],
-            video_id=payload.get("video_id"),
-            question_id=payload.get("question_id"),
-            video_description=payload.get("video_description"),
-            max_turns=max_turns,
-        )
+        with sample_latency() as latency_tracker:
+            pred = program(
+                question=payload["question"],
+                options_json=json.dumps(payload["options"], ensure_ascii=False),
+                video_path=payload["video_path"],
+                audio_path=payload["audio_path"],
+                video_id=payload.get("video_id"),
+                question_id=payload.get("question_id"),
+                video_description=payload.get("video_description"),
+                max_turns=max_turns,
+            )
+        payload["latency"] = latency_tracker.summary(complete=True)
         answer = normalize_option_letter(str(pred.answer).strip())
         response_text = f"{answer}. {str(pred.reasoning_summary).strip()}"
         turn_trace = list(pred.turn_trace) if hasattr(pred, "turn_trace") else []
         return cut, response_text, turn_trace, payload, None, None
     except Exception as exc:
+        if latency_tracker is not None:
+            payload["latency"] = latency_tracker.summary(complete=False)
         error_info = extract_error_info(exc)
         planner_calls = consume_planner_call_trace()
         if planner_calls:
@@ -1058,8 +1064,13 @@ def run_batch() -> None:
         for batch_index, result in enumerate(recovered.results):
             cut_item, response_text, turn_trace, payload, error, error_info = result
             row = build_result_row(cut_item, response_text)
+            if payload.get("latency") is not None:
+                row["question_data"]["latency"] = payload["latency"]
             if error is None:
                 if batch_index in exhausted_indices:
+                    latency = row["question_data"].get("latency")
+                    if isinstance(latency, dict):
+                        latency["retry_adjusted_seconds"] = None
                     mark_empty_qwen_turn_trace(
                         turn_trace,
                         attempted_profiles=recovered.attempted_profiles,

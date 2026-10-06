@@ -12,6 +12,7 @@ import dspy
 
 from .deepseek_api import DeepSeekPlannerClient, DeepSeekPlannerConfig
 from .deepseek_dspy_lm import DeepSeekDSPyLM, FIXED_PLANNER_SYSTEM_PROMPT, append_planner_call_trace
+from .latency import finish_model_attempt, install_litellm_attempt_observer
 from .prompt_config import prompt_config, prompt_value
 
 SUPPORTED_TOOL_NAMES = (
@@ -407,6 +408,10 @@ class SerialNOpenAICompatibleLM(dspy.LM):
             request_kwargs.pop("top_p", None)
         normalized_messages = self._normalize_planner_messages(prompt, messages)
         response = dspy.LM.forward(self, prompt=None, messages=normalized_messages, **request_kwargs)
+        # LiteLLM's input/failure callbacks expose each internal retry.  The
+        # successful final attempt is completed synchronously here so output
+        # serialization never races LiteLLM's background success callback.
+        finish_model_attempt(success=True)
         self._record_response(prompt=None, messages=normalized_messages, kwargs=request_kwargs, response=response)
         return response
 
@@ -462,6 +467,8 @@ def _env_is_set(key: str) -> bool:
 def _configure_native_litellm(context: AVQARuntimeContext) -> dspy.BaseLM:
     """Configure DSPy's native LiteLLM planner backend."""
     import litellm
+
+    install_litellm_attempt_observer()
 
     # GPT reasoning models reject sampling parameters inherited by DSPy/provider
     # configuration. Let LiteLLM remove only parameters unsupported by the

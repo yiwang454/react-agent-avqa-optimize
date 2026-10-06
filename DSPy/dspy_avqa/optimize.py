@@ -36,6 +36,7 @@ from .experiment_config import (
 )
 from .data import build_input_state, build_result_row, maybe_dump_question_data, read_jsonl, write_results_jsonl
 from .program import AVQADSPyReActProgram, normalize_option_letter
+from .latency import sample_latency
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config, prompt_overrides, prompt_value
 from .reliable_qwen import (
     ReliableQwenExecutor,
@@ -2880,22 +2881,25 @@ def _run_program_on_cut(
     max_turns: int,
 ) -> dict[str, Any]:
     payload = build_input_state(cut, audio_caption_dir)
+    latency_tracker = None
     try:
-        pred = program(
-            question_id=payload.get("question_id"),
-            question=payload["question"],
-            options_json=json.dumps(payload["options"], ensure_ascii=False),
-            video_path=payload["video_path"],
-            audio_path=payload["audio_path"],
-            video_id=payload.get("video_id"),
-            video_description=payload.get("video_description"),
-            max_turns=max_turns,
-        )
+        with sample_latency() as latency_tracker:
+            pred = program(
+                question_id=payload.get("question_id"),
+                question=payload["question"],
+                options_json=json.dumps(payload["options"], ensure_ascii=False),
+                video_path=payload["video_path"],
+                audio_path=payload["audio_path"],
+                video_id=payload.get("video_id"),
+                video_description=payload.get("video_description"),
+                max_turns=max_turns,
+            )
         answer = normalize_option_letter(str(getattr(pred, "answer", "")).strip())
         reasoning_summary = str(getattr(pred, "reasoning_summary", "")).strip()
         response_text = f"{answer}. {reasoning_summary}" if reasoning_summary else answer
         row = build_result_row(cut, response_text)
         row["question_data"]["turn_trace"] = list(getattr(pred, "turn_trace", []))
+        row["question_data"]["latency"] = latency_tracker.summary(complete=True)
         return row
     except Exception as exc:
         error_info = extract_error_info(exc)
@@ -2903,6 +2907,8 @@ def _run_program_on_cut(
         if planner_calls:
             error_info["planner_calls"] = planner_calls
         row = build_result_row(cut, f"[ERROR] {exc}")
+        if latency_tracker is not None:
+            row["question_data"]["latency"] = latency_tracker.summary(complete=False)
         row["question_data"]["planner_error"] = error_info
         row["question_data"]["turn_trace"] = [
             {
@@ -3203,6 +3209,9 @@ def write_batch_style_program_outputs(
                 if batch_index in exhausted_indices:
                     question_data = row.setdefault("question_data", {})
                     if isinstance(question_data, dict):
+                        latency = question_data.get("latency")
+                        if isinstance(latency, dict):
+                            latency["retry_adjusted_seconds"] = None
                         mark_empty_qwen_turn_trace(
                             question_data.get("turn_trace") or [],
                             attempted_profiles=recovered.attempted_profiles,

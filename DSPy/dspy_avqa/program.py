@@ -11,6 +11,7 @@ import dspy
 from .caption_cache import load_cached_caption
 from .context import AVQARuntimeContext, configure_deepseek_lm, resolve_allowed_tools
 from .deepseek_dspy_lm import clear_planner_call_trace, consume_planner_call_trace
+from .latency import model_component
 from .prompt_config import prompt_config, prompt_value, render_prompt
 from .signatures import PlanNextAction
 from .tools import (
@@ -520,12 +521,13 @@ class AVQADSPyReActProgram(dspy.Module):
     ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
         """Run the DSPy planner and recover raw JSON if the adapter is too strict."""
         try:
-            prediction = self.action_planner(
-                task=task,
-                conversation_state=conversation_state,
-                turn_index=turn_index,
-                max_turns=max_turns,
-            )
+            with model_component("planner"):
+                prediction = self.action_planner(
+                    task=task,
+                    conversation_state=conversation_state,
+                    turn_index=turn_index,
+                    max_turns=max_turns,
+                )
         except Exception as exc:
             planner_calls = consume_planner_call_trace()
             raw = str(getattr(exc, "lm_response", "") or "").strip() or _latest_response_text(planner_calls)
@@ -782,7 +784,8 @@ class AVQADSPyReActProgram(dspy.Module):
             }
             if tool_name in {"omni_clip_caption", "omni_clip_perception"}:
                 call_tool_kwargs["time_range"] = tool_time_range
-            tool_observation = self._call_tool(**call_tool_kwargs)
+            with model_component("perception"):
+                tool_observation = self._call_tool(**call_tool_kwargs)
             budget_exempt = is_budget_exempt_observation(tool_observation)
             perception_metadata = consume_last_perception_metadata()
             perception_backend = (

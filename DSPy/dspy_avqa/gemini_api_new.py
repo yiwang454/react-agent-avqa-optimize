@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .latency import finish_model_attempt, install_litellm_attempt_observer
+
 from .response_quality import degenerate_response_reason
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -170,6 +172,8 @@ def call_gemini_messages(
             "used by scripts/smoke_test_dspy_gemini_video.py."
         ) from exc
 
+    install_litellm_attempt_observer()
+
     lm_kwargs: Dict[str, Any] = {
         "vertex_project": vertex_project,
         "vertex_location": vertex_location,
@@ -200,6 +204,7 @@ def call_gemini_messages(
             else None
         )
         if degenerate_reason and attempt < max_retries:
+            finish_model_attempt(success=False)
             print(
                 f"[warn] DSPy Gemini attempt {attempt}/{max_retries} returned a degenerate "
                 f"perception response: {degenerate_reason}. Retrying in {retry_delay_s}s.",
@@ -213,6 +218,10 @@ def call_gemini_messages(
                 f"perception response: {degenerate_reason}. Keeping the final response.",
                 flush=True,
             )
+        # A final degenerate response is still an accepted call when the
+        # existing policy keeps it.  Only responses that trigger a retry are
+        # excluded from retry-adjusted latency above.
+        finish_model_attempt(success=True)
         if return_thinking:
             return response_text, usage, ""
         return response_text, usage
