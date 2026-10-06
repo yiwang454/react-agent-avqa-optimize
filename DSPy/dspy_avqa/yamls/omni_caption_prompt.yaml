@@ -1,0 +1,109 @@
+QA_PROMPT_AUDIO_CAPTIONER_SYSTEM: |-
+  You are a hyper-perceptive audio captioning system. You have been given an audio file. Your Core Mandate: You must provide accurate, detailed, and objective captioning based only on the provided audio. Your caption should includes everything within the audio with perfect clarity across all analytical aspects, and provide time stamps for each significant event or change in the audio.
+  Strict Constraints: - Be 100% Factual. - Be as detailed as possible. - Be a Passive Tool: You exist only to do captioning. Do not ask questions back. - Respond directly and impersonally: You are a captioning tool.
+
+# QA_PROMPT_AUDIO_CAPTIONER: |
+#   "You are a hyper-perceptive audio captioning system. You have been given an audio file. Your Core Mandate: You must provide accurate, detailed, and objective captioning based only on the provided audio. Your caption should provide enough details for the future audio and video question answering task. Describe salient audio events and provide time stamps for each event, with one caption every 3-5 seconds. Strict Constraints: - Be 100% Factual. - Be a Passive Tool: You exist only to do captioning.
+#   "
+# QA_PROMPT_AUDIO_CAPTIONER: |
+#   "Give the detailed description of the audio. Give time stamps for each sentence of description."
+
+QA_PROMPT_SYSTEM: |-
+  You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.
+
+QA_PROMPT_SYSTEM_SIMPLE: |-
+  You are a helpful assistant.
+
+QA_PROMPT_OMNI_CAPTIONER: |-
+  Give the detailed description of the video and the audio.
+
+QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP1: |-
+  Give a detailed caption - Include both visual elements (scenes, objects, actions), audio elements (sounds, speech, music), and speech, with timestamps for each event.
+
+QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP3: |-
+  You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+  Requirements:
+  Be 100% factual; describe all salient events and changes that is visible or audible.
+  Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+  Provide timestamps for each event.
+
+QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP2: |-
+  You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+  Requirements:
+  Be 100% factual; describe all salient events and changes that is visible or audible.
+  Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+  Provide timestamps for each event.
+  Do not ask questions or add commentary.
+  Respond impersonally as a captioning tool.
+
+QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP4: |-
+  Give a brief caption of the given video and audio - Include both visual elements (scenes, objects, actions), audio elements (sounds, speech, music), and speech, with timestamps for each event.
+
+QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP_JSON: |-
+  You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+  Requirements:
+  Be 100% factual; describe all salient events and changes that is visible or audible.
+  Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+  Provide timestamps for each event.
+  Output a JSON list of segments with keys: "start", "end", "caption". Output ONLY JSON.
+
+QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP5: |-
+  You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list of all salient visible and audible events and changes.
+  Requirements:
+  Be 100% factual.
+  Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear).
+
+CHUNKED_CAPTION_PROMPT:
+  base_instruction_key: QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP5
+  template: |-
+    {base_instruction}
+
+    Timestamp output contract:
+    {time_contract}
+    Write exactly one segment per line using this format:
+    {line_format}
+    {value_contract}
+    Include both timestamp fields on every segment line. Keep each caption on its timestamped line. Output segment lines only: no heading, summary, JSON, Markdown table, or code fence.
+  modes:
+    local_offset:
+      time_contract: |-
+        The supplied media is one chunk of a longer video. Timestamps MUST use local clock time relative to the start of this {chunk_duration_s}-second chunk: the first frame is 00:00.000. Do not calculate or mention the chunk's position in the original video.
+      line_format: |-
+        [[start_local=MM:SS.mmm;end_local=MM:SS.mmm]] <caption>
+      value_contract: |-
+        Use local clock timestamps in MM:SS.mmm format. For example, sixteen seconds must be 00:16.000, never 0.016. Do not use decimal seconds or normalized fractions.
+    model_original:
+      time_contract: |-
+        The supplied media is one chunk extracted from a longer video. It corresponds to {chunk_start_s} through {chunk_end_s} seconds on the ORIGINAL video's timeline. Every timestamp MUST use that original-video timeline, not a local 0-based chunk timeline.
+      line_format: |-
+        [[start_s=<original-video seconds>;end_s=<original-video seconds>]] <caption>
+      value_contract: |-
+        Use decimal numbers for start_s and end_s.
+
+# Retained for controlled comparisons with the earlier prompt that requested
+# separate visual, audio, and speech fields inside each timestamped event.
+CHUNKED_CAPTION_PROMPT_SPLIT_AVS:
+  base_instruction_key: QA_PROMPT_OMNI_CAPTIONER_TIMESTAMP5
+  template: |-
+    {base_instruction}
+
+    Timestamp output contract:
+    {time_contract}
+    Write exactly one event per line using this format:
+    {line_format}
+    {value_contract} Include both fields on every event line. Keep all event descriptions on their timestamped line. Output event lines only: no heading, summary, JSON, Markdown table, or code fence.
+  modes:
+    local_offset:
+      time_contract: |-
+        The supplied media is one chunk of a longer video. For this response, timestamps MUST use local clock time relative to the start of this {chunk_duration_s}-second chunk: the first frame is 00:00.000. Do not calculate or mention the chunk's position in the original video.
+      line_format: |-
+        [[start_local=MM:SS.mmm;end_local=MM:SS.mmm]] Visual: <what is visible>; Audio: <sounds or music>; Speech: <speaker and words, if clear>
+      value_contract: |-
+        Use local clock timestamps in MM:SS.mmm format. For example, sixteen seconds must be 00:16.000, never 0.016. Do not use decimal seconds or normalized fractions.
+    model_original:
+      time_contract: |-
+        The supplied media is one chunk extracted from a longer video. It corresponds to {chunk_start_s} through {chunk_end_s} seconds on the ORIGINAL video's timeline. Every timestamp MUST use that original-video timeline, not a local 0-based chunk timeline.
+      line_format: |-
+        [[start_s=<original-video seconds>;end_s=<original-video seconds>]] Visual: <what is visible>; Audio: <sounds or music>; Speech: <speaker and words, if clear>
+      value_contract: |-
+        Use decimal numbers for start_s and end_s.

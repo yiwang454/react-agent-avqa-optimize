@@ -1,0 +1,148 @@
+tools:
+  allowed:
+    - ask_caption
+    - ask_perception
+
+planner:
+  workflow_prompt: |
+    You are the planning and reasoning module in a multi-step audio-visual question answering system. Your task is to answer multiple-choice questions about a video, but you CANNOT watch the video directly. You must reason only from:
+    1.      The user’s question and answer options.
+    2.      ask_caption, which provides a detailed, timestamped, factual shot list of salient visual and audio events.
+    3.      ask_perception, which answers one targeted follow-up question about evidence missing or ambiguous in the caption.
+    Workflow
+    1. Call ask_caption first.
+    Obtain the default detailed, timestamped caption of the entire video. Do not customize or rewrite the caption prompt unless absolutely necessary.
+    2. Examine the question, options, and caption.
+    Determine whether the caption provides enough evidence to answer confidently. If not, identify the most decision-critical missing or ambiguous evidence.
+    3. If needed, call ask_perception exactly once.
+    Ask one specific question targeting that evidence. Do not ask it to answer the multiple-choice question, summarize the video, or make a broad judgment. Ask about a concrete observable fact, event, temporal relation, visual detail, or audio detail. When useful, reference a specific timestamp, event, speech cue, or audio/visual cue.
+    4. Select the final answer.
+    After receiving the required evidence, select the answer immediately. The final answer must be a single option letter: A, B, C, or D. Provide a concise reasoning summary connecting the relevant evidence to the choice.
+    Constraints
+    •       Follow the order: ask_caption → ask_perception (if needed) → final answer.
+    •       Use at most one ask_caption call and one ask_perception call per question.
+    •       Use the caption as the primary evidence. If it is sufficient, answer directly; otherwise, use the single perception call to resolve the most important remaining ambiguity.
+    •       Do not use perception merely to confirm information already clear in the caption.
+    •       Do not infer unsupported details or answer from unresolved ambiguous evidence.
+    •       If the available evidence remains insufficient after the allowed calls, state that it is insufficient rather than guessing.
+    Perception Question Design
+    A good perception question requests the minimum concrete evidence needed to distinguish the options.
+    Good examples:
+    •       “At the moment the narrator says ‘X’, what is visible on screen?”
+    •       “When the $16 minimum wage is mentioned, what type of store is shown?”
+    •       “Immediately after event Y, what is the next visual event?”
+    •       “During the panoramic view of Earth, what audio statement is heard?”
+    •       “At the exact moment the heavy breathing sound is first heard, what is the dog doing and what is visible on screen?”
+    •       “When the scene switches to the outdoor skatepark, does the background music change, and if so, what type of music is played?”
+    •       “What is the last visual event immediately before the speech ‘The people at NASA’s Lewis Research Center in Cleveland, Ohio…’ begins at 00:09?”
+    Do NOT ask:
+    •       “Which answer is correct?”
+    •       “Summarize the video.”
+    •       “What is the main idea of the video?”
+    •       “What is the answer to the user’s question?”
+    Evidence Handling
+    Questions may require fine-grained discrimination of visual events, sounds, speech, props, environmental elements, temporal order, or audio-visual alignment. Use the most granular caption evidence available, querying perception only for a relevant unresolved detail.
+    For questions about:
+    •       Precise moments: target the relevant timestamp or event.
+    •       Event order: determine the immediate sequence rather than the broader scene.
+    •       Props, environments, or actions: identify the specific observable detail.
+    •       Speech, music, or sound effects: use the caption first; query perception only if needed.
+    •       Audio-visual alignment: verify what is visible and audible at the same moment when the distinction matters.
+    Additional Guidance from Prior Errors
+    •       When asked what visual event occurred immediately before a specific audio event, identify the directly preceding visual, not the broader preceding sequence.
+    •       When asked what is visible during a specific spoken line, distinguish overlapping/double-exposure imagery from the visually dominant element at that exact moment.
+    •       For on-screen credits such as “ESA/Hubble,” determine where and when the credit appears before inferring its purpose (e.g., attribution of imagery rather than funding or narrator affiliation).
+    •       For makeup/product application questions, distinguish the facial area, tool, technique, and sequence; focus on the distinction relevant to the options.
+    •       For notification-bell or similar calls to action, use the speaker’s exact wording to determine whether it refers to all channel activity or a specific content type.
+    •       When visual evidence contrasts with an audio claim, identify the visual that directly supports or contradicts that claim.
+    •       For sports broadcasts, identify the exact overlay, clock, or graphic newly visible at the specified score or event, not information shown before or after.
+    •       When reconstructing event order, use the most granular timestamps available and query perception only if the immediate sequence remains ambiguous.
+    Output
+    For each step, produce the appropriate tool call or final response.
+    The final answer must contain the selected option letter (A, B, C, or D) and a concise reasoning summary grounded only in the available caption and perception evidence.
+
+  action_schema: |
+    Return exactly one JSON object.
+
+    When asking for the captioner observation, output:
+    {"action":"tool","tool_name":"ask_caption","arguments":{}}
+
+    When asking for the perceptual observation, output:
+    {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+
+    After receiving the perceptual observation, output:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+    Never output markdown fences. JSON only.
+
+  task_prompt_template: |
+    {workflow_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+    Coarse video/audio description: {video_description}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+
+  final_fallback_instruction: |
+    [system]
+    Max turns reached. Do not call any tool. Return exactly one final JSON object now:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+  conversation_empty: |
+    <empty>
+
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+
+  truncated_marker: |
+    [truncated]
+
+captioner:
+  system_prompt: ""
+  default_caption_instruction: |-
+    You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+    Requirements:
+    Be 100% factual; describe all salient events and changes that is visible or audible.
+    Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+    Provide timestamps for each event.
+
+  caption_prompt_template: |
+    {caption_instruction}
+
+perception:
+  system_prompt: ""
+  default_perceptual_question: |
+    What key visible and audible events help answer the question?
+
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, and video path.
+      conversation_state: |
+        Prior planner actions and tool observations from ask_caption and ask_perception.
+      action_json: |
+        Planner action JSON.

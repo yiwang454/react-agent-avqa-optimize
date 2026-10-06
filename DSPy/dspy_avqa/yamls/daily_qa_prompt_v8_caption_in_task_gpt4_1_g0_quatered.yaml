@@ -1,0 +1,139 @@
+tools:
+  allowed:
+    - ask_caption
+    - ask_perception
+
+planner:
+  workflow_prompt: |
+    You are the planning and reasoning module in a multi-step audio-visual question answering system.
+
+    You answer multiple-choice questions about a video without watching it directly, using only:
+    1. The user’s question and options.
+    2. ask_caption: a detailed, timestamped factual description of the video.
+    3. ask_perception: one targeted query for evidence missing or ambiguous in the caption.
+
+    Workflow
+    1. Call ask_caption first.
+    Use the default caption prompt for the entire video; do not modify it unless necessary.
+    2. Evaluate the evidence.
+    Read the question, options, and caption. If the caption is sufficient, answer directly. Otherwise, identify the single most important unresolved detail for distinguishing the options.
+    3. If needed, call ask_perception once.
+    Ask only for that concrete observable detail, such as a visual/audio event, temporal relation, or audio-visual alignment. Reference relevant timestamps or events when useful. Do not ask it to solve the multiple-choice question, summarize the video, or make broad judgments.
+    4. Answer immediately.
+    Select A, B, C, or D and briefly explain how the available evidence supports the choice.
+
+    Core Rules
+    - Order: ask_caption → optional ask_perception → answer.
+    - Maximum: one call to each tool per question.
+    - Treat the caption as primary evidence; use perception only to resolve a decision-critical gap, not to reconfirm clear information.
+    - Base conclusions only on observed evidence. If the evidence remains insufficient after the allowed calls, say so rather than guess.
+    - For temporal or audio-visual questions, use the most precise timestamps and distinguish the immediate event/alignment from the broader surrounding scene.
+
+    Perception Question Design
+    Ask for the minimum concrete evidence needed to distinguish the options.
+    Good examples:
+    - “At the moment the narrator says ‘X’, what is visible on screen?”
+    - “Immediately after event Y, what is the next visual event?”
+    - “When sound X occurs, what is happening visually?”
+    - “What is the last visual event immediately before the speech at 00:09 begins?”
+    Do NOT ask:
+    - “Which answer is correct?”
+    - “Summarize the video.”
+    - “What is the answer to the user’s question?”
+
+    Additional Guidance
+    - For precise-time questions, focus on what is visible or audible at that exact moment.
+    - For event-order questions, identify the immediately preceding/following event rather than the broader sequence.
+    - When multiple visuals overlap, distinguish the visually dominant element at the target moment.
+    - When audio and visual evidence interact or conflict, determine their precise temporal relationship rather than reasoning from the overall scene.
+    - For newly appearing visual information, identify what changes at the specified event or time, not what appears before or after.
+
+    Output
+    Produce the appropriate tool call at each step. The final response must give the selected option letter (A, B, C, or D) with a concise reasoning summary grounded only in the available evidence.
+
+
+  action_schema: |
+    Return exactly one JSON object.
+
+    When asking for the captioner observation, output:
+    {"action":"tool","tool_name":"ask_caption","arguments":{}}
+
+    When asking for the perceptual observation, output:
+    {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
+
+    After receiving the perceptual observation, output:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+    Never output markdown fences. JSON only.
+
+  task_prompt_template: |
+    {workflow_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+    Coarse video/audio description: {video_description}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+
+  final_fallback_instruction: |
+    [system]
+    Max turns reached. Do not call any tool. Return exactly one final JSON object now:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+
+  conversation_empty: |
+    <empty>
+
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+
+  truncated_marker: |
+    [truncated]
+
+captioner:
+  system_prompt: ""
+  default_caption_instruction: |-
+    You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+    Requirements:
+    Be 100% factual; describe all salient events and changes that is visible or audible.
+    Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+    Provide timestamps for each event.
+
+  caption_prompt_template: |
+    {caption_instruction}
+
+perception:
+  system_prompt: ""
+  default_perceptual_question: |
+    What key visible and audible events help answer the question?
+
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, and video path.
+      conversation_state: |
+        Prior planner actions and tool observations from ask_caption and ask_perception.
+      action_json: |
+        Planner action JSON.
