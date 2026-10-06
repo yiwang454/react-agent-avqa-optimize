@@ -6,6 +6,7 @@ import base64
 import json
 import mimetypes
 import os
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -700,8 +701,103 @@ def legalize_time_range(t_start: float, t_end: float, video_end: float) -> tuple
     return legal_start, legal_end
 
 
-def cut_video_clip(in_path: str, out_path: str, t_start: float, t_end: float) -> tuple[float, float]:
-    """Cut a local video clip and return the legalized source time range."""
+def probe_media_duration(path: str) -> float:
+    """Return the container duration reported by ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    duration = float(result.stdout.strip())
+    if duration <= 0:
+        raise ValueError(f"Video duration must be positive, got {duration} for {path}")
+    return duration
+
+
+def _cut_video_clip_ffmpeg(
+    in_path: str,
+    out_path: str,
+    t_start: float,
+    t_end: float,
+    *,
+    video_duration: float | None,
+) -> tuple[float, float]:
+    """Cut a clip with its embedded audio, re-encoding for exact boundaries."""
+    duration = video_duration if video_duration is not None else probe_media_duration(in_path)
+    legal_start, legal_end = legalize_time_range(t_start, t_end, duration)
+    clip_duration = legal_end - legal_start
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{legal_start:.6f}",
+        "-i",
+        in_path,
+        "-t",
+        f"{clip_duration:.6f}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-sn",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        "-avoid_negative_ts",
+        "make_zero",
+        out_path,
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"ffmpeg clip extraction failed: {details[:2000]}") from exc
+    return legal_start, legal_end
+
+
+def cut_video_clip(
+    in_path: str,
+    out_path: str,
+    t_start: float,
+    t_end: float,
+    *,
+    preserve_audio: bool = False,
+    video_duration: float | None = None,
+) -> tuple[float, float]:
+    """Cut a local clip and return its legalized source time range.
+
+    The historical agent clip tools intentionally emit video-only clips.  Offline
+    chunked caption generation can opt into ``preserve_audio=True`` to retain the
+    source container's embedded audio without changing that existing behavior.
+    """
+    if preserve_audio:
+        return _cut_video_clip_ffmpeg(
+            in_path,
+            out_path,
+            t_start,
+            t_end,
+            video_duration=video_duration,
+        )
     try:
         from moviepy import VideoFileClip
     except ImportError:
