@@ -156,3 +156,74 @@ run was the least expensive system. All four Free-ReAct variants used far fewer
 tool calls than Full OmniAgent. Adding clip-level caption or perception tools did
 not improve aggregate accuracy in these runs, although those tools provide
 additional traces for studying time-localized evidence requests.
+
+## GPT-4.1 G0 workflow ablations
+
+The simplified and quartered GPT-4.1 workflow runs completed on 2026-10-06.
+Each `output_test.jsonl` contains exactly 1,197 unique DailyOmni question IDs,
+with no missing or extra IDs relative to `daily_omni_cuts_v3.jsonl`. Both runs
+also have 1,197 per-question checkpoint files, and their shared launcher log
+ends with `Wrote 1197 rows` and a total elapsed time for each run.
+
+The results below use the same evaluation protocol as the historical GPT-4.1
+G0 Planner result in
+`scripts/experiment_records/g0_g3_gpt5_4_gpt4_1_results.md`: the unchanged
+`avqa_reasoning_datasets/daily_omni/enhanced_eval_results_dspy.py` evaluator,
+with overall accuracy computed over all 1,197 questions and held-out accuracy
+computed by `clean_heldout_exclude_gemini_unusable_and_train_val`. The 250-ID
+exclusion manifest matched all 250 IDs in every run, and no Gemini-unusable
+sample was excluded from these three results.
+
+| Workflow | Overall accuracy | Answered accuracy | Not answered | Held-out accuracy | Overall delta vs. G0 Planner | Held-out delta vs. G0 Planner |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Historical GPT-4.1 G0 Planner | 75.61% (905/1197) | 75.61% (905/1197) | 0 | 75.08% (711/947) | baseline | baseline |
+| Simplified | 71.85% (860/1197) | 72.33% (860/1189) | 8 | 71.38% (676/947) | -3.76 pp | -3.70 pp |
+| Quartered | 71.43% (855/1197) | 72.21% (855/1184) | 13 | 71.17% (674/947) | -4.18 pp | -3.91 pp |
+
+All parseable final answers in the two ablations were already single option
+letters (1,189 simplified and 1,184 quartered). The remaining 8 and 13 rows had
+an empty `final_answer` and non-option responses such as `Insufficient evidence`
+or `None`, so no additional answer recovery was applied.
+
+### Token usage, cost, and tool calls
+
+This table reports question-average token usage across all persisted planner
+and live Gemini calls, including the final planner-only turn. Accuracy is
+temporarily reported as **answered accuracy**, not accuracy over all rows. The
+held-out column excludes the same 250 Train125/Val125 IDs as the evaluation
+above; its full scope contains 947 questions. The answered denominators are
+945 for no-GEPA, 947 for G0 Planner, 941 for simplified, and 937 for quartered.
+Latency is intentionally omitted pending a corrected latency analysis.
+
+| No. | Experiment name | Reasoning effort | Available tools | Input tok. | Thinking output tok. | Non-thinking output tok. | Latency/question | Cost/question | Full-set answered acc. | Held-out answered acc. | Avg. tool calls/question |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | GPT-4.1 no-GEPA | none | `ask_caption`, `ask_perception` | 13.304k | 0.101k | 0.752k | — | $0.01358 | 71.80% (858/1195) | 71.11% (672/945) | 2.000 |
+| G0 | GPT-4.1 G0 Planner | none | `ask_caption`, `ask_perception` | 28.603k | 0.851k | 1.138k | — | $0.03167 | 75.61% (905/1197) | 75.08% (711/947) | 1.796 |
+| 14-S | GPT-4.1 G0 Simplified | none | `ask_caption`, `ask_perception` | 13.545k | 0.063k | 0.531k | — | $0.01570 | 72.33% (860/1189) | 71.84% (676/941) | 1.842 |
+| 14-Q | GPT-4.1 G0 Quartered | none | `ask_caption`, `ask_perception` | 15.783k | 0.309k | 0.700k | — | $0.01547 | 72.21% (855/1184) | 71.93% (674/937) | 1.777 |
+
+The calculation follows the protocol in
+`scripts/experiment_records/g0_gpt4_1_gpt5_4_token_usage_and_latency.md`:
+
+- Input tokens are planner `prompt_tokens` plus live Gemini
+  `promptTokenCount`.
+- Thinking output is planner `reasoning_tokens` plus Gemini
+  `thoughtsTokenCount`. Planner reasoning tokens are zero in all four runs.
+- Non-thinking output is the remaining persisted planner and Gemini output;
+  Gemini total output is `totalTokenCount - promptTokenCount` before splitting
+  out thinking tokens.
+- Tool calls count only turns whose planner action is `tool`; the final planner
+  decision is excluded. No-GEPA, G0 Planner, simplified, and quartered record
+  2,394, 2,150, 2,205, and 2,127 tool calls respectively, divided by 1,197
+  questions above.
+- Cost uses the same regular-rate scenario as the older record: GPT-4.1 at
+  $2.00/M input and $8.00/M output, and Gemini 2.5 Flash at $0.30/M
+  text/image/video input, $1.00/M audio input, and $2.50/M output including
+  thinking. Gemini calls without modality details receive the observed audio
+  fraction for their tool type. Cache discounts are not applied.
+
+Only successfully persisted usage is included. Failed retries without a saved
+usage object and provider-specific gateway fees cannot be recovered from these
+artifacts. As a protocol check, applying the same calculation to the historical
+GPT-4.1 G0 Planner output exactly reproduces its recorded 34,237,267 input
+tokens, 2,381,207 total output tokens, and $0.03167/question regular-rate cost.
