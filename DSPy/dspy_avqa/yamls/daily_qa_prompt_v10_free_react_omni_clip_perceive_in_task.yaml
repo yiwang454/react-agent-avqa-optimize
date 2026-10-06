@@ -30,7 +30,7 @@ planner:
     - The perceptual question may quote, reuse, or directly ask the original user question and options.
     - The perceptual question does not have to be narrowly targeted or limited to missing or ambiguous evidence.
     - ask_caption may be called at any later step and is not limited to one call.
-    - omni_clip_perception requires a time_range [start_seconds, end_seconds] with end greater than start and a perceptual_question. If the timestamp range is invalid, the tool will return a retryable error observation; correct the range and continue.
+    - omni_clip_perception requires a time_range [start_seconds, end_seconds] containing two finite numbers with end greater than start, plus a perceptual_question. A malformed, non-finite, or non-positive range returns a retryable error observation; correct it and continue. Finite endpoints outside the video are adjusted to a valid in-video interval.
 
     Budget:
     - Each decision includes turn_index and max_turns.
@@ -115,6 +115,23 @@ perception:
 
   evidence_prompt_template: |
     Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+clip_perception:
+  system_prompt: ""
+  default_perceptual_question: |
+    What key visible and audible events in this clip help answer the question?
+
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence from the supplied clip. Do not guess beyond evidence.
+
+    {clip_note}
 
     Question:
     {perceptual_question}

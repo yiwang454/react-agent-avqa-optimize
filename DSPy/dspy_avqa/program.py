@@ -18,7 +18,6 @@ from .tools import (
     ask_caption,
     ask_perception,
     build_caption_prompt,
-    captioner_system_prompt,
     consume_last_perception_metadata,
     is_budget_exempt_observation,
     omni_clip_caption,
@@ -581,7 +580,7 @@ class AVQADSPyReActProgram(dspy.Module):
                     )
                     record_perception_metadata(
                         backend="caption_cache",
-                        system_prompt=captioner_system_prompt(),
+                        system_prompt="",
                         prompt=prompt,
                         model=None,
                         env_prefix="CAPTION_CACHE",
@@ -591,7 +590,7 @@ class AVQADSPyReActProgram(dspy.Module):
                     return error_observation
                 record_perception_metadata(
                     backend="caption_cache",
-                    system_prompt=captioner_system_prompt(),
+                    system_prompt="",
                     prompt=prompt,
                     model=cached.source_model,
                     env_prefix="CAPTION_CACHE",

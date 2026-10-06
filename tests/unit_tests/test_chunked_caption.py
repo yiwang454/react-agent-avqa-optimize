@@ -21,6 +21,7 @@ from dspy_avqa.chunked_caption import (
 )
 from dspy_avqa import chunked_caption
 from dspy_avqa import tools
+from dspy_avqa.prompt_config import load_prompt_config
 
 
 PROMPT_YAML = (
@@ -305,6 +306,71 @@ def test_audio_preserving_clip_path_uses_optional_audio_mapping(monkeypatch, tmp
     assert command[command.index("-map") + 1] == "0:v:0"
     assert "0:a?" in command
     assert "-c:a" in command
+
+
+def test_clip_perception_uses_dedicated_contract_and_preserves_audio(monkeypatch, tmp_path):
+    load_prompt_config(
+        Path(__file__).resolve().parents[2]
+        / "DSPy/dspy_avqa/yamls/daily_qa_prompt_v10_free_react_omni_clip_perceive_in_task.yaml"
+    )
+    monkeypatch.setenv("DSPY_AVQA_CLIP_CACHE_DIR", str(tmp_path))
+    captured = {}
+
+    def fake_cut(*args, **kwargs):
+        captured["preserve_audio"] = kwargs.get("preserve_audio")
+        return 47.0, 61.0
+
+    def fake_call(**kwargs):
+        captured.update(kwargs)
+        return "clip evidence"
+
+    monkeypatch.setattr(tools, "cut_video_clip", fake_cut)
+    monkeypatch.setattr(tools, "call_perception", fake_call)
+
+    result = tools.omni_clip_perception(
+        "input.mp4",
+        [47, 61],
+        "What is heard and seen?",
+    )
+
+    assert result == "clip evidence"
+    assert captured["preserve_audio"] is True
+    assert "47.00s to 61.00s in the original video" in captured["prompt"]
+    assert "What is heard and seen?" in captured["prompt"]
+    assert captured["audio_path"] is None
+    assert "system_prompt" not in captured
+
+
+def test_clip_caption_preserves_audio_and_allows_audio_visual_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("DSPY_AVQA_CLIP_CACHE_DIR", str(tmp_path))
+    captured = {}
+
+    def fake_cut(*args, **kwargs):
+        captured["preserve_audio"] = kwargs.get("preserve_audio")
+        return 2.0, 4.0
+
+    def fake_call(**kwargs):
+        captured.update(kwargs)
+        return "clip caption"
+
+    monkeypatch.setattr(tools, "cut_video_clip", fake_cut)
+    monkeypatch.setattr(tools, "selected_captioner_model", lambda: "gemini")
+    monkeypatch.setattr(tools, "call_gemini_perception", fake_call)
+
+    result = tools.omni_clip_caption("input.mp4", [2, 4])
+
+    assert result == "clip caption"
+    assert captured["preserve_audio"] is True
+    assert "audio-visual evidence" in captured["prompt"]
+    assert "speech, sounds" in captured["prompt"]
+    assert "system_prompt" not in captured
+
+
+@pytest.mark.parametrize("time_range", ([float("nan"), 2], [1, float("inf")]))
+def test_non_finite_clip_range_is_retryable(time_range):
+    result = tools._coerce_time_range(time_range)
+    assert result["retryable"] is True
+    assert result[tools.BUDGET_EXEMPT_KEY] is True
 
 
 def test_unparseable_resumed_raw_response_falls_back_to_fresh_call(

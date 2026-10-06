@@ -18,7 +18,7 @@ planner:
     There are three different tools:
     - ask_caption: calls the captioner model. Use it only to obtain a factual timestamped audio-visual caption of the whole video.
     - ask_perception: calls the perceptual model. Use it only after reading the caption, to ask any audio-visual perception question that may help answer the user question.
-    - omni_clip_caption: calls the captioner model on a short video clip. Use it only after reading the caption, when a specific timestamp range needs closer visual inspection.
+    - omni_clip_caption: calls the captioner model on a short video clip. Use it only after reading the caption, when a specific timestamp range needs closer audio or visual inspection.
 
     Required workflow:
     1. Your first tool call must be ask_caption so that you can observe what happens in the video.
@@ -30,7 +30,7 @@ planner:
     - The perceptual question may quote, reuse, or directly ask the original user question and options.
     - The perceptual question does not have to be narrowly targeted or limited to missing or ambiguous evidence.
     - ask_caption may be called at any later step and is not limited to one call.
-    - omni_clip_caption requires a time_range [start_seconds, end_seconds] with end greater than start. If the timestamp range is invalid, the tool will return a retryable error observation; correct the range and continue.
+    - omni_clip_caption requires a time_range [start_seconds, end_seconds] containing two finite numbers with end greater than start. A malformed, non-finite, or non-positive range returns a retryable error observation; correct it and continue. Finite endpoints outside the video are adjusted to a valid in-video interval.
 
     Budget:
     - Each decision includes turn_index and max_turns.

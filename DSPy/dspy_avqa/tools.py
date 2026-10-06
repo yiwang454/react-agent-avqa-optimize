@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
 import os
 import subprocess
@@ -279,7 +280,9 @@ def call_qwen_perception(
             content.append(audio_content)
         content.append(video_content)
     content.append({"type": "text", "text": prompt})
-    system_prompt = system_prompt if system_prompt is not None else prompt_value("perception", "system_prompt").strip()
+    # Perception tools use a single user/content prompt. A system message is sent
+    # only when an internal low-level caller explicitly supplies one.
+    system_prompt = str(system_prompt or "").strip()
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -405,7 +408,9 @@ def call_gemini_perception(
 ) -> str:
     """Call Gemini for AV perception through the selected legacy or DSPy backend."""
     backend = gemini_api_backend()
-    system_prompt = system_prompt if system_prompt is not None else prompt_value("perception", "system_prompt").strip()
+    # Perception tools use a single user/content prompt. A system message is sent
+    # only when an internal low-level caller explicitly supplies one.
+    system_prompt = str(system_prompt or "").strip()
     include_audio = bool(audio_path and not gemini_video_only(env_prefix))
 
     if backend == "dspy":
@@ -566,15 +571,6 @@ def build_caption_prompt(caption_instruction: str | None = None) -> str:
         return instruction
 
 
-def captioner_system_prompt() -> str:
-    """Return the captioner system prompt, falling back to a factual tool role."""
-    return _caption_prompt_value(
-        "captioner",
-        "system_prompt",
-        default="You are an audio-visual captioning system. Be factual and concise.",
-    )
-
-
 def ask_caption(
     video_path: str,
     caption_instruction: str | None = None,
@@ -587,14 +583,12 @@ def ask_caption(
             video_path=video_path,
             audio_path=audio_path,
             prompt=build_caption_prompt(caption_instruction),
-            system_prompt=captioner_system_prompt(),
             env_prefix="CAPTIONER_GEMINI",
         )
     return call_qwen_perception(
         video_path=video_path,
         audio_path=audio_path,
         prompt=build_caption_prompt(caption_instruction),
-        system_prompt=captioner_system_prompt(),
         env_prefix="CAPTIONER_QWEN",
     )
 
@@ -615,6 +609,27 @@ def build_perception_prompt(
         clip_note=clip_note,
         perceptual_question=perceptual_question,
     )
+
+
+def build_clip_perception_prompt(
+    perceptual_question: str,
+    *,
+    start_time: float,
+    end_time: float,
+) -> str:
+    """Build the clip-only AVQA prompt with absolute source timestamps."""
+    clip_note = (
+        "This short clip corresponds to "
+        f"{start_time:.2f}s to {end_time:.2f}s in the original video. "
+        "Treat any timestamps within the clip as relative to this interval."
+    )
+    return render_prompt(
+        "clip_perception",
+        "evidence_prompt_template",
+        clip_note=clip_note,
+        perceptual_question=perceptual_question,
+    )
+
 
 def ask_qwen_perception(
     video_path: str,
@@ -658,6 +673,10 @@ def _coerce_time_range(time_range: Any) -> tuple[float, float] | dict[str, Any]:
         return invalid_tool_input(
             "Invalid clip time_range: expected two numeric values "
             f"(start, end). Details: {exc}"
+        )
+    if not math.isfinite(start) or not math.isfinite(end):
+        return invalid_tool_input(
+            "Invalid clip time_range: start and end must be finite numeric values."
         )
     if end <= start:
         return invalid_tool_input(
@@ -786,9 +805,9 @@ def cut_video_clip(
 ) -> tuple[float, float]:
     """Cut a local clip and return its legalized source time range.
 
-    The historical agent clip tools intentionally emit video-only clips.  Offline
-    chunked caption generation can opt into ``preserve_audio=True`` to retain the
-    source container's embedded audio without changing that existing behavior.
+    Callers can opt into ``preserve_audio=True`` to retain the source container's
+    embedded audio. Agent clip tools enable it; legacy visual-only callers retain
+    the historical default.
     """
     if preserve_audio:
         return _cut_video_clip_ffmpeg(
@@ -822,14 +841,15 @@ def build_omni_clip_caption_prompt(
     if not instruction:
         instruction = (
             "Produce a detailed factual caption of this short video clip, focusing "
-            "on visible actions, objects, scene changes, and temporal order."
+            "on audible and visible events, actions, objects, scene changes, speech, "
+            "sounds, and temporal order."
         )
     return (
         "You are analyzing a short VIDEO CLIP cut from a longer video.\n"
         f"The clip corresponds to roughly {start_time:.2f}s to {end_time:.2f}s "
         "in the original video.\n"
-        "Answer only about what is visible in this clip. If an event is not visible "
-        "inside the clip, say it is not visible in this clip.\n\n"
+        "Answer only from audio-visual evidence within this clip. If an event is not "
+        "observable inside the clip, say it is not observable in this clip.\n\n"
         f"Caption instruction:\n{instruction}"
     )
 
@@ -854,7 +874,13 @@ def omni_clip_caption(
             prefix="omni_clip_", suffix=".mp4", dir=cache_dir, delete=False
         ) as clip_file:
             clip_path = clip_file.name
-        start, end = cut_video_clip(video_path, clip_path, original_start, original_end)
+        start, end = cut_video_clip(
+            video_path,
+            clip_path,
+            original_start,
+            original_end,
+            preserve_audio=True,
+        )
         prompt = build_omni_clip_caption_prompt(
             caption_instruction,
             start_time=start,
@@ -865,14 +891,12 @@ def omni_clip_caption(
                 video_path=clip_path,
                 audio_path=None,
                 prompt=prompt,
-                system_prompt=captioner_system_prompt(),
                 env_prefix="CAPTIONER_GEMINI",
             )
         return call_qwen_perception(
             video_path=clip_path,
             audio_path=None,
             prompt=prompt,
-            system_prompt=captioner_system_prompt(),
             env_prefix="CAPTIONER_QWEN",
         )
     finally:
@@ -903,9 +927,23 @@ def omni_clip_perception(
             prefix="omni_clip_", suffix=".mp4", dir=cache_dir, delete=False
         ) as clip_file:
             clip_path = clip_file.name
-        start, end = cut_video_clip(video_path, clip_path, original_start, original_end)
-        prompt = build_perception_prompt(perceptual_question, start, end)
-        return call_perception(video_path=clip_path, audio_path=None, prompt=prompt)
+        start, end = cut_video_clip(
+            video_path,
+            clip_path,
+            original_start,
+            original_end,
+            preserve_audio=True,
+        )
+        prompt = build_clip_perception_prompt(
+            perceptual_question,
+            start_time=start,
+            end_time=end,
+        )
+        return call_perception(
+            video_path=clip_path,
+            audio_path=None,
+            prompt=prompt,
+        )
     finally:
         if clip_path and os.path.exists(clip_path):
             try:
