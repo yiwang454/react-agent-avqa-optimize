@@ -237,36 +237,59 @@ tokens, 2,381,207 total output tokens, and $0.03167/question regular-rate cost.
 
 ## AVUT and WorldSense experiment snapshots
 
-The following results are a checkpoint snapshot taken on 2026-10-07 at
-13:40 BST. Both AVUT runs were complete. The WorldSense OmniAgent and ReAct
-runs had 1,732/3,172 and 2,820/3,172 persisted question checkpoints,
-respectively. Partial-run accuracy is therefore reported as **answered
-accuracy** (`correct / answered`) and is not directly comparable to full-set
-accuracy until those runs finish.
+The table was audited on 2026-10-07. The Direct Gemini and Basic Tools rows are
+complete full-set runs on this machine: 1,734/1,734 unique AVUT IDs and
+3,172/3,172 unique WorldSense IDs, with exact input-ID coverage. The earlier
+OmniAgent and Both Omni Clip Tools entries remain the 13:40 BST checkpoint
+snapshot: the WorldSense runs had 1,732/3,172 and 2,820/3,172 persisted
+question checkpoints, respectively. Their partial-run accuracy is therefore
+reported as **answered accuracy** (`correct / answered`) and is not directly
+comparable to full-set accuracy until those runs finish.
 
-The token columns follow the same live-call protocol as the DailyOmni table:
-persisted planner calls plus live Gemini tool calls, excluding a cached first
-caption read. Thinking output is o3 reasoning plus Gemini
-`thoughtsTokenCount`; non-thinking output is the remaining output. The averages
-divide the persisted token totals by all checkpoint questions in that row.
+For ReAct rows, the token columns follow the same live-call protocol as the
+DailyOmni table: persisted planner calls plus live Gemini tool calls, excluding
+a cached first-caption read. Thinking output is o3 reasoning plus Gemini
+`thoughtsTokenCount`; non-thinking output is the remaining output. Direct rows
+contain the single Gemini video-QA call and have no tool calls. Averages divide
+the persisted token totals by the full row count.
 
 | No. | Experiment name | Reasoning effort | Available tools | Input tok. | Thinking output tok. | Non-thinking output tok. | Latency/question | Cost/question | Acc. | Avg. tool calls/question |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| AVUT-D | AVUT Direct Gemini 2.5 Flash OmniLLM | Gemini default thinking | none (direct video QA) | 11.457k | 0.143k | 0.006k | 15.24 s | $0.00437 | 79.35% (1376/1734) | 0.000 |
 | AVUT-O | AVUT Full OmniAgent (o3) | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 33.898k | 3.266k | 1.006k | 27.81 s | $0.08312 | 78.57% (1338/1703) | 6.382 |
+| AVUT-11 | AVUT o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 9.081k | 0.490k | 0.263k | 20.06 s | $0.01594 | 80.57% (1397/1734) | 1.777 |
 | AVUT-13 | AVUT o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 9.426k | 0.671k | 0.293k | 12.13 s | $0.01884 | 79.24% (1374/1734) | 1.943 |
+| WS-D | WorldSense Direct Gemini 2.5 Flash OmniLLM | Gemini default thinking | none (direct video QA) | 22.517k | 0.289k | 0.014k | 14.19 s | $0.00874 | 56.43% (1790/3172) | 0.000 |
 | WS-O | WorldSense Full OmniAgent (o3), partial 1732/3172 | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 60.361k | 3.857k | 1.233k | 38.03 s | $0.10299 | 59.05% (979/1658) | 6.990 |
+| WS-11 | WorldSense o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 17.721k | 0.629k | 0.313k | ~19.01 s | $0.02099 | 58.39% (1852/3172) | 1.986 |
 | WS-13 | WorldSense o3 + Both Omni Clip Tools, partial 2820/3172 | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 20.422k | 0.865k | 0.354k | 16.26 s | $0.02504 | 58.42% (1647/2819) | 2.077 |
 
-For completed runs, latency is full concurrent run wall time divided by the
-number of questions. For the two live WorldSense runs it is elapsed time from
-process start to the snapshot divided by the checkpoint count, so it is a
-provisional throughput figure rather than serial request latency. Persisted
-token metadata is present for 1,705/1,734 AVUT OmniAgent checkpoints,
-1,662/1,732 WorldSense OmniAgent checkpoints, and every ReAct checkpoint.
-Missing usage and failed retries are not reconstructed. Cost uses o3 at
-$2.00/M input and $8.00/M output and Gemini 2.5 Flash at $0.30/M non-audio
-input, $1.00/M audio input, and $2.50/M output; Gemini calls without modality
-details receive the observed audio fraction for the same tool type.
+For completed runs, latency is full concurrent live-run wall time divided by
+the number of questions. AVUT Direct includes the original pass plus the
+88-question re-encoded recovery. WorldSense Basic was resumed after 562 cached
+questions; its approximate throughput combines the first phase from launch to
+its last persisted checkpoint with the logged 39,803.40-second resume phase.
+For the two partial WorldSense rows, latency is elapsed time from process start
+to the snapshot divided by checkpoint count, so it is provisional throughput
+rather than serial request latency. Persisted token metadata is present for
+1,705/1,734 AVUT OmniAgent checkpoints, 1,662/1,732 WorldSense OmniAgent
+checkpoints, every Basic Tools checkpoint, every AVUT Direct row, and 3,070 of
+3,172 WorldSense Direct rows. Missing usage and failed retries are not
+reconstructed. Cost uses o3 at $2.00/M input and $8.00/M output and Gemini 2.5
+Flash at $0.30/M non-audio input, $1.00/M audio input, and $2.50/M output;
+Gemini calls without modality details receive the observed audio fraction for
+the same tool type.
+
+AVUT Direct combines 1,646 original rows with 88 successful re-encoded retries.
+Applying the canonical long-response parser gives 1,720 answered and 1,376
+correct rows; the table reports full-set accuracy. For WorldSense Direct, the
+same parser recovers 91 of 138 originally `invalid_answer` rows (53 correct),
+leaving 47 truly unparsed/truncated rows, 102 transport errors, and one empty
+response. Its 1,790/3,172 figure is likewise full-set accuracy. The audited
+artifacts are:
+
+- Basic Tools: `/mnt/ceph_rbd/data/avqa_project/avut/avut_dspy_free_react_o3_gemini25flash_basic_tools_whole_video_timestamp3_maxturns6/output_test.jsonl` and `/mnt/ceph_rbd/data/avqa_project/WorldSense/worldsense_dspy_free_react_o3_gemini25flash_basic_tools_whole_video_timestamp3_maxturns6/output_test.jsonl`.
+- Direct OmniLLM: `/mnt/ceph_rbd/data/avqa_project/avut/mllm_instruct_opt/avut_gemini2.5flash_direct_baseline_full_reencoded_recovery/output_test.jsonl` and `/mnt/ceph_rbd/data/avqa_project/WorldSense/mllm_instruct_opt/worldsense_gemini2.5flash_direct_baseline_full/output_test.jsonl`.
 
 ### AVUT by video duration
 
