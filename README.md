@@ -237,14 +237,11 @@ tokens, 2,381,207 total output tokens, and $0.03167/question regular-rate cost.
 
 ## AVUT and WorldSense experiment snapshots
 
-The table was audited on 2026-10-07. The Direct Gemini and Basic Tools rows are
-complete full-set runs on this machine: 1,734/1,734 unique AVUT IDs and
-3,172/3,172 unique WorldSense IDs, with exact input-ID coverage. The earlier
-OmniAgent and Both Omni Clip Tools entries remain the 13:40 BST checkpoint
-snapshot: the WorldSense runs had 1,732/3,172 and 2,820/3,172 persisted
-question checkpoints, respectively. Their partial-run accuracy is therefore
-reported as **answered accuracy** (`correct / answered`) and is not directly
-comparable to full-set accuracy until those runs finish.
+The table was audited on 2026-10-08. The Direct Gemini, Basic Tools, Full
+OmniAgent, and Both Omni Clip Tools rows are complete full-set runs with exact
+input-ID coverage. Completed rows report full-set accuracy (`correct / all
+questions`); answered accuracy is called out below when transport or tool
+errors left questions unanswered.
 
 For ReAct rows, the token columns follow the same live-call protocol as the
 DailyOmni table: persisted planner calls plus live Gemini tool calls, excluding
@@ -260,19 +257,23 @@ the persisted token totals by the full row count.
 | AVUT-11 | AVUT o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 9.081k | 0.490k | 0.263k | 20.06 s | $0.01594 | 80.57% (1397/1734) | 1.777 |
 | AVUT-13 | AVUT o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 9.426k | 0.671k | 0.293k | 12.13 s | $0.01884 | 79.24% (1374/1734) | 1.943 |
 | WS-D | WorldSense Direct Gemini 2.5 Flash OmniLLM | Gemini default thinking | none (direct video QA) | 22.517k | 0.289k | 0.014k | 14.19 s | $0.00874 | 56.43% (1790/3172) | 0.000 |
-| WS-O | WorldSense Full OmniAgent (o3), partial 1732/3172 | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 60.361k | 3.857k | 1.233k | 38.03 s | $0.10299 | 59.05% (979/1658) | 6.990 |
+| WS-O | WorldSense Full OmniAgent (o3) | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 62.003k | 3.820k | 1.211k | 36.11 s | $0.10155 | 53.56% (1699/3172) | 6.652 |
 | WS-11 | WorldSense o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 17.721k | 0.629k | 0.313k | ~19.01 s | $0.02099 | 58.39% (1852/3172) | 1.986 |
-| WS-13 | WorldSense o3 + Both Omni Clip Tools, partial 2820/3172 | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 20.422k | 0.865k | 0.354k | 16.26 s | $0.02504 | 58.42% (1647/2819) | 2.077 |
+| WS-13 | WorldSense o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 20.307k | 0.859k | 0.354k | 16.17 s | $0.02493 | 57.88% (1836/3172) | 2.087 |
 
 For completed runs, latency is full concurrent live-run wall time divided by
 the number of questions. AVUT Direct includes the original pass plus the
 88-question re-encoded recovery. WorldSense Basic was resumed after 562 cached
 questions; its approximate throughput combines the first phase from launch to
 its last persisted checkpoint with the logged 39,803.40-second resume phase.
-For the two partial WorldSense rows, latency is elapsed time from process start
-to the snapshot divided by checkpoint count, so it is provisional throughput
-rather than serial request latency. Persisted token metadata is present for
-1,705/1,734 AVUT OmniAgent checkpoints, 1,662/1,732 WorldSense OmniAgent
+WorldSense Both Omni Clip Tools completed all 3,172 questions in 51,288.42
+seconds. Its one previously unparseable sample, `HRXUIIaw-2164`, was rerun on
+2026-10-08 and now has a valid answer (A); it is incorrect against gold C, so
+the final accuracy remains 57.88% (1,836/3,172). WorldSense OmniAgent has 1,699
+correct and 2,852 answered questions: its full-set accuracy is 53.56%
+(1,699/3,172), while its answered accuracy is 59.57% (1,699/2,852). Persisted
+token metadata is present for 1,705/1,734 AVUT OmniAgent checkpoints,
+2,861/3,172 WorldSense OmniAgent
 checkpoints, every Basic Tools checkpoint, every AVUT Direct row, and 3,070 of
 3,172 WorldSense Direct rows. Missing usage and failed retries are not
 reconstructed. Cost uses o3 at $2.00/M input and $8.00/M output and Gemini 2.5
@@ -320,23 +321,23 @@ remains `correct / answered`.
 
 ### WorldSense by video duration
 
-#### Full OmniAgent (o3), partial 1732/3172
+#### Full OmniAgent (o3)
 
 | Duration | #Q | Clip caption called (%) | Mean clip-caption calls | Clip perception called (%) | Mean clip-perception calls | Accuracy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ≤1 min | 680 | 0.00% | 0.000 | 36.03% | 2.543 | 56.89% (384/675) |
-| 1–3 min | 720 | 0.00% | 0.000 | 40.56% | 2.926 | 62.10% (444/715) |
-| 3–5 min | 172 | 0.00% | 0.000 | 38.95% | 2.523 | 53.61% (89/166) |
-| >5 min | 160 | 0.00% | 0.000 | 31.25% | 2.219 | 60.78% (62/102) |
+| ≤1 min | 1059 | 0.00% | 0.000 | 37.02% | 2.701 | 57.49% (576/1002) |
+| 1–3 min | 1386 | 0.00% | 0.000 | 38.60% | 2.907 | 61.22% (794/1297) |
+| 3–5 min | 348 | 0.00% | 0.000 | 37.07% | 2.316 | 55.41% (174/314) |
+| >5 min | 379 | 0.00% | 0.000 | 25.33% | 1.958 | 64.85% (155/239) |
 
-#### o3 + Both Omni Clip Tools, partial 2820/3172
+#### o3 + Both Omni Clip Tools
 
 | Duration | #Q | Clip caption called (%) | Mean clip-caption calls | Clip perception called (%) | Mean clip-perception calls | Accuracy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ≤1 min | 973 | 5.65% | 0.073 | 16.96% | 0.232 | 57.45% (559/973) |
-| 1–3 min | 1226 | 5.46% | 0.068 | 16.07% | 0.230 | 58.86% (721/1225) |
-| 3–5 min | 295 | 6.44% | 0.095 | 16.27% | 0.258 | 55.59% (164/295) |
-| >5 min | 326 | 5.21% | 0.058 | 17.18% | 0.242 | 62.27% (203/326) |
+| ≤1 min | 1059 | 5.95% | 0.076 | 17.28% | 0.240 | 57.22% (606/1059) |
+| 1–3 min | 1386 | 5.63% | 0.069 | 15.80% | 0.224 | 58.51% (811/1386) |
+| 3–5 min | 348 | 6.32% | 0.092 | 17.24% | 0.282 | 53.16% (185/348) |
+| >5 min | 379 | 5.28% | 0.058 | 17.41% | 0.243 | 61.74% (234/379) |
 
 The duration evaluator uses source-cut seconds, with a 0.5-second tolerance at
 the 1/3/5-minute boundaries to keep nominal boundary videos in their intended
