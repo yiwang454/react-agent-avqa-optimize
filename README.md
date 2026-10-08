@@ -55,7 +55,7 @@ question latencies.
 | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | D | Gemini 2.5 Flash Direct OmniLLM | [JSONL](artifacts/results/worldsense/direct_gemini_2_5_flash/output_test.jsonl) | Gemini default thinking | none (direct video QA) | 56.43% (1790/3172) | 22.517k | 0.289k | 0.014k | 0.000 | $0.00874 | — |
 | O | Full OmniAgent (o3), repair pending; 2852/3172 answered | — | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | **59.57% (1699/2852)†** | 62.003k | 3.820k | 1.211k | 6.652 | $0.10155 | — |
-| 11 | o3 Basic Tools | source unavailable | medium | `ask_caption`, `ask_perception` | **58.39% (1852/3172)** | 17.721k | 0.629k | 0.313k | 1.986 | $0.02099 | 31.29 s |
+| 11 | o3 Basic Tools | [JSONL.gz](artifacts/results/worldsense/experiment_11_basic_tools/output_test.jsonl.gz) | medium | `ask_caption`, `ask_perception` | **58.39% (1852/3172)** | 17.721k | 0.629k | 0.313k | 1.986 | $0.02099 | 31.29 s |
 | 13 | o3 + Both Omni Clip Tools | [JSONL.gz](artifacts/results/worldsense/experiment_13_both_omni_clip_tools/output_test.jsonl.gz) | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 57.88% (1836/3172) | 20.307k | 0.859k | 0.354k | 2.087 | $0.02493 | — |
 
 WorldSense-11 has a non-null retry-adjusted latency for every one of its 3,172
