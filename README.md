@@ -24,7 +24,7 @@ therefore intentionally blank.
 | O | Full OmniAgent (o3) | [JSONL.gz](artifacts/results/daily_omni/omniagent_replication/output_test.jsonl.gz) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.53% (928/1197) | 62.7k | 3.6k† | 1.3k† | 7.27 | $0.0674 | — |
 | 10 | o3 + Omni Clip Caption | [JSONL](artifacts/results/daily_omni/experiment_10_omni_clip_caption/output_test.jsonl) | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 78.11% (935/1197) | 9.0k | 0.81k | 0.30k | 1.59 | $0.0173 | — |
 | 11 | o3 Basic Tools | [JSONL](artifacts/results/daily_omni/experiment_11_basic_tools/output_test.jsonl) | medium | `ask_caption`, `ask_perception` | **78.86% (944/1197)** | 7.8k | 0.78k | 0.28k | 1.55 | $0.0157 | — |
-| 12 | o3 + Omni Clip Perception | — | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.03% (946/1197) | 8.1k | 0.79k | 0.30k | 1.58 | $0.0171 | — |
+| 12 | o3 + Omni Clip Perception | [JSONL.gz](artifacts/results/daily_omni/experiment_12_omni_clip_perception/output_test.jsonl.gz) | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.03% (946/1197) | 8.1k | 0.79k | 0.30k | 1.58 | $0.0171 | — |
 <!-- | 11b | o3 Basic Tools (High Reasoning) | — | high | `ask_caption`, `ask_perception` | 79.53% (952/1197) | 9.9k | 1.61k | 0.33k | 1.63 | $0.0243 | — | -->
 
 DailyOmni Direct uses the exact paper-baseline run requested from the sibling
