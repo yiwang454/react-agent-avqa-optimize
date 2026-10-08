@@ -1,5 +1,10 @@
 # Free-ReAct Audio-Visual QA Experiments
 
+## Main contributions
+- The proposed agentic AVQA workflow outperforms (AVUT/DailyOmni) or obtains comparative performance compared with the SOTA agentic AVQA method OmniAgent, with substantially lower cost (and shorter latency), suggesting better efficiency.
+- The proposed agentic workflow slightly outperformed the direct OmniLLM inference results on AVQA benches (by 1.8% on DailyOmni, 1.2 on AVUT and 1.9% on WorldSense), but showed significant better accuracy on >= 5min long videos than direct inference.
+- We experimented instruction optimization to enhance the performance when using less strengthened reasoning model (GPT 4.1) but didn't generalize such gain on more powerful reasoning model (GPT o3) - future work is to extend this instruction optimization on long video understanding where agentic framework shows larger benefit. 
+
 ## Main benchmark results
 
 All token, tool-call, and cost columns are averages per question. `Latency` is
@@ -15,10 +20,10 @@ therefore intentionally blank.
 
 | No. | Experiment | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| D | Gemini 2.5 Flash Direct (paper baseline) | Gemini default thinking | none (direct video QA) | **77.03% (922/1197)** | 5.048k | 0.004k | 0.002k | 0.000 | $0.00154 | — |
+| D | Gemini 2.5 Flash Direct (paper baseline) | Gemini default thinking | none (direct video QA) | 77.03% (922/1197) | 5.048k | 0.004k | 0.002k | 0.000 | $0.00154 | — |
 | O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.53% (928/1197) | 62.7k | 3.6k† | 1.3k† | 7.27 | $0.0674 | — |
 | 10 | o3 + Omni Clip Caption | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 78.11% (935/1197) | 9.0k | 0.81k | 0.30k | 1.59 | $0.0173 | — |
-| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 78.86% (944/1197) | 7.8k | 0.78k | 0.28k | 1.55 | $0.0157 | — |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | **78.86% (944/1197)** | 7.8k | 0.78k | 0.28k | 1.55 | $0.0157 | — |
 | 11b | o3 Basic Tools (High Reasoning) | high | `ask_caption`, `ask_perception` | 79.53% (952/1197) | 9.9k | 1.61k | 0.33k | 1.63 | $0.0243 | — |
 | 12 | o3 + Omni Clip Perception | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.03% (946/1197) | 8.1k | 0.79k | 0.30k | 1.58 | $0.0171 | — |
 <!-- | 13 | o3 Basic Tools + GEPA Guidance | medium | `ask_caption`, `ask_perception` | 77.94% (933/1197) | 9.203k | 0.854k | 0.323k | 1.659 | $0.01856 | 18.05 s | -->
@@ -36,7 +41,7 @@ unique output IDs, 1,197 parsed answers, complete inference-only metadata, and
 | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | D | Gemini 2.5 Flash Direct OmniLLM | Gemini default thinking | none (direct video QA) | 79.35% (1376/1734) | 11.457k | 0.143k | 0.006k | 0.000 | $0.00437 | — |
 | O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.16% (1338/1734) | 33.898k | 3.266k | 1.006k | 6.382 | $0.08312 | — |
-| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 80.57% (1397/1734) | 9.081k | 0.490k | 0.263k | 1.777 | $0.01594 | 27.55 s‡ |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | **80.57% (1397/1734)** | 9.081k | 0.490k | 0.263k | 1.777 | $0.01594 | 27.55 s‡ |
 | 13 | o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 79.24% (1374/1734) | 9.426k | 0.671k | 0.293k | 1.943 | $0.01884 | — |
 
 ‡ AVUT-11 has 1,733 non-null retry-adjusted latency values. Its one terminal
@@ -49,8 +54,8 @@ question latencies.
 | No. | Experiment | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | D | Gemini 2.5 Flash Direct OmniLLM | Gemini default thinking | none (direct video QA) | 56.43% (1790/3172) | 22.517k | 0.289k | 0.014k | 0.000 | $0.00874 | — |
-| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 59.50%（1484/2494）† | ~62.003k | ~3.820k | ~1.211k | ~6.652 | ~$0.10155 | — |
-| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 58.39% (1852/3172) | 17.721k | 0.629k | 0.313k | 1.986 | $0.02099 | 31.29 s |
+| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | **59.50%（1484/2494）†** | ~62.003k | ~3.820k | ~1.211k | ~6.652 | ~$0.10155 | — |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | **58.39% (1852/3172)** | 17.721k | 0.629k | 0.313k | 1.986 | $0.02099 | 31.29 s |
 | 13 | o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 57.88% (1836/3172) | 20.307k | 0.859k | 0.354k | 2.087 | $0.02493 | — |
 
 WorldSense-11 has a non-null retry-adjusted latency for every one of its 3,172
@@ -351,14 +356,26 @@ artifacts are:
 
 ### AVUT by video duration
 
+The consolidated table below uses full-set accuracy in every bucket, so an
+unanswered or unparseable question counts as incorrect. The denominators are
+the exact source-manifest bucket sizes and sum to all 1,734 AVUT questions.
+
+| No. | Experiment | Overall | ≤1 min (n=1125) | 1–3 min (n=571) | 3–5 min (n=7) | >5 min (n=31) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| D | Gemini 2.5 Flash Direct OmniLLM | 79.35% (1376/1734) | 78.22% (880/1125) | 81.79% (467/571) | 85.71% (6/7) | 74.19% (23/31) |
+| O | Full OmniAgent (o3) | 77.16% (1338/1734) | 75.82% (853/1125) | 79.86% (456/571) | 85.71% (6/7) | 74.19% (23/31) |
+| 11 | o3 Basic Tools | **80.57% (1397/1734)** | **79.11% (890/1125)** | **83.19% (475/571)** | **85.71% (6/7)** | **83.87% (26/31)** |
+| 13 | o3 + Both Omni Clip Tools | 79.24% (1374/1734) | 77.60% (873/1125) | 82.31% (470/571) | 85.71% (6/7) | 80.65% (25/31) |
+
+#### Clip-tool detail: Full OmniAgent (o3)
+
 Clip calls are split by tool. `Clip caption` means `omni_clip_caption`.
 `Clip perception` means `omni_clip_perception` for ReAct and `video_clip_qa`
 for OmniAgent, which has no clip-caption tool. Each `called (%)` column is the
 share of checkpoint questions that used that specific tool, and each mean is
 that tool's calls divided by all questions in the duration bucket. Accuracy
-remains `correct / answered`.
-
-#### Full OmniAgent (o3)
+in the two tool-detail tables remains `correct / answered`, unlike the
+full-set consolidated table above.
 
 | Duration | #Q | Clip caption called (%) | Mean clip-caption calls | Clip perception called (%) | Mean clip-perception calls | Accuracy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -367,7 +384,7 @@ remains `correct / answered`.
 | 3–5 min | 7 | 0.00% | 0.000 | 57.14% | 4.000 | 100.00% (6/6) |
 | >5 min | 31 | 0.00% | 0.000 | 45.16% | 2.419 | 85.19% (23/27) |
 
-#### o3 + Both Omni Clip Tools
+#### Clip-tool detail: o3 + Both Omni Clip Tools
 
 | Duration | #Q | Clip caption called (%) | Mean clip-caption calls | Clip perception called (%) | Mean clip-perception calls | Accuracy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -378,7 +395,23 @@ remains `correct / answered`.
 
 ### WorldSense by video duration
 
-#### Full OmniAgent (o3)
+The WorldSense split uses the same full-set protocol. Its four source-manifest
+buckets contain all 3,172 questions. Experiment O here is the completed
+3,172-checkpoint audit used by the tool-detail tables below; the main table at
+the top separately shows a still-incomplete OmniAgent aggregation snapshot.
+
+| No. | Experiment | Overall | ≤1 min (n=1059) | 1–3 min (n=1386) | 3–5 min (n=348) | >5 min (n=379) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| D | Gemini 2.5 Flash Direct OmniLLM | 56.43% (1790/3172) | **57.70% (611/1059)** | 58.80% (815/1386) | 53.45% (186/348) | 46.97% (178/379) |
+| O | Full OmniAgent (o3) | 53.56% (1699/3172) | 54.39% (576/1059) | 57.29% (794/1386) | 50.00% (174/348) | 40.90% (155/379) |
+| 11 | o3 Basic Tools | **58.39% (1852/3172)** | 55.43% (587/1059) | **59.52% (825/1386)** | **56.90% (198/348)** | **63.85% (242/379)** |
+| 13 | o3 + Both Omni Clip Tools | 57.88% (1836/3172) | 57.22% (606/1059) | 58.51% (811/1386) | 53.16% (185/348) | 61.74% (234/379) |
+
+WorldSense-11 is strongest in every bucket above one minute. The largest
+separation is on videos over five minutes: 63.85% for experiment 11 versus
+46.97% for Direct and 40.90% for Full OmniAgent; experiment 13 reaches 61.74%.
+
+#### Clip-tool detail: Full OmniAgent (o3)
 
 | Duration | #Q | Clip caption called (%) | Mean clip-caption calls | Clip perception called (%) | Mean clip-perception calls | Accuracy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -387,7 +420,7 @@ remains `correct / answered`.
 | 3–5 min | 348 | 0.00% | 0.000 | 37.07% | 2.316 | 55.41% (174/314) |
 | >5 min | 379 | 0.00% | 0.000 | 25.33% | 1.958 | 64.85% (155/239) |
 
-#### o3 + Both Omni Clip Tools
+#### Clip-tool detail: o3 + Both Omni Clip Tools
 
 | Duration | #Q | Clip caption called (%) | Mean clip-caption calls | Clip perception called (%) | Mean clip-perception calls | Accuracy |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -399,9 +432,14 @@ remains `correct / answered`.
 The duration evaluator uses source-cut seconds, with a 0.5-second tolerance at
 the 1/3/5-minute boundaries to keep nominal boundary videos in their intended
 bucket after transcoding. Benchmark task categories are read dynamically rather
-than using DailyOmni's six fixed categories. Reproduce the reports with:
-
-```bash
-python /mnt/ceph_rbd/workspace/avqa_project/avqa_reasoning_datasets/AVUT/enhanced_eval_results_agents.py
-python /mnt/ceph_rbd/workspace/avqa_project/avqa_reasoning_datasets/worldsense/enhanced_eval_results_agents.py
-```
+than using DailyOmni's six fixed categories. Direct parsing follows the same
+audited protocol as the main tables: AVUT applies the canonical long-response
+parser to every row; WorldSense retains valid persisted predictions and applies
+that parser to `invalid_answer` responses. Failed and still-unparsed questions
+remain in the full-set denominator. The duration joins use the Direct and Basic
+Tools artifacts listed above together with
+`/mnt/ceph_rbd/data/avqa_project/avut/mllm_instruct_opt/avut_gemini2.5flash_direct_safe_duration_sorted_input/avut_full1734_duration_ascending_safe_videos.jsonl`
+and
+`/mnt/ceph_rbd/data/avqa_project/WorldSense/worldsense_test_cut_old.jsonl`;
+all four Direct/Basic-Tools joins have exact ID coverage with no missing or
+extra IDs.
