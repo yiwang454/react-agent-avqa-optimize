@@ -1,45 +1,96 @@
-# DailyOmni Free-ReAct Experiments
+# Free-ReAct Audio-Visual QA Experiments
 
-This branch contains four inference experiments for evaluating an o3 planner in a
-Free-ReAct audio-visual question answering workflow. The full OmniAgent o3
-system is included as a baseline. A Free-ReAct planner cannot inspect a video
-directly: it must first obtain a whole-video caption and can then decide whether
-to request more evidence or return a final answer.
+## Main benchmark results
 
-## Results
+All token, tool-call, and cost columns are averages per question. `Latency` is
+the mean of the persisted per-question `retry_adjusted_seconds`: it starts at
+the first planner model request for that question, ends after its final answer,
+and removes failed request attempts and their retry backoff. It is independent
+of the benchmark worker count and is not full-benchmark wall time divided by the
+number of questions. `—` means that the corresponding output does not persist
+this question-level latency schema; all Full OmniAgent latency cells are
+therefore intentionally blank.
 
-All systems use the 1,197-question DailyOmni evaluation set. The four Free-ReAct
-experiments use Gemini 2.5 Flash for captioning and perception and allow at most
-six tool calls per question.
+### DailyOmni
 
-| No. | Experiment name | Reasoning effort | Available tools | Input tok. | Thinking output tok. | Non-thinking output tok. | Latency/question | Cost/question | Acc. | Avg. tool calls/question |
+| No. | Experiment | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Baseline | Full OmniAgent (o3) | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 62.7k | 3.6k† | 1.3k† | 71.00 s | $0.0674 | 77.53% | 7.27 |
-| 10 | o3 + Omni Clip Caption | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 9.0k | 0.81k | 0.30k | 11.35 s | $0.0173 | 78.11% | 1.59 |
-| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 7.8k | 0.78k | 0.28k | 11.58 s | $0.0157 | 78.86% | 1.55 |
-| 12 | o3 + Omni Clip Perception | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 8.1k | 0.79k | 0.30k | 12.50 s | $0.0171 | 79.03% | 1.58 |
-| 11b | o3 Basic Tools (High Reasoning) | high | `ask_caption`, `ask_perception` | 9.9k | 1.61k | 0.33k | 14.38 s | $0.0243 | 79.53% | 1.63 |
+| D | Gemini 2.5 Flash Direct (paper baseline) | Gemini default thinking | none (direct video QA) | **77.03% (922/1197)** | 5.048k | 0.004k | 0.002k | 0.000 | $0.00154 | — |
+| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.53% (928/1197) | 62.7k | 3.6k† | 1.3k† | 7.27 | $0.0674 | — |
+| 10 | o3 + Omni Clip Caption | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 78.11% (935/1197) | 9.0k | 0.81k | 0.30k | 1.59 | $0.0173 | — |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 78.86% (944/1197) | 7.8k | 0.78k | 0.28k | 1.55 | $0.0157 | — |
+| 11b | o3 Basic Tools (High Reasoning) | high | `ask_caption`, `ask_perception` | 79.53% (952/1197) | 9.9k | 1.61k | 0.33k | 1.63 | $0.0243 | — |
+| 12 | o3 + Omni Clip Perception | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.03% (946/1197) | 8.1k | 0.79k | 0.30k | 1.58 | $0.0171 | — |
+<!-- | 13 | o3 Basic Tools + GEPA Guidance | medium | `ask_caption`, `ask_perception` | 77.94% (933/1197) | 9.203k | 0.854k | 0.323k | 1.659 | $0.01856 | 18.05 s | -->
+
+DailyOmni Direct uses the exact paper-baseline run requested from the sibling
+experiment ledger: `daily_omni_seed27_repeat3_gemini-2.5-flash_QA_PROMPT_TEMPLATE_0.0`.
+Its accuracy is the ledger's reported overall accuracy; the token and cost
+columns are recomputed from that run's persisted usage. Experiment 13 has 1,197
+unique output IDs, 1,197 parsed answers, complete inference-only metadata, and
+1,197 non-null retry-adjusted latency values.
+
+### AVUT
+
+| No. | Experiment | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| D | Gemini 2.5 Flash Direct OmniLLM | Gemini default thinking | none (direct video QA) | 79.35% (1376/1734) | 11.457k | 0.143k | 0.006k | 0.000 | $0.00437 | — |
+| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.16% (1338/1734) | 33.898k | 3.266k | 1.006k | 6.382 | $0.08312 | — |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 80.57% (1397/1734) | 9.081k | 0.490k | 0.263k | 1.777 | $0.01594 | 27.55 s‡ |
+| 13 | o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 79.24% (1374/1734) | 9.426k | 0.671k | 0.293k | 1.943 | $0.01884 | — |
+
+‡ AVUT-11 has 1,733 non-null retry-adjusted latency values. Its one terminal
+failure retains wall-clock and successful-call timing but correctly stores
+`retry_adjusted_seconds: null`; 27.55 s is the mean over the 1,733 defined
+question latencies.
+
+### WorldSense
+
+| No. | Experiment | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| D | Gemini 2.5 Flash Direct OmniLLM | Gemini default thinking | none (direct video QA) | 56.43% (1790/3172) | 22.517k | 0.289k | 0.014k | 0.000 | $0.00874 | — |
+| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 59.50%（1484/2494）† | ~62.003k | ~3.820k | ~1.211k | ~6.652 | ~$0.10155 | — |
+| 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 58.39% (1852/3172) | 17.721k | 0.629k | 0.313k | 1.986 | $0.02099 | 31.29 s |
+| 13 | o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 57.88% (1836/3172) | 20.307k | 0.859k | 0.354k | 2.087 | $0.02493 | — |
+
+WorldSense-11 has a non-null retry-adjusted latency for every one of its 3,172
+questions. Full-set accuracy is used throughout the three main tables. AVUT
+Full OmniAgent additionally has 78.57% answered accuracy (1,338/1,703), and
+WorldSense Full OmniAgent has 59.57% answered accuracy (1,699/2,852).
+
+† WorldSense Full OmniAgent results haven't finished running yet. The current 
+<!-- † The DailyOmni Full OmniAgent summary reports 4.9k total output tokens per
+question. Its trace preserves the o3 planner split (3.55k reasoning and 0.69k
+visible output) but does not preserve Gemini tool-call thinking-token metadata.
+The remaining reported output is assigned to non-thinking output, so this split
+is approximate. The Free-ReAct rows use exact persisted o3 reasoning-token and
+Gemini `thoughtsTokenCount` fields. -->
+
+OmniAgent replication uses
+https://github.com/yiwang454/OmniAgent_replicate.git, cloned from
+https://github.com/KD-TAO/OmniAgent.git.
+
+## DailyOmni experiment details
+
+This branch evaluates an o3 planner in a Free-ReAct audio-visual question
+answering workflow. A Free-ReAct planner cannot inspect a video directly: it
+must first obtain a whole-video caption and can then decide whether to request
+more evidence or return a final answer. The Free-ReAct experiments use Gemini
+2.5 Flash for captioning and perception and allow at most six tool calls per
+question.
 
 Rows 10 and 12 were refreshed from their completed aggregate outputs on
 2026-10-07. Experiment 10 has 935/1,197 overall accuracy and 935/1,196
-answered accuracy; Experiment 12 has 946/1,197 for both. Their latency values
-remain the original full-run throughput figures: the final repair launches
-reused 1,168 and 1,103 existing checkpoints, respectively, so dividing those
-incremental repair times by the full benchmark would not be comparable.
+answered accuracy; Experiment 12 has 946/1,197 for both. Their repair launches
+reused 1,168 and 1,103 existing checkpoints, respectively, and their older
+timing values were benchmark-throughput figures, so their main-table latency is
+left blank rather than mixed with question-level retry-adjusted latency.
 
-`Avg. tool calls/question` uses one definition for every row: it counts only
-turns whose planner action is `tool`. The final decision round performed by the
-reasoner is excluded. The Full OmniAgent value is therefore 8,700 tool calls / 1,197
-questions = 7.27, computed from `OmniAgent_repeat1/output_test.jsonl`.
-
-† The Full OmniAgent summary reports 4.9k total output tokens per question. Its
-trace preserves the o3 planner split (3.55k reasoning and 0.69k visible output)
-but does not preserve Gemini tool-call thinking-token metadata (because the original OmniAgent repo doesn't have it). The table assigns
-the remaining reported output to non-thinking output, so the baseline split is
-an approximation. The Free-ReAct rows use the exact persisted o3 reasoning-token
-and Gemini `thoughtsTokenCount` fields.
-
-OmniAgent replication is run with https://github.com/yiwang454/OmniAgent_replicate.git, which is cloned from https://github.com/KD-TAO/OmniAgent.git .
+`Tool calls` uses one definition for every row: it counts only turns whose
+planner action is `tool`. The final decision round performed by the reasoner is
+excluded. The DailyOmni Full OmniAgent value is therefore 8,700 tool calls /
+1,197 questions = 7.27, computed from
+`OmniAgent_repeat1/output_test.jsonl`.
 
 ### Why high reasoning has more output tokens
 
@@ -113,6 +164,22 @@ In addition to the basic tools, the planner can select a time range and ask the
 perception model a targeted audio-visual question about that short clip. The
 planner uses the o3 `medium` reasoning configuration.
 
+### 13. o3 Basic Tools + GEPA Guidance
+
+The full-v3 inference loads the seed-2 compiled GEPA guidance with:
+
+```bash
+bash scripts/run_c1_seed2_candidate6_full_inference.sh
+```
+
+It keeps the Experiment 11 tool set and medium-reasoning planner, and appends
+the optimized `planner.optimization_guidance`. The completed output and latency
+summary are in:
+
+```text
+/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_free_react_o3_gemini25flash_guidance_seed2_candidate6_full_v3/
+```
+
 ## Shared workflow
 
 Each experiment follows the same high-level protocol:
@@ -138,13 +205,14 @@ output length of 32,768 tokens.
 - **Input tok.**: average input tokens per question. For the Free-ReAct rows,
   this is persisted planner input plus live Gemini tool input. The cached first
   caption is excluded because reading it does not issue a new model request.
-- **Thinking output tok.**: hidden o3 reasoning tokens plus Gemini thinking
+- **Output thinking tok.**: hidden o3 reasoning tokens plus Gemini thinking
   tokens, when the backend persisted both fields.
-- **Non-thinking output tok.**: output tokens excluding the recorded hidden
+- **Output non-thinking tok.**: output tokens excluding the recorded hidden
   reasoning/thinking tokens.
-- **Latency/question**: total wall-clock run time divided by 1,197 questions. It
-  represents concurrent experiment throughput, including retries and waiting,
-  rather than the latency of a single serial request.
+- **Latency**: mean per-question `retry_adjusted_seconds`. Each question is
+  measured independently from its first planner request through its final
+  answer. Failed request durations and the following retry backoff are removed;
+  worker concurrency and full-benchmark wall time do not enter the value.
 - **Cost/question**: estimated standard API cost of the persisted live calls.
   The calculation uses $2.00/M input and $8.00/M output tokens for o3, and
   $0.30/M text/image/video input, $1.00/M audio input, and $2.50/M output tokens
@@ -157,12 +225,13 @@ output length of 32,768 tokens.
 
 ## Summary
 
-The high-reasoning basic-tools run achieved the highest accuracy at 79.53%, with
-higher thinking-token usage, latency, and cost. The medium-reasoning basic-tools
-run was the least expensive system. All four Free-ReAct variants used far fewer
-tool calls than Full OmniAgent. Clip captioning did not improve aggregate
-accuracy over the medium basic-tools run; clip perception produced a small
-improvement (79.03% versus 78.86%) while remaining below high reasoning.
+The high-reasoning basic-tools run achieved the highest DailyOmni accuracy at
+79.53%, with higher thinking-token usage and cost. The medium-reasoning
+basic-tools run was the least expensive o3 Free-ReAct system. All Free-ReAct
+variants used far fewer tool calls than Full OmniAgent. Clip captioning did not
+improve aggregate accuracy over the medium basic-tools run; clip perception
+produced a small improvement (79.03% versus 78.86%) while remaining below high
+reasoning. The GEPA-guidance full-v3 run reached 77.94%.
 
 ## GPT-4.1 G0 workflow ablations
 
@@ -200,14 +269,15 @@ temporarily reported as **answered accuracy**, not accuracy over all rows. The
 held-out column excludes the same 250 Train125/Val125 IDs as the evaluation
 above; its full scope contains 947 questions. The answered denominators are
 945 for no-GEPA, 947 for G0 Planner, 941 for simplified, and 937 for quartered.
-Latency is intentionally omitted pending a corrected latency analysis.
+Only the simplified and quartered outputs persist the question-level latency
+schema; their latency cells use the same retry-adjusted mean as the main tables.
 
-| No. | Experiment name | Reasoning effort | Available tools | Input tok. | Thinking output tok. | Non-thinking output tok. | Latency/question | Cost/question | Full-set answered acc. | Held-out answered acc. | Avg. tool calls/question |
+| No. | Experiment name | Reasoning effort | Available tools | Full-set answered acc. | Held-out answered acc. | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Baseline | GPT-4.1 no-GEPA | none | `ask_caption`, `ask_perception` | 13.304k | 0.101k | 0.752k | — | $0.01358 | 71.80% (858/1195) | 71.11% (672/945) | 2.000 |
-| G0 | GPT-4.1 G0 Planner | none | `ask_caption`, `ask_perception` | 28.603k | 0.851k | 1.138k | — | $0.03167 | 75.61% (905/1197) | 75.08% (711/947) | 1.796 |
-| 14-S | GPT-4.1 G0 Simplified | none | `ask_caption`, `ask_perception` | 13.545k | 0.063k | 0.531k | — | $0.01570 | 72.33% (860/1189) | 71.84% (676/941) | 1.842 |
-| 14-Q | GPT-4.1 G0 Quartered | none | `ask_caption`, `ask_perception` | 15.783k | 0.309k | 0.700k | — | $0.01547 | 72.21% (855/1184) | 71.93% (674/937) | 1.777 |
+| Baseline | GPT-4.1 no-GEPA | none | `ask_caption`, `ask_perception` | 71.80% (858/1195) | 71.11% (672/945) | 13.304k | 0.101k | 0.752k | 2.000 | $0.01358 | — |
+| G0 | GPT-4.1 G0 Planner | none | `ask_caption`, `ask_perception` | 75.61% (905/1197) | 75.08% (711/947) | 28.603k | 0.851k | 1.138k | 1.796 | $0.03167 | — |
+| 14-S | GPT-4.1 G0 Simplified | none | `ask_caption`, `ask_perception` | 72.33% (860/1189) | 71.84% (676/941) | 13.545k | 0.063k | 0.531k | 1.842 | $0.01570 | 34.56 s |
+| 14-Q | GPT-4.1 G0 Quartered | none | `ask_caption`, `ask_perception` | 72.21% (855/1184) | 71.93% (674/937) | 15.783k | 0.309k | 0.700k | 1.777 | $0.01547 | 24.87 s |
 
 The calculation follows the protocol in
 `scripts/experiment_records/g0_gpt4_1_gpt5_4_token_usage_and_latency.md`:
@@ -235,12 +305,12 @@ artifacts. As a protocol check, applying the same calculation to the historical
 GPT-4.1 G0 Planner output exactly reproduces its recorded 34,237,267 input
 tokens, 2,381,207 total output tokens, and $0.03167/question regular-rate cost.
 
-## AVUT and WorldSense experiment snapshots
+## AVUT and WorldSense experiment details
 
-The table was audited on 2026-10-08. The Direct Gemini, Basic Tools, Full
-OmniAgent, and Both Omni Clip Tools rows are complete full-set runs with exact
-input-ID coverage. Completed rows report full-set accuracy (`correct / all
-questions`); answered accuracy is called out below when transport or tool
+The main tables at the top were audited on 2026-10-08. The Direct Gemini, Basic
+Tools, Full OmniAgent, and Both Omni Clip Tools rows are complete full-set runs
+with exact input-ID coverage. They report full-set accuracy (`correct / all
+questions`); answered accuracy is called out separately when transport or tool
 errors left questions unanswered.
 
 For ReAct rows, the token columns follow the same live-call protocol as the
@@ -248,26 +318,13 @@ DailyOmni table: persisted planner calls plus live Gemini tool calls, excluding
 a cached first-caption read. Thinking output is o3 reasoning plus Gemini
 `thoughtsTokenCount`; non-thinking output is the remaining output. Direct rows
 contain the single Gemini video-QA call and have no tool calls. Averages divide
-the persisted token totals by the full row count.
+the persisted token totals by the full row count. Only Basic Tools currently
+persists comparable question-level retry-adjusted latency; older throughput
+figures are not mixed into the main tables.
 
-| No. | Experiment name | Reasoning effort | Available tools | Input tok. | Thinking output tok. | Non-thinking output tok. | Latency/question | Cost/question | Acc. | Avg. tool calls/question |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| AVUT-D | AVUT Direct Gemini 2.5 Flash OmniLLM | Gemini default thinking | none (direct video QA) | 11.457k | 0.143k | 0.006k | 15.24 s | $0.00437 | 79.35% (1376/1734) | 0.000 |
-| AVUT-O | AVUT Full OmniAgent (o3) | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 33.898k | 3.266k | 1.006k | 27.81 s | $0.08312 | 78.57% (1338/1703) | 6.382 |
-| AVUT-11 | AVUT o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 9.081k | 0.490k | 0.263k | 20.06 s | $0.01594 | 80.57% (1397/1734) | 1.777 |
-| AVUT-13 | AVUT o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 9.426k | 0.671k | 0.293k | 12.13 s | $0.01884 | 79.24% (1374/1734) | 1.943 |
-| WS-D | WorldSense Direct Gemini 2.5 Flash OmniLLM | Gemini default thinking | none (direct video QA) | 22.517k | 0.289k | 0.014k | 14.19 s | $0.00874 | 56.43% (1790/3172) | 0.000 |
-| WS-O | WorldSense Full OmniAgent (o3) | not persisted | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 62.003k | 3.820k | 1.211k | 36.11 s | $0.10155 | 53.56% (1699/3172) | 6.652 |
-| WS-11 | WorldSense o3 Basic Tools | medium | `ask_caption`, `ask_perception` | 17.721k | 0.629k | 0.313k | ~19.01 s | $0.02099 | 58.39% (1852/3172) | 1.986 |
-| WS-13 | WorldSense o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 20.307k | 0.859k | 0.354k | 16.17 s | $0.02493 | 57.88% (1836/3172) | 2.087 |
-
-For completed runs, latency is full concurrent live-run wall time divided by
-the number of questions. AVUT Direct includes the original pass plus the
-88-question re-encoded recovery. WorldSense Basic was resumed after 562 cached
-questions; its approximate throughput combines the first phase from launch to
-its last persisted checkpoint with the logged 39,803.40-second resume phase.
-WorldSense Both Omni Clip Tools completed all 3,172 questions in 51,288.42
-seconds. Its one previously unparseable sample, `HRXUIIaw-2164`, was rerun on
+AVUT Direct includes the original pass plus the 88-question re-encoded
+recovery. WorldSense Both Omni Clip Tools completed all 3,172 questions. Its
+one previously unparseable sample, `HRXUIIaw-2164`, was rerun on
 2026-10-08 and now has a valid answer (A); it is incorrect against gold C, so
 the final accuracy remains 57.88% (1,836/3,172). WorldSense OmniAgent has 1,699
 correct and 2,852 answered questions: its full-set accuracy is 53.56%
