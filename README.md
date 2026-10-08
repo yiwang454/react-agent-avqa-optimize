@@ -24,9 +24,8 @@ therefore intentionally blank.
 | O | Full OmniAgent (o3) | — | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.53% (928/1197) | 62.7k | 3.6k† | 1.3k† | 7.27 | $0.0674 | — |
 | 10 | o3 + Omni Clip Caption | [JSONL](artifacts/results/daily_omni/experiment_10_omni_clip_caption/output_test.jsonl) | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 78.11% (935/1197) | 9.0k | 0.81k | 0.30k | 1.59 | $0.0173 | — |
 | 11 | o3 Basic Tools | [JSONL](artifacts/results/daily_omni/experiment_11_basic_tools/output_test.jsonl) | medium | `ask_caption`, `ask_perception` | **78.86% (944/1197)** | 7.8k | 0.78k | 0.28k | 1.55 | $0.0157 | — |
-| 11b | o3 Basic Tools (High Reasoning) | — | high | `ask_caption`, `ask_perception` | 79.53% (952/1197) | 9.9k | 1.61k | 0.33k | 1.63 | $0.0243 | — |
 | 12 | o3 + Omni Clip Perception | — | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.03% (946/1197) | 8.1k | 0.79k | 0.30k | 1.58 | $0.0171 | — |
-| 13 | o3 Basic Tools + GEPA Guidance | source unavailable | medium | `ask_caption`, `ask_perception` | 77.94% (933/1197) | 9.203k | 0.854k | 0.323k | 1.659 | $0.01856 | 18.05 s |
+<!-- | 11b | o3 Basic Tools (High Reasoning) | — | high | `ask_caption`, `ask_perception` | 79.53% (952/1197) | 9.9k | 1.61k | 0.33k | 1.63 | $0.0243 | — | -->
 
 DailyOmni Direct uses the exact paper-baseline run requested from the sibling
 experiment ledger: `daily_omni_seed27_repeat3_gemini-2.5-flash_QA_PROMPT_TEMPLATE_0.0`.
