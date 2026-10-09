@@ -61,13 +61,23 @@ It tests caption-first ordering again after the QA tools have been merged.
 ## Repeat 1 results
 
 Repeat 1 completed all 125 selected validation questions for B0-B7. All 1,000
-question-level outputs were parseable. These are single-repeat results and
-should be treated as preliminary until repeat2 and repeat3 are complete.
+question-level outputs were parseable. B8 was not launched in this batch, so
+the B8 row below temporarily uses the same Val125 subset extracted from the
+completed historical Experiment 11 o3 Basic Tools run. All 125 proxy rows were
+present and parseable. These results should be treated as preliminary until
+repeat2 and repeat3 are complete and native B8 is run under the exact ablation
+controls.
 
 Source directory:
 
 ```text
 /mnt/ceph_rbd/data/avqa_project/daily_omni/modality_merge_ablation_selectedVal125_repeats/repeat1
+```
+
+Temporary B8 proxy source:
+
+```text
+/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_free_react_o3_gemini25flash_basic_tools_maxturns6/output_test.jsonl
 ```
 
 ### Accuracy and resource use
@@ -82,10 +92,12 @@ Source directory:
 | B5 | 97 | 77.6% | 231 | 1.848 | 8,320 | 1,709 | $0.02643 | 31.02 s |
 | B6 | 98 | 78.4% | 240 | 1.920 | 8,893 | 1,575 | $0.02536 | 31.13 s |
 | B7 | 98 | 78.4% | 231 | 1.848 | 9,312 | 1,640 | $0.02542 | 32.48 s |
+| B8† | 96 | 76.8% | 186 | 1.488 | 7,360 | 1,097 | $0.01564 | — |
 
 Live cost excludes the historical generation cost of captions served from the
 caption cache. Latency is retry-adjusted wall-clock latency averaged over the
-125 questions.
+125 questions. The historical B8 proxy predates question-level latency
+persistence, so its comparable latency is unavailable.
 
 ### Tool-call composition and completion diagnostics
 
@@ -99,6 +111,18 @@ caption cache. Latency is retry-adjusted wall-clock latency averaged over the
 | B5 | `ask_caption` 125; `ask_perception` 62; `omni_clip_perception` 43; `video_metadata` 1 | 0 | 0 | 125 natural |
 | B6 | `ask_caption` 125; `ask_perception` 76; `omni_clip_perception` 39 | 0 | 0 | 125 natural |
 | B7 | `ask_caption` 125; `ask_perception` 105; `video_metadata` 1 | 0 | 1 | 124 natural; 1 forced-budget |
+| B8† | `ask_caption` 125; `ask_perception` 61 | 0 | 1 | 124 natural; 1 forced-budget |
+
+† **B8 is currently a historical proxy, not a native ablation run.** The
+Experiment 11 subset matches B8's high-level design: o3-medium planner,
+six-tool-call budget, mandatory first `ask_caption`, and only `ask_caption` +
+`ask_perception`. It differs in workflow wording, Gemini sampling
+(`temperature=0` rather than `0.6`), caption placement (`task` rather than
+`conversation_state`), and caption-cache scope (`first_call_only` rather than
+`all`). The B8 cost and token metrics were recomputed from the 125 persisted
+traces using the same current accounting rates as B0-B7. Its final-answer
+status is inferred from the trace: one question reached six calls and used the
+forced-final round.
 
 ### Preliminary adjacent-comparison observations
 
@@ -126,13 +150,18 @@ caption cache. Latency is retry-adjusted wall-clock latency averaged over the
 - **B5 → B7:** Removing clip-level omni QA left total calls unchanged at 231
   and increased accuracy by 0.8 points. The 43 clip calls and 62 global calls
   in B5 were replaced by 105 global calls in B7; latency increased by 4.7%.
+- **B7 → B8 proxy:** The historical Basic Tools subset has 186 calls, 45 fewer
+  than B7 (-19.5%), and 76.8% accuracy, 1.6 points below B7. Its average live
+  cost is 38.5% lower. Because the proxy also differs in prompt, Gemini
+  sampling, caption placement, and cache scope, this is descriptive only and
+  must not be treated as the isolated effect of removing metadata.
 
 The main repeat1 pattern is that the largest call-count reductions occurred at
 the workflow rewrite (B1 → B2) and the switch to omni-modal captioning
 (B2 → B3), not when deleting the cross-check sentence (B0 → B1) or merging QA
 tools (B4 → B5). This is an observation from one repeat, not yet a final causal
-conclusion. B5-flex and B8 were not included in the B0-B7 repeat launcher and
-therefore have no repeat1 results in this table.
+conclusion. B5-flex was not included in the B0-B7 repeat launcher. B8 was also
+not included; its current row is the explicitly marked historical proxy above.
 
 ## Intended comparisons
 
