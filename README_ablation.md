@@ -1,33 +1,6 @@
 # Stage 2 Modality-Merge Ablation
 
-## Motivation
 
-Stage 2 migrates the OmniAgent C+Q+M configuration into our DSPy
-Free-ReAct framework and separates the effects of framework migration,
-workflow refinement, caption modality, caption-first ordering, QA modality
-merging, clip-level perception, and planner-visible metadata.
-
-This study was motivated by Rohit's question: why were tool calls not reduced
-in OmniAgent, while they were reduced in our implementation, and was modality
-merging responsible? Re-reading the OmniAgent workflow revealed an instruction
-that may explicitly encourage additional calls:
-
-> Be selective: tools may be noisy or incomplete. **Cross-check and verify important information using multiple tools if needed.**
-
-The current hypothesis is therefore not that modality merging alone reduced
-tool use. The reduction could come from one or more of the following:
-
-- removing the explicit encouragement to cross-check with multiple tools;
-- simplifying the workflow instruction;
-- observing a whole-video audio-visual caption before planning later calls;
-- replacing separate audio, global-video, and clip-video QA interfaces with
-  omni-modal tools that can answer across modalities in one call.
-
-The configurations below isolate these factors. Tool-call reduction should be
-attributed only after comparing the corresponding adjacent configurations,
-not inferred from the final merged system alone.
-
-For collaborators catching up, including Pasquale: the short version is that
 B0 first reproduces the OmniAgent setup inside our framework, B1 removes only
 the cross-check sentence, and the later configurations introduce the new
 workflow, omni captioning, caption-first ordering, and modality merging one
@@ -76,10 +49,7 @@ It tests caption-first ordering again after the QA tools have been merged.
 
 - **B0 → B1:** Delete only the sentence "Cross-check and verify important
   information using multiple tools if needed." The preceding "Be selective:
-  tools may be noisy or incomplete." sentence remains. B1 does not change the
-  stopping rule, tool implementations, tool budget, or any other instruction.
-  This tests whether OmniAgent's explicit encouragement to cross-check
-  contributes to its high tool-call count and latency.
+  tools may be noisy or incomplete." sentence remains. 
 - **B1 → B2:** Replace the OmniAgent workflow prompt with our workflow prompt.
   The new prompt removes the explicitly prescribed
   `THINK → ACT → OBSERVE → REFLECT` wording, describes the available tool
