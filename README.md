@@ -446,3 +446,59 @@ and
 `/mnt/ceph_rbd/data/avqa_project/WorldSense/worldsense_test_cut_old.jsonl`;
 all four Direct/Basic-Tools joins have exact ID coverage with no missing or
 extra IDs.
+
+## GPT o3 no-GEPA versus GEPA guidance
+
+This comparison was audited on 2026-10-09 with the same evaluation protocol as
+the GPT-4.1/GPT-5.4 no-GEPA and G0 rows in
+[`scripts/experiment_records/g0_g3_gpt5_4_gpt4_1_results.md`](scripts/experiment_records/g0_g3_gpt5_4_gpt4_1_results.md).
+Both outputs were re-evaluated with the unchanged
+`avqa_reasoning_datasets/daily_omni/enhanced_eval_results_dspy.py`: overall
+accuracy keeps all 1,197 questions in the denominator, and the question-ID
+held-out result excludes the exact 250 IDs in
+`daily_omni_cuts_selected250.jsonl`. The video-disjoint result additionally
+removes held-out questions whose `recording_id` appears in Train125 or Val125,
+leaving 743 questions. No Gemini-unusable rows were removed from either run.
+
+| Model | Tier / experiment | GEPA target | Overall accuracy | Answered accuracy | Not answered | Question-ID held-out | Video-disjoint held-out | Avg. turns | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Output / launcher |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| GPT o3 medium | None (no GEPA), Experiment 11 Basic Tools | None | **78.86% (944/1197)** | **78.86% (944/1197)** | 0 | **79.20% (750/947)** | **80.08% (595/743)** | 2.55 | 7.828k | 0.782k | 0.284k | 1.547 | $0.01570 | [output](artifacts/results/daily_omni/experiment_11_basic_tools/output_test.jsonl); [launcher](scripts/11_run_dspy_react_agent_daily_o3_gemini25flash_basic_tools_free_react_6turn.sh) |
+| GPT o3 medium | GEPA guidance, seed 2 candidate 6 | `planner.optimization_guidance` | 77.94% (933/1197) | 77.94% (933/1197) | 0 | 78.04% (739/947) | 79.68% (592/743) | 2.66 | 9.203k | 0.854k | 0.323k | 1.659 | $0.01856 | [output](/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_free_react_o3_gemini25flash_guidance_seed2_candidate6_full_v3/output_test.jsonl); [launcher](scripts/run_c1_seed2_candidate6_full_inference.sh) |
+| GEPA - no GEPA | Full-v3 delta | — | **-0.92 pp** | **-0.92 pp** | 0 | **-1.16 pp** | **-0.40 pp** | +0.11 | +1.375k | +0.072k | +0.039k | +0.112 | +$0.00286 | — |
+| GPT-4.1 | None (no GEPA) | None | 71.68% (858/1197) | 71.80% (858/1195) | 2 | 71.11% (672/945) | 71.06% (528/743) | 3.00 | 13.304k | 0.101k | 0.752k | 2.000 | $0.01358 | [output](/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_GPT_v8GeminiCaptionInTask_planner_gpt-4.1_seed_1234/output_test.jsonl); [launcher](scripts/backup/01_gemini_gpt_none_gepa_and_g0/run_dspy_react_agent_daily_qwen_v8_GPT4.1_gemini_captionInTask.sh) |
+| GPT-4.1 | GEPA (G0 Planner) | `planner.workflow_prompt` | 75.61% (905/1197) | 75.61% (905/1197) | 0 | 75.08% (711/947) | 76.85% (571/743) | 2.72 | 28.603k | 0.851k | 1.138k | 1.796 | $0.03167 | [output](/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_GPT_v8GeminiCaptionInTask_gepa_planner_workflow_prompt_planner_gpt-4.1_seed_1234_gepa_seed18/output_test.jsonl); [launcher](scripts/backup/01_gemini_gpt_none_gepa_and_g0/run_dspy_react_agent_daily_gepa_elm_gpt_v8_gemini_caption_in_task_planner.sh) |
+| GPT-5.4 | None (no GEPA) | None | 76.94% (921/1197) | 76.94% (921/1197) | 0 | 76.24% (722/947) | 77.79% (578/743) | 3.00 | 16.587k | 0.449k | 0.872k | 2.000 | $0.01950 | [output](/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_GPT_v8GeminiCaptionInTask_planner_gpt-5.4_seed_1234/output_test.jsonl); [launcher](scripts/backup/01_gemini_gpt_none_gepa_and_g0/run_dspy_react_agent_daily_qwen_v8_GPT_gemini_captionInTask.sh) |
+| GPT-5.4 | GEPA (G0 Planner) | `planner.workflow_prompt` | 74.44% (891/1197) | 74.44% (891/1197) | 0 | 73.07% (692/947) | 73.35% (545/743) | 3.00 | 17.228k | 0.059k | 0.748k | 2.000 | $0.02742 | [output](/mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_dspy_GPT_v8GeminiCaptionInTask_gepa_planner_workflow_prompt_gpt5_4_medium_planner_gpt-5.4_seed_1234_gepa_seed18/output_test.jsonl); [launcher](scripts/backup/01_gemini_gpt_none_gepa_and_g0/run_dspy_react_agent_daily_gepa_elm_gpt5.4_v8_gemini_caption_in_task_planner.sh) |
+
+Token usage, tool calls, and cost are question averages over the 1,197-row
+final outputs. Input includes persisted planner and live Gemini input tokens;
+thinking output combines planner reasoning tokens and Gemini
+`thoughtsTokenCount`; non-thinking output is the remaining persisted output.
+Tool calls exclude the final planner decision. Cost is the comparable
+regular-rate estimate without cache discounts.
+
+The two full runs use the same o3-medium planner, Gemini 2.5 Flash tools,
+`ask_caption`/`ask_perception` tool set, six-tool-call budget, cached first
+caption, and live subsequent tool calls. The fixed workflow text is identical;
+the GEPA run adds only the optimized guidance field. This is therefore the
+corresponding guidance-only GEPA comparison, rather than the older G0
+`planner.workflow_prompt` target used by the GPT-4.1/GPT-5.4 table.
+
+The three GEPA searches used the same Train125/Val125 split, an o3-high
+reflection model, and a 2,500-metric-call budget. These are search-time Val125
+scores, not independent full-benchmark results:
+
+| GEPA seed | Initial candidate Val125 | Selected candidate | Selected Val125 | Change |
+| ---: | ---: | ---: | ---: | ---: |
+| 18 | 72.80% (91/125) | 3 | 79.20% (99/125) | +6.40 pp |
+| 42 | 77.60% (97/125) | 2 | 80.00% (100/125) | +2.40 pp |
+| 2 | 78.40% (98/125) | 6 | **81.60% (102/125)** | +3.20 pp |
+
+Only seed 2 candidate 6 was run on the complete 1,197-question benchmark. Its
+inference metadata records `final_eval_complete=true`, 1,197 rows, zero cached
+output rows (`final_eval_cached_samples=0`), and exact unique-ID coverage. The
+positive Val125 search gain did not generalize to the full benchmark: relative
+to Experiment 11, accuracy decreased on overall, question-ID-held-out, and
+video-disjoint held-out scopes. Because later Gemini tool observations are
+live, this remains a matched-protocol descriptive comparison rather than a
+deterministic instruction-only causal estimate.
