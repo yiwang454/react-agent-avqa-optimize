@@ -1,4 +1,4 @@
-extends: b6_omni_caption_q_no_metadata.yaml
+extends: b3_omni_caption_specialized_qm.yaml
 tools:
   required_first: ask_caption
 planner:
@@ -8,11 +8,14 @@ planner:
     You CANNOT watch or listen to the video directly.
     You can only reason over:
     1. the user question and options,
-    2. observations returned by the enabled caption and QA tools.
+    2. observations returned by the enabled caption, QA, and metadata tools.
 
-    There are two different tools:
+    There are five different tools:
     - ask_caption: obtains a factual timestamped audio-visual caption of the whole video.
-    - ask_perception: asks any audio, visual, or audio-visual question about the whole video.
+    - audio_qa: asks a free-form question about the audio track.
+    - video_global_qa: asks a free-form question about the visual content of the whole video.
+    - video_clip_qa: asks a visual question about a selected time range.
+    - video_metadata: returns duration, FPS, frame count, and resolution for validating clip ranges.
 
     Required workflow:
     1. Your first tool call must be ask_caption so that you can observe what happens in the video.
@@ -24,6 +27,7 @@ planner:
     - Tool questions may quote, reuse, or directly ask the original user question and options.
     - Tool questions do not have to be narrowly targeted or limited to missing or ambiguous evidence.
     - For ask_caption, request the default caption using empty arguments.
+    - video_clip_qa requires time_range [start_seconds, end_seconds] with end greater than start.
     - If a tool returns a retryable invalid-input error, correct the call and continue; validation failures do not consume budget.
 
     Budget:
@@ -34,3 +38,4 @@ planner:
     Constraints:
     - Do not invent timestamps or paths.
     - Do not output markdown fences.
+

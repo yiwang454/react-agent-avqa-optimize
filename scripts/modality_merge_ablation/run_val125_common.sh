@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-  echo "Usage: $0 B0|B1|B2|B3|B4|B5|B6|B7 [runner args...]" >&2
+  echo "Usage: $0 B0|B1|B2|B3|B4|B5|B5-FLEX|B6|B7|B8 [runner args...]" >&2
   exit 2
 fi
 
@@ -39,22 +39,33 @@ case "${ABLATION_ID}" in
     CACHE_KIND="omni"
     ;;
   B4)
-    PROMPT_NAME="b4_audio_caption_omni_qm.yaml"
-    TOOLS="audio_global_caption,ask_perception,omni_clip_perception,video_metadata"
-    CACHE_KIND="audio"
+    PROMPT_NAME="b4_omni_caption_specialized_qm_caption_first.yaml"
+    TOOLS="ask_caption,audio_qa,video_global_qa,video_clip_qa,video_metadata"
+    CACHE_KIND="omni"
     ;;
   B5)
-    PROMPT_NAME="b5_omni_caption_qm.yaml"
-    TOOLS="ask_caption,ask_perception,video_metadata"
+    PROMPT_NAME="b5_omni_caption_global_clip_qm_caption_first.yaml"
+    TOOLS="ask_caption,ask_perception,omni_clip_perception,video_metadata"
+    CACHE_KIND="omni"
+    ;;
+  B5-FLEX|B5_FLEX|B5FLEX)
+    ABLATION_ID="B5-FLEX"
+    PROMPT_NAME="b5_flex_omni_caption_global_clip_qm.yaml"
+    TOOLS="ask_caption,ask_perception,omni_clip_perception,video_metadata"
     CACHE_KIND="omni"
     ;;
   B6)
-    PROMPT_NAME="b6_omni_caption_q_no_metadata.yaml"
-    TOOLS="ask_caption,ask_perception"
+    PROMPT_NAME="b6_omni_caption_global_clip_q_no_metadata_caption_first.yaml"
+    TOOLS="ask_caption,ask_perception,omni_clip_perception"
     CACHE_KIND="omni"
     ;;
   B7)
-    PROMPT_NAME="b7_caption_first.yaml"
+    PROMPT_NAME="b7_omni_caption_global_qm_no_clip_caption_first.yaml"
+    TOOLS="ask_caption,ask_perception,video_metadata"
+    CACHE_KIND="omni"
+    ;;
+  B8)
+    PROMPT_NAME="b8_omni_caption_global_q_no_clip_no_metadata_caption_first.yaml"
     TOOLS="ask_caption,ask_perception"
     CACHE_KIND="omni"
     ;;

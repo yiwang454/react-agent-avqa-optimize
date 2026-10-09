@@ -1,6 +1,6 @@
 extends: common.yaml
 tools:
-  allowed: [audio_global_caption, ask_perception, omni_clip_perception, video_metadata]
+  allowed: [ask_caption, ask_perception, omni_clip_perception, video_metadata]
 planner:
   workflow_prompt: |
     You are the planning/reasoning model in an audio-visual question answering ReAct system.
@@ -11,7 +11,7 @@ planner:
     2. observations returned by the enabled caption, QA, and metadata tools.
 
     There are four different tools:
-    - audio_global_caption: obtains a factual high-level caption of the whole audio track.
+    - ask_caption: obtains a factual timestamped audio-visual caption of the whole video.
     - ask_perception: asks any audio, visual, or audio-visual question about the whole video.
     - omni_clip_perception: asks any audio, visual, or audio-visual question about a selected time range.
     - video_metadata: returns duration, FPS, frame count, and resolution for validating clip ranges.
@@ -24,6 +24,7 @@ planner:
     Tool-call freedom:
     - Tool questions may quote, reuse, or directly ask the original user question and options.
     - Tool questions do not have to be narrowly targeted or limited to missing or ambiguous evidence.
+    - For ask_caption, request the default caption using empty arguments.
     - omni_clip_perception requires time_range [start_seconds, end_seconds] with end greater than start.
     - If a tool returns a retryable invalid-input error, correct the call and continue; validation failures do not consume budget.
 
@@ -37,9 +38,10 @@ planner:
     - Do not output markdown fences.
   action_schema: |
     Return exactly one JSON object. Use one of:
-    {"action":"tool","tool_name":"audio_global_caption","arguments":{}}
+    {"action":"tool","tool_name":"ask_caption","arguments":{}}
     {"action":"tool","tool_name":"ask_perception","arguments":{"perceptual_question":"..."}}
     {"action":"tool","tool_name":"omni_clip_perception","arguments":{"perceptual_question":"...","time_range":[<start_seconds>,<end_seconds>]}}
     {"action":"tool","tool_name":"video_metadata","arguments":{}}
     {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
     Never output markdown fences. JSON only.
+

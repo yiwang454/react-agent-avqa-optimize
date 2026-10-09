@@ -1,8 +1,8 @@
 # Modality-merge ablation on DailyOmni selected Val125
 
-This suite contains eight configurations, B0 through B7. The original request
-also says “7 groups,” but the enumerated IDs define eight runs; the launchers
-therefore implement all eight and do not start them automatically.
+This suite contains the revised B0-through-B8 path plus B5-flex: ten runs in
+total. The launchers define the runs but never start the full Val125 suite
+automatically.
 
 ## Fixed controls
 
@@ -29,18 +29,20 @@ read media duration internally to legalize the requested interval.
 | B1 | B0 minus only the cross-check sentence | same as B0 | free |
 | B2 | Experiment-11-style workflow adapted to C+Q+M | same as B0 | free |
 | B3 | B2 with omni-modal caption | `ask_caption`, specialized Q, `video_metadata` | free |
-| B4 | B2 with merged whole/clip perception | `audio_global_caption`, `ask_perception`, `omni_clip_perception`, `video_metadata` | free |
-| B5 | Omni caption + whole-video omni Q | `ask_caption`, `ask_perception`, `video_metadata` | free |
-| B6 | B5 without planner-visible metadata | `ask_caption`, `ask_perception` | free |
-| B7 | B6 with caption-first | `ask_caption`, `ask_perception` | forced `ask_caption` |
+| B4 | B3 with caption-first only | `ask_caption`, specialized Q, `video_metadata` | forced `ask_caption` |
+| B5-flex | Merged global/clip omni Q, without caption-first | `ask_caption`, `ask_perception`, `omni_clip_perception`, `video_metadata` | free |
+| B5 | B4 with specialized Q replaced by global/clip omni Q | `ask_caption`, `ask_perception`, `omni_clip_perception`, `video_metadata` | forced `ask_caption` |
+| B6 | B5 without planner-visible metadata | `ask_caption`, `ask_perception`, `omni_clip_perception` | forced `ask_caption` |
+| B7 | B5 without omni clip Q, retaining metadata | `ask_caption`, `ask_perception`, `video_metadata` | forced `ask_caption` |
+| B8 | B7 without planner-visible metadata | `ask_caption`, `ask_perception` | forced `ask_caption` |
 
-B0/B1/B2/B4 use the exact audio-only OmniAgent caption cache:
+B0/B1/B2 use the exact audio-only OmniAgent caption cache:
 
 ```text
 /mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_audio_global_caption_cache_omniagent_repeat1_completed
 ```
 
-B3/B5/B6/B7 use the existing Experiment 11 audio-visual caption cache:
+B3/B4/B5-flex/B5/B6/B7/B8 use the existing Experiment 11 audio-visual caption cache:
 
 ```text
 /mnt/ceph_rbd/data/avqa_project/daily_omni/daily_omni_caption_cache_v8_gemini_from3repeats
@@ -58,9 +60,11 @@ bash scripts/modality_merge_ablation/run_b1_val125.sh
 bash scripts/modality_merge_ablation/run_b2_val125.sh
 bash scripts/modality_merge_ablation/run_b3_val125.sh
 bash scripts/modality_merge_ablation/run_b4_val125.sh
+bash scripts/modality_merge_ablation/run_b5_flex_val125.sh
 bash scripts/modality_merge_ablation/run_b5_val125.sh
 bash scripts/modality_merge_ablation/run_b6_val125.sh
 bash scripts/modality_merge_ablation/run_b7_val125.sh
+bash scripts/modality_merge_ablation/run_b8_val125.sh
 ```
 
 Set `DRY_RUN=true` to validate and print a launcher without model requests. Set
