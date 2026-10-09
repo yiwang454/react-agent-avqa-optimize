@@ -27,7 +27,7 @@ unset DEEPSEEK_API_KEY DEEPSEEK_TOKEN DEEPSEEK_BASE_URL DEEPSEEK_API_BASE PLANNE
 
 export PERCEPTION_MODEL="gemini"
 export CAPTIONER_MODEL="gemini"
-export DSPY_AVQA_ALLOWED_TOOLS="ask_caption,ask_perception,omni_clip_perception"
+export DSPY_AVQA_ALLOWED_TOOLS="${DSPY_AVQA_ALLOWED_TOOLS:-ask_caption,ask_perception,omni_clip_perception}"
 export GEMINI_API_BACKEND="${GEMINI_API_BACKEND:-legacy}"
 export GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
 export CAPTIONER_GEMINI_MODEL="${CAPTIONER_GEMINI_MODEL:-${GEMINI_MODEL}}"
@@ -90,7 +90,7 @@ print_run_info() {
   echo "Captioner config: ${CAPTIONER_CONFIG_YAML}"
   echo "Caption cache: ${CAPTION_CACHE_DIR}"
   echo "Captioning: first ask_caption uses the exact cache; later ask_caption calls use live Gemini."
-  echo "Clip perception: omni_clip_perception uses live Gemini on the selected video clip."
+  echo "Clip tools: enabled clip caption/perception tools use live Gemini on the selected video clip."
   echo "Input: ${INPUT_JSONL} (${actual_count} rows)"
   echo "Output: ${OUTPUT_JSONL}"
   echo "Log file: ${LOG_FILE}"
