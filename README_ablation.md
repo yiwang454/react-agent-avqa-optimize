@@ -1,5 +1,18 @@
 # Stage 2 Modality-Merge Ablation
 
+## Outline
+
+- [Overview](#overview)
+- [Terminology](#terminology)
+- [Ablation configurations](#ablation-configurations)
+- [Repeat 1 results](#repeat-1-results)
+- [Intended comparisons](#intended-comparisons)
+- [Clarification: B0](#clarification-b0)
+- [Clarification: B2 is still ReAct](#clarification-b2-is-still-react)
+- [Why B4 is needed](#why-b4-is-needed)
+- [Fixed controls](#fixed-controls)
+
+## Overview
 
 B0 first reproduces the OmniAgent setup inside our framework, B1 removes only
 the cross-check sentence, and the later configurations introduce the new
@@ -44,6 +57,82 @@ Clip tools may still read duration internally to validate clip boundaries.
 `B5-flex` is an additional control. It is identical to B5 in its caption, QA,
 metadata, models, and budget, but it does not enforce caption-first ordering.
 It tests caption-first ordering again after the QA tools have been merged.
+
+## Repeat 1 results
+
+Repeat 1 completed all 125 selected validation questions for B0-B7. All 1,000
+question-level outputs were parseable. These are single-repeat results and
+should be treated as preliminary until repeat2 and repeat3 are complete.
+
+Source directory:
+
+```text
+/mnt/ceph_rbd/data/avqa_project/daily_omni/modality_merge_ablation_selectedVal125_repeats/repeat1
+```
+
+### Accuracy and resource use
+
+| ID | Correct / 125 | Accuracy | Total tool calls | Calls / question | Avg. live input tokens | Avg. live output tokens | Avg. live cost | Avg. latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| B0 | 100 | 80.0% | 341 | 2.728 | 9,700 | 1,756 | $0.02682 | 43.58 s |
+| B1 | 94 | 75.2% | 339 | 2.712 | 9,883 | 1,895 | $0.02860 | 43.92 s |
+| B2 | 93 | 74.4% | 279 | 2.232 | 8,452 | 1,548 | $0.02275 | 37.09 s |
+| B3 | 92 | 73.6% | 240 | 1.920 | 7,389 | 1,481 | $0.02337 | 30.08 s |
+| B4 | 95 | 76.0% | 233 | 1.864 | 7,590 | 1,644 | $0.02542 | 30.79 s |
+| B5 | 97 | 77.6% | 231 | 1.848 | 8,320 | 1,709 | $0.02643 | 31.02 s |
+| B6 | 98 | 78.4% | 240 | 1.920 | 8,893 | 1,575 | $0.02536 | 31.13 s |
+| B7 | 98 | 78.4% | 231 | 1.848 | 9,312 | 1,640 | $0.02542 | 32.48 s |
+
+Live cost excludes the historical generation cost of captions served from the
+caption cache. Latency is retry-adjusted wall-clock latency averaged over the
+125 questions.
+
+### Tool-call composition and completion diagnostics
+
+| ID | Tool-call composition | Invalid calls | Reached budget | Final-answer status |
+| --- | --- | ---: | ---: | --- |
+| B0 | `audio_global_caption` 95; `audio_qa` 110; `video_global_qa` 62; `video_clip_qa` 72; `video_metadata` 2 | 3 | 2 | 123 natural; 2 forced-budget |
+| B1 | `audio_global_caption` 95; `audio_qa` 114; `video_global_qa` 58; `video_clip_qa` 68; `video_metadata` 4 | 1 | 5 | 120 natural; 5 forced-budget |
+| B2 | `audio_global_caption` 58; `audio_qa` 93; `video_global_qa` 72; `video_clip_qa` 45; `video_metadata` 11 | 4 | 3 | 122 natural; 3 forced-budget |
+| B3 | `ask_caption` 105; `audio_qa` 65; `video_global_qa` 33; `video_clip_qa` 35; `video_metadata` 2 | 0 | 0 | 125 natural |
+| B4 | `ask_caption` 125; `audio_qa` 51; `video_global_qa` 31; `video_clip_qa` 25; `video_metadata` 1 | 3 | 0 | 125 natural |
+| B5 | `ask_caption` 125; `ask_perception` 62; `omni_clip_perception` 43; `video_metadata` 1 | 0 | 0 | 125 natural |
+| B6 | `ask_caption` 125; `ask_perception` 76; `omni_clip_perception` 39 | 0 | 0 | 125 natural |
+| B7 | `ask_caption` 125; `ask_perception` 105; `video_metadata` 1 | 0 | 1 | 124 natural; 1 forced-budget |
+
+### Preliminary adjacent-comparison observations
+
+- **B0 → B1:** Removing only the cross-check sentence did not materially
+  reduce calls in repeat1: 341 → 339 (-0.6%). Accuracy decreased by 4.8
+  percentage points, while average cost and latency increased by 6.6% and
+  0.8%, respectively. This repeat does not support cross-check wording alone
+  as the explanation for the tool-call reduction.
+- **B1 → B2:** The workflow rewrite reduced calls by 60 (-17.7%), average cost
+  by 20.4%, and average latency by 15.5%, with a 0.8-point accuracy decrease.
+- **B2 → B3:** Replacing the audio-only caption with `ask_caption` reduced
+  calls by 39 (-14.0%) and latency by 18.9%, with a 0.8-point accuracy
+  decrease. Average live cost increased by 2.7%, so fewer calls did not imply
+  lower measured cost in this comparison.
+- **B3 → B4:** Enforcing caption-first ensured 125 caption calls instead of
+  105, but reduced later specialized-Q usage enough for total calls to fall by
+  7 (-2.9%). Accuracy increased by 2.4 points; cost and latency increased by
+  8.8% and 2.4%.
+- **B4 → B5:** Merging specialized QA into global and clip omni QA left total
+  calls almost unchanged (233 → 231) and increased accuracy by 1.6 points.
+  Cost increased by 4.0% and latency by 0.7%.
+- **B5 → B6:** Removing metadata increased total calls from 231 to 240 and
+  increased accuracy by 0.8 points. B5 used metadata only once, so this result
+  should not be interpreted as a strong metadata effect without repeats.
+- **B5 → B7:** Removing clip-level omni QA left total calls unchanged at 231
+  and increased accuracy by 0.8 points. The 43 clip calls and 62 global calls
+  in B5 were replaced by 105 global calls in B7; latency increased by 4.7%.
+
+The main repeat1 pattern is that the largest call-count reductions occurred at
+the workflow rewrite (B1 → B2) and the switch to omni-modal captioning
+(B2 → B3), not when deleting the cross-check sentence (B0 → B1) or merging QA
+tools (B4 → B5). This is an observation from one repeat, not yet a final causal
+conclusion. B5-flex and B8 were not included in the B0-B7 repeat launcher and
+therefore have no repeat1 results in this table.
 
 ## Intended comparisons
 
