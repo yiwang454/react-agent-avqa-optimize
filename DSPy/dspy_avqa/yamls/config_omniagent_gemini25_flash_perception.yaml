@@ -1,0 +1,18 @@
+# Materialized equivalent of the Gemini request settings used by the replicated
+# OmniAgent audio tools (omni_agent/config.py and omni_agent/gemini_api.py).
+task:
+  timeout: 180
+  max_retries: 6
+  retry_delay_s: 5
+
+model:
+  gemini_model: gemini-2.5-flash
+  gemini_provider: apiplus
+  gemini_auth_mode: bearer
+  # The replicated run takes its gateway from GEMINI_BASE_URL in .env.
+
+sampling_params:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 4096
