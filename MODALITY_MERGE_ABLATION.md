@@ -79,6 +79,25 @@ Every question row records correctness, planner/perception tokens, estimated
 live cost, retry-adjusted latency, requested/executed tool counts, invalid
 calls, budget use/exhaustion, and final-answer status.
 
+### Three sequential repeats of the B0-B7 path
+
+The aggregate launcher runs B0-B7 concurrently within each repeat, waits for
+all eight runs to succeed, and only then starts the next repeat:
+
+```bash
+bash scripts/modality_merge_ablation/run_b0-7_val125.sh
+```
+
+Outputs default to
+`modality_merge_ablation_selectedVal125_repeats/repeat{1,2,3}/b{0..7}`.
+Rerunning the aggregate launcher resumes the existing per-question
+checkpoints. B5-flex and B8 are intentionally not part of this eight-run path.
+The default is one inference thread per run, giving eight active workers per
+repeat. Override it with `INFERENCE_NUM_THREADS_PER_RUN` and optionally
+`INFERENCE_BATCH_SIZE_PER_RUN`; override the parent output location with
+`OUTPUT_BASE`. Extra command-line arguments are forwarded to every B0-B7
+launcher.
+
 ## Known migration differences
 
 B0 preserves the OmniAgent instruction, tool names, exact specialized-tool
