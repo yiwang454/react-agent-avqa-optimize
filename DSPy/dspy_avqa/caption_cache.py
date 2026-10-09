@@ -23,7 +23,7 @@ class CachedCaption:
     caption_prompt: str
     path: Path
     source_results_file: str
-    source_rank: int
+    source_rank: int | None
     source_backend: str
     source_model: str
     source_token_usage: Any
@@ -98,10 +98,14 @@ def load_cached_caption(
             f"active_sha256={_sha256_text(active_prompt)}"
         )
 
-    try:
-        source_rank = int(payload.get("source_rank"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Caption cache source_rank is invalid: {path}") from exc
+    raw_source_rank = payload.get("source_rank")
+    if raw_source_rank is None:
+        source_rank = None
+    else:
+        try:
+            source_rank = int(raw_source_rank)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Caption cache source_rank is invalid: {path}") from exc
     return CachedCaption(
         question_id=cached_id,
         response=response,

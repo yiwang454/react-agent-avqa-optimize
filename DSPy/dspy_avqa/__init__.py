@@ -35,6 +35,8 @@ from .reliable_qwen import ReliableQwenExecutor
 from .runner import parse_args, run_batch, run_one
 from .signatures import apply_prompt_config_to_signatures
 from .tools import (
+    audio_global_caption,
+    audio_qa,
     ask_caption,
     ask_gemini_perception,
     ask_perception,
@@ -45,6 +47,9 @@ from .tools import (
     selected_captioner_model,
     selected_perception_model,
     temporal_ground_video,
+    video_clip_qa,
+    video_global_qa,
+    video_metadata,
 )
 
 __all__ = [
@@ -75,10 +80,15 @@ __all__ = [
     "prompt_value",
     "apply_prompt_config_to_signatures",
     "ask_caption",
+    "audio_global_caption",
+    "audio_qa",
     "ask_qwen_perception",
     "ask_gemini_perception",
     "ask_perception",
     "temporal_ground_video",
+    "video_clip_qa",
+    "video_global_qa",
+    "video_metadata",
     "call_qwen_perception",
     "call_gemini_perception",
     "call_perception",

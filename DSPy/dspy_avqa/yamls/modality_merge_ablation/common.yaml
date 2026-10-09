@@ -1,0 +1,130 @@
+tools:
+  strict_validation: true
+
+planner:
+  compress_history: false
+  optimization_guidance: ""
+  task_prompt_template: |
+    {workflow_prompt}
+
+    {planner_action_schema}
+
+    Video ID: {video_id}
+    Video path: {video_path}
+    Current decision: {turn_index}
+    Maximum tool calls: {max_turns}
+
+    Question: {question}
+    Options:
+    {formatted_options}
+  final_fallback_instruction: |
+    [system]
+    The tool-call limit has been reached. Do not call any tool. Use the observations already available and return exactly one final JSON object now:
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+  conversation_empty: |
+    <empty>
+  assistant_turn_template: |
+    [assistant]
+    {assistant_text}
+  tool_turn_template: |
+    [tool:{tool_name}]
+    question: {question}
+    observation: {observation}
+  truncated_marker: |
+    [truncated]
+
+captioner:
+  system_prompt: ""
+  force_default_instruction: true
+  cache_missing_as_observation: true
+  default_caption_instruction: |-
+    You are an audio-visual captioning system. Given a video, produce a detailed timestamped shot list describing all salient events.
+    Requirements:
+    Be 100% factual; describe all salient events and changes that is visible or audible.
+    Include: Visual elements (scenes, objects, actions); Audio elements (sounds, music); Speech content (who speaks and what is said, if clear)
+    Provide timestamps for each event.
+  caption_prompt_template: |
+    {caption_instruction}
+
+perception:
+  system_prompt: ""
+  default_perceptual_question: |
+    {perceptual_question}
+  evidence_prompt_template: |
+    Answer the question directly using only observable video/audio evidence. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+clip_perception:
+  evidence_prompt_template: |
+    {clip_note}
+
+    Answer the question directly using only observable video/audio evidence in this clip. Do not guess beyond evidence.
+
+    Question:
+    {perceptual_question}
+
+    Return JSON with keys:
+    - answer
+    - evidence
+
+specialized_tools:
+  audio_global_caption_prompt: "Provide a high-level summary of the audio. Focus on the main topics, key events, and the overall atmosphere,\x20"
+  audio_qa_prompt_template: |
+    You will be given one audio.
+
+    Your tasks are:
+    1. Carefully listen to the audio and understand what is being said and what sounds are present.
+    2. Reason step by step if necessary.
+    3. Answer the user's question as precisely as possible, using only what can be inferred from the audio.
+
+    User question:
+    {question}
+  video_global_qa_prompt_template: |
+    You will be shown a video.
+
+    Your tasks are:
+    1. Carefully inspect what is happening in the video.
+    2. Reason step by step if necessary.
+    3. Answer the user's question as precisely as possible, always staying consistent with what is visible in the video.
+
+    User question:
+    {question}
+  video_clip_qa_prompt_template: |
+    You will be shown a video.
+    Treat them as a short video: reason about how objects and people change over time across the frames, not just each image in isolation.
+
+    Your tasks:
+    1. Understand the main actions and changes that occur during this clip.
+    2. Reason step by step if needed.
+    3. Answer the user's question as precisely as possible, always staying consistent with what is visually supported in the frames.
+
+    You are analyzing a short VIDEO CLIP taken from a longer video.
+    It corresponds to the time range roughly from {start:.2f} to {end:.2f} seconds in the original video.
+    The frames are in temporal order and show how the scene evolves across this clip.
+    Assume the frames have ALREADY been correctly aligned with this time range; do not claim that they are from an earlier or later part of the video.
+    Answer ONLY about what happens within this clip. If the requested event is not visible here, say that it is not visible in this clip.
+
+    User question:
+    {question}
+
+signatures:
+  PlanNextAction:
+    instructions: |
+      Choose the next AVQA ReAct action with a compact JSON interface.
+    fields:
+      task: |
+        Question, options, video path, enabled tools, and workflow contract.
+      conversation_state: |
+        Full prior planner actions and tool observations without history compression.
+      turn_index: |
+        Current decision number within this sample.
+      max_turns: |
+        Total valid tool-call budget for this sample.
+      action_json: |
+        Planner action JSON.

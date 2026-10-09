@@ -15,10 +15,14 @@ from .latency import model_component
 from .prompt_config import prompt_config, prompt_value, render_prompt
 from .signatures import PlanNextAction
 from .tools import (
+    audio_global_caption,
+    audio_qa,
     ask_caption,
     ask_perception,
+    build_audio_global_caption_prompt,
     build_caption_prompt,
     consume_last_perception_metadata,
+    invalid_tool_input,
     is_budget_exempt_observation,
     omni_clip_caption,
     omni_clip_perception,
@@ -26,6 +30,9 @@ from .tools import (
     selected_captioner_model,
     selected_perception_model,
     temporal_ground_video,
+    video_clip_qa,
+    video_global_qa,
+    video_metadata,
 )
 
 
@@ -152,8 +159,24 @@ def _compact_text(text: Any, limit: int = MAX_OBSERVATION_CHARS) -> str:
     return value[:limit].rstrip() + "\n" + prompt_value("planner", "truncated_marker").strip()
 
 
+def _history_compression_enabled() -> bool:
+    planner_config = prompt_config().get("planner") or {}
+    if not isinstance(planner_config, dict):
+        return True
+    value = planner_config.get("compress_history", True)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _is_caption_tool(tool_name: str | None) -> bool:
-    return str(tool_name or "").strip().lower() in {"ask_caption", "ask_captioner", "caption_video", "captioner"}
+    return str(tool_name or "").strip().lower() in {
+        "ask_caption",
+        "ask_captioner",
+        "caption_video",
+        "captioner",
+        "audio_global_caption",
+    }
 
 
 def _format_observation_for_planner(
@@ -168,7 +191,7 @@ def _format_observation_for_planner(
         if caption_placement == "task":
             return CAPTION_MOVED_TO_TASK_MARKER
         return value
-    return _compact_text(value)
+    return _compact_text(value) if _history_compression_enabled() else value
 
 
 def _task_prompt_template_references_video_description() -> bool:
@@ -244,7 +267,7 @@ def _conversation_state(
                 render_prompt(
                     "planner",
                     "assistant_turn_template",
-                    assistant_text=_compact_text(raw, 1200),
+                    assistant_text=_compact_text(raw, 1200) if _history_compression_enabled() else raw,
                 )
             )
 
@@ -261,7 +284,11 @@ def _conversation_state(
                     "planner",
                     "tool_turn_template",
                     tool_name=tool_name,
-                    question=_compact_text(question, 400),
+                    question=(
+                        _compact_text(question, 400)
+                        if _history_compression_enabled()
+                        else str(question)
+                    ),
                     observation=_format_observation_for_planner(
                         tool_name,
                         observation,
@@ -305,9 +332,17 @@ def _exception_info(exc: Exception) -> dict[str, Any]:
 
 def _canonical_tool_name(raw_tool_name: str) -> str:
     value = raw_tool_name.strip().lower()
+    if value in {
+        "audio_global_caption",
+        "audio_qa",
+        "video_global_qa",
+        "video_clip_qa",
+        "video_metadata",
+    }:
+        return value
     if value in {"ask_caption", "ask_captioner", "caption_video", "captioner"}:
         return "ask_caption"
-    if value in {"omni_clip_caption", "video_clip_caption", "clip_caption", "video_clip_qa"}:
+    if value in {"omni_clip_caption", "video_clip_caption", "clip_caption"}:
         return "omni_clip_caption"
     if value in {"omni_clip_perception", "video_clip_perception", "clip_perception"}:
         return "omni_clip_perception"
@@ -328,6 +363,11 @@ def _required_first_tool() -> str | None:
         return None
     normalized = raw_tool_name.lower()
     known_names = {
+        "audio_global_caption",
+        "audio_qa",
+        "video_global_qa",
+        "video_clip_qa",
+        "video_metadata",
         "ask_caption",
         "ask_captioner",
         "caption_video",
@@ -361,6 +401,44 @@ def _normalize_tool_name(raw_tool_name: str, allowed_tools: tuple[str, ...]) -> 
     return allowed_tools[0]
 
 
+def _strict_tool_validation() -> bool:
+    tools_config = prompt_config().get("tools") or {}
+    if not isinstance(tools_config, dict):
+        return False
+    value = tools_config.get("strict_validation", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _requested_tool_is_valid(raw_tool_name: str, allowed_tools: tuple[str, ...]) -> bool:
+    normalized = str(raw_tool_name or "").strip().lower()
+    if not normalized:
+        return False
+    known_names = {
+        "audio_global_caption",
+        "audio_qa",
+        "video_global_qa",
+        "video_clip_qa",
+        "video_metadata",
+        "ask_caption",
+        "ask_captioner",
+        "caption_video",
+        "captioner",
+        "ask_perception",
+        "ask_qwen_perception",
+        "ask_gemini_perception",
+        "omni_clip_caption",
+        "video_clip_caption",
+        "clip_caption",
+        "omni_clip_perception",
+        "video_clip_perception",
+        "clip_perception",
+        "temporal_ground_video",
+    }
+    return normalized in known_names and _canonical_tool_name(normalized) in allowed_tools
+
+
 def _render_default_perceptual_question(source_question: str | None = None) -> str:
     """Render the fallback perceptual question only when the YAML asks for it."""
     default_question = prompt_value("perception", "default_perceptual_question").strip()
@@ -377,6 +455,7 @@ def _perceptual_question(payload: dict[str, Any], source_question: str | None = 
     for candidate in (
         arguments.get("perceptual_question"),
         arguments.get("target_question"),
+        arguments.get("question"),
         payload.get("perceptual_question"),
         payload.get("question"),
     ):
@@ -433,6 +512,10 @@ def _caption_instruction(payload: dict[str, Any]) -> str:
 def _tool_query(payload: dict[str, Any], tool_name: str, source_question: str | None = None) -> str:
     if tool_name in {"ask_caption", "omni_clip_caption"}:
         return _caption_instruction(payload)
+    if tool_name == "audio_global_caption":
+        return build_audio_global_caption_prompt()
+    if tool_name == "video_metadata":
+        return ""
     return _perceptual_question(payload, source_question=source_question)
 
 
@@ -468,12 +551,21 @@ def _tool_args(
     args: dict[str, Any] = {"video_path": video_path, "audio_path": audio_path}
     if tool_name == "ask_caption":
         args["caption_instruction"] = query
+    elif tool_name == "audio_global_caption":
+        pass
     elif tool_name == "omni_clip_caption":
         args["caption_instruction"] = query
         args["time_range"] = time_range
     elif tool_name == "omni_clip_perception":
         args["perceptual_question"] = query
         args["time_range"] = time_range
+    elif tool_name in {"audio_qa", "video_global_qa"}:
+        args["question"] = query
+    elif tool_name == "video_clip_qa":
+        args["question"] = query
+        args["time_range"] = time_range
+    elif tool_name == "video_metadata":
+        pass
     else:
         args["perceptual_question"] = query
     return args
@@ -556,14 +648,18 @@ class AVQADSPyReActProgram(dspy.Module):
         caption_call_index: int | None = None,
     ) -> Any:
         """Dispatch one planner tool call."""
-        if tool_name == "ask_caption":
+        if tool_name in {"ask_caption", "audio_global_caption"}:
             caption_cache_dir = getattr(self.context, "caption_cache_dir", None)
             caption_cache_scope = getattr(self.context, "caption_cache_scope", "all")
             use_caption_cache = caption_cache_dir is not None and (
                 caption_cache_scope == "all" or caption_call_index == 1
             )
             if use_caption_cache:
-                prompt = build_caption_prompt(tool_query)
+                prompt = (
+                    build_audio_global_caption_prompt()
+                    if tool_name == "audio_global_caption"
+                    else build_caption_prompt(tool_query)
+                )
                 try:
                     cached = load_cached_caption(
                         caption_cache_dir,
@@ -602,11 +698,34 @@ class AVQADSPyReActProgram(dspy.Module):
                     caption_cache_source_token_usage=cached.source_token_usage,
                 )
                 return cached.response
+            if tool_name == "audio_global_caption":
+                return audio_global_caption(video_path=video_path, audio_path=audio_path)
             return ask_caption(
                 video_path=video_path,
                 audio_path=audio_path,
                 caption_instruction=tool_query,
             )
+        if tool_name == "audio_qa":
+            return audio_qa(
+                video_path=video_path,
+                audio_path=audio_path,
+                question=tool_query,
+            )
+        if tool_name == "video_global_qa":
+            return video_global_qa(
+                video_path=video_path,
+                audio_path=audio_path,
+                question=tool_query,
+            )
+        if tool_name == "video_clip_qa":
+            return video_clip_qa(
+                video_path=video_path,
+                audio_path=audio_path,
+                question=tool_query,
+                time_range=time_range,
+            )
+        if tool_name == "video_metadata":
+            return video_metadata(video_path=video_path, audio_path=audio_path)
         if tool_name == "omni_clip_caption":
             return omni_clip_caption(
                 video_path=video_path,
@@ -734,6 +853,12 @@ class AVQADSPyReActProgram(dspy.Module):
                         "planner_requested_action": requested_action,
                         "planner_requested_tool_name": requested_tool_name,
                         "final_answer": final_answer,
+                        "final_answer_status": (
+                            "natural" if final_answer else "natural_unparseable"
+                        ),
+                        "budget_used": used_tool_calls,
+                        "budget_limit": max_iters,
+                        "budget_reached": used_tool_calls >= max_iters,
                         "video_id": video_id,
                     }
                 )
@@ -750,11 +875,19 @@ class AVQADSPyReActProgram(dspy.Module):
                 )
 
             raw_tool_name = str(payload.get("tool_name") or "ask_perception")
+            requested_tool_valid = first_tool_enforced or (
+                requested_tool_name is not None
+                and _requested_tool_is_valid(raw_tool_name, self.context.allowed_tools)
+            )
             tool_name = _normalize_tool_name(raw_tool_name, self.context.allowed_tools)
             tool_query = _tool_query(payload, tool_name, source_question=question)
             tool_time_range = (
                 _time_range(payload)
-                if tool_name in {"omni_clip_caption", "omni_clip_perception"}
+                if tool_name in {
+                    "video_clip_qa",
+                    "omni_clip_caption",
+                    "omni_clip_perception",
+                }
                 else None
             )
             caption_call_index = (
@@ -763,14 +896,18 @@ class AVQADSPyReActProgram(dspy.Module):
                     1
                     for turn in turn_trace
                     if turn.get("planner_action") == "tool"
-                    and turn.get("tool_name") == "ask_caption"
+                    and turn.get("tool_name") == tool_name
                 )
-                if tool_name == "ask_caption"
+                if tool_name in {"ask_caption", "audio_global_caption"}
                 else None
             )
             default_perception_backend = (
                 selected_captioner_model()
                 if tool_name in {"ask_caption", "omni_clip_caption"}
+                else "caption_cache"
+                if tool_name == "audio_global_caption"
+                else "local"
+                if tool_name == "video_metadata"
                 else selected_perception_model()
             )
             call_tool_kwargs: dict[str, Any] = {
@@ -781,11 +918,24 @@ class AVQADSPyReActProgram(dspy.Module):
                 "question_id": question_id,
                 "caption_call_index": caption_call_index,
             }
-            if tool_name in {"omni_clip_caption", "omni_clip_perception"}:
+            if tool_name in {
+                "video_clip_qa",
+                "omni_clip_caption",
+                "omni_clip_perception",
+            }:
                 call_tool_kwargs["time_range"] = tool_time_range
-            with model_component("perception"):
-                tool_observation = self._call_tool(**call_tool_kwargs)
+            tool_executed = True
+            if _strict_tool_validation() and not requested_tool_valid:
+                tool_executed = False
+                tool_observation = invalid_tool_input(
+                    f"Tool {raw_tool_name!r} is not available. Choose one of "
+                    f"{list(self.context.allowed_tools)}."
+                )
+            else:
+                with model_component("perception"):
+                    tool_observation = self._call_tool(**call_tool_kwargs)
             budget_exempt = is_budget_exempt_observation(tool_observation)
+            invalid_call = not requested_tool_valid or budget_exempt
             perception_metadata = consume_last_perception_metadata()
             perception_backend = (
                 perception_metadata.get("backend") or default_perception_backend
@@ -810,6 +960,8 @@ class AVQADSPyReActProgram(dspy.Module):
                     ),
                     "tool_observation": tool_observation,
                     "budget_exempt": budget_exempt,
+                    "invalid_call": invalid_call,
+                    "tool_executed": tool_executed,
                     "perception_system_prompt": perception_metadata.get("system_prompt", ""),
                     "perception_prompt": perception_metadata.get("prompt", ""),
                     "perception_model": perception_metadata.get("model"),
@@ -833,10 +985,10 @@ class AVQADSPyReActProgram(dspy.Module):
                     "caption_call_index": caption_call_index,
                     "caption_source_mode": (
                         "cache"
-                        if tool_name == "ask_caption"
+                        if tool_name in {"ask_caption", "audio_global_caption"}
                         and perception_metadata.get("backend") == "caption_cache"
                         else "live"
-                        if tool_name == "ask_caption"
+                        if tool_name in {"ask_caption", "audio_global_caption"}
                         else None
                     ),
                     "reliable_qwen_profile": perception_metadata.get("reliable_qwen_profile"),
@@ -849,6 +1001,10 @@ class AVQADSPyReActProgram(dspy.Module):
                     "planner_requested_action": requested_action,
                     "planner_requested_tool_name": requested_tool_name,
                     "final_answer": None,
+                    "budget_used_after_turn": (
+                        used_tool_calls if budget_exempt else used_tool_calls + 1
+                    ),
+                    "budget_limit": max_iters,
                     "video_id": video_id,
                 }
             )
@@ -885,6 +1041,18 @@ class AVQADSPyReActProgram(dspy.Module):
                 "planner_calls": {"final_fallback": planner_calls},
                 "planner_parse_error": planner_error,
                 "final_answer": final_answer,
+                "final_answer_status": (
+                    "forced_budget"
+                    if final_answer and used_tool_calls >= max_iters
+                    else "forced_invalid_retry_limit"
+                    if final_answer
+                    else "forced_budget_unparseable"
+                    if used_tool_calls >= max_iters
+                    else "forced_invalid_retry_limit_unparseable"
+                ),
+                "budget_used": used_tool_calls,
+                "budget_limit": max_iters,
+                "budget_reached": used_tool_calls >= max_iters,
                 "video_id": video_id,
             }
         )

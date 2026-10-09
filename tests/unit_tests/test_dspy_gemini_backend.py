@@ -493,6 +493,8 @@ def test_perception_connection_yaml_overrides_env(monkeypatch, tmp_path):
 model:
   gemini_base_url: https://yaml-gemini.invalid
   gemini_api_key: yaml-gemini-key
+  gemini_provider: apiplus
+  gemini_auth_mode: bearer
   qwen_base_url: https://yaml-qwen.invalid/v1
   qwen_api_key: yaml-qwen-key
 """.strip(),
@@ -507,6 +509,8 @@ model:
 
     assert os.environ["GEMINI_BASE_URL"] == "https://yaml-gemini.invalid"
     assert os.environ["GEMINI_API_KEY"] == "yaml-gemini-key"
+    assert os.environ["GEMINI_PROVIDER"] == "apiplus"
+    assert os.environ["GEMINI_AUTH_MODE"] == "bearer"
     assert os.environ["QWEN_BASE_URL"] == "https://yaml-qwen.invalid/v1"
     assert os.environ["QWEN_API_KEY"] == "yaml-qwen-key"
 

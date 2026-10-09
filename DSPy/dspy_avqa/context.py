@@ -16,6 +16,11 @@ from .latency import finish_model_attempt, install_litellm_attempt_observer
 from .prompt_config import prompt_config, prompt_value
 
 SUPPORTED_TOOL_NAMES = (
+    "audio_global_caption",
+    "audio_qa",
+    "video_global_qa",
+    "video_clip_qa",
+    "video_metadata",
     "ask_caption",
     "ask_perception",
     "omni_clip_caption",
@@ -160,7 +165,7 @@ def resolve_allowed_tools(value: str | Iterable[str] | None = None) -> tuple[str
             normalized_name = "ask_caption"
         if normalized_name in {"ask_qwen_perception", "ask_gemini_perception"}:
             normalized_name = "ask_perception"
-        if normalized_name in {"video_clip_caption", "clip_caption", "video_clip_qa"}:
+        if normalized_name in {"video_clip_caption", "clip_caption"}:
             normalized_name = "omni_clip_caption"
         if normalized_name in {"video_clip_perception", "clip_perception"}:
             normalized_name = "omni_clip_perception"

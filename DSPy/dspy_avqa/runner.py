@@ -38,13 +38,14 @@ from .program import (
 )
 from .latency import sample_latency
 from .prompt_config import active_prompt_yaml_path, load_prompt_config, prompt_config
+from .question_metrics import build_question_metrics
 from .reliable_qwen import (
     ReliableQwenExecutor,
     mark_empty_qwen_turn_trace,
     turn_trace_has_empty_qwen_observation,
 )
 from .signatures import apply_prompt_config_to_signatures
-from .tools import build_caption_prompt
+from .tools import build_audio_global_caption_prompt, build_caption_prompt
 
 
 GEMINI_API_BACKENDS = ("legacy", "dspy")
@@ -597,6 +598,8 @@ def load_perception_config_yaml(path: Path | None) -> dict[str, Any]:
             "vertex_location": "VERTEXAI_LOCATION",
             "gemini_base_url": "GEMINI_BASE_URL",
             "gemini_api_key": "GEMINI_API_KEY",
+            "gemini_provider": "GEMINI_PROVIDER",
+            "gemini_auth_mode": "GEMINI_AUTH_MODE",
             "qwen_model": "QWEN_MODEL",
             "qwen_base_url": "QWEN_BASE_URL",
             "qwen_api_key": "QWEN_API_KEY",
@@ -817,8 +820,15 @@ def run_batch() -> None:
         )
     apply_prompt_config_to_signatures()
     allowed_tools = resolve_allowed_tools(args.allowed_tools)
-    if args.caption_cache_dir is not None and "ask_caption" not in allowed_tools:
-        raise ValueError("--caption-cache-dir requires ask_caption in --allowed-tools")
+    caption_tools = set(allowed_tools) & {"ask_caption", "audio_global_caption"}
+    if args.caption_cache_dir is not None and not caption_tools:
+        raise ValueError(
+            "--caption-cache-dir requires ask_caption or audio_global_caption in --allowed-tools"
+        )
+    if len(caption_tools) > 1:
+        raise ValueError(
+            "One caption cache cannot serve both ask_caption and audio_global_caption"
+        )
     if args.caption_cache_dir is None and caption_cache_scope != "all":
         raise ValueError("--caption-cache-scope first_call_only requires --caption-cache-dir")
     cuts = read_jsonl(args.input_jsonl)
@@ -845,10 +855,15 @@ def run_batch() -> None:
         selected = selected[: args.debug_limit]
     caption_cache_coverage = None
     if args.caption_cache_dir is not None:
+        expected_caption_prompt = (
+            build_audio_global_caption_prompt()
+            if "audio_global_caption" in allowed_tools
+            else build_caption_prompt()
+        )
         caption_cache_coverage = validate_caption_cache_coverage(
             args.caption_cache_dir,
             [cut_id(cut) for cut in selected],
-            expected_prompt=build_caption_prompt(),
+            expected_prompt=expected_caption_prompt,
             allow_entry_errors=caption_cache_missing_as_observation(),
         )
 
@@ -1100,6 +1115,10 @@ def run_batch() -> None:
                         "planner_error": error_info,
                     }
                 ]
+            row["question_data"]["metrics"] = build_question_metrics(
+                row["question_data"],
+                max_turns=args.max_turns,
+            )
             maybe_dump_question_data(args.output_dir, row)
             rows_by_sample_id[cut_id(cut_item)] = row
 

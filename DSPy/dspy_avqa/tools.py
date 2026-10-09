@@ -400,18 +400,23 @@ def _maybe_print_dspy_gemini_messages(messages: list[dict[str, Any]], env_prefix
 
 
 def call_gemini_perception(
-    video_path: str,
+    video_path: str | None,
     audio_path: str | None,
     prompt: str,
     system_prompt: str | None = None,
     env_prefix: str = "GEMINI",
+    *,
+    force_audio: bool = False,
+    video_fps: float | None = None,
 ) -> str:
     """Call Gemini for AV perception through the selected legacy or DSPy backend."""
     backend = gemini_api_backend()
     # Perception tools use a single user/content prompt. A system message is sent
     # only when an internal low-level caller explicitly supplies one.
     system_prompt = str(system_prompt or "").strip()
-    include_audio = bool(audio_path and not gemini_video_only(env_prefix))
+    include_audio = bool(audio_path and (force_audio or not gemini_video_only(env_prefix)))
+    if not video_path and not include_audio:
+        raise ValueError("Gemini perception requires video_path or an enabled audio_path")
 
     if backend == "dspy":
         from .gemini_api_new import (
@@ -469,7 +474,12 @@ def call_gemini_perception(
         parts: list[dict[str, Any]] = []
         if include_audio:
             parts.append(to_gemini_inline_data(audio_path))
-        parts.extend([to_gemini_inline_data(video_path), {"text": prompt}])
+        if video_path:
+            video_part = to_gemini_inline_data(video_path)
+            if video_fps is not None:
+                video_part["videoMetadata"] = {"fps": video_fps}
+            parts.append(video_part)
+        parts.append({"text": prompt})
         contents = [{"role": "user", "parts": parts}]
         result = _call_gemini_with_circuit_breaker(
             call_gemini_messages,
@@ -590,6 +600,91 @@ def ask_caption(
         audio_path=audio_path,
         prompt=build_caption_prompt(caption_instruction),
         env_prefix="CAPTIONER_QWEN",
+    )
+
+
+def _specialized_prompt(key: str, fallback: str, **kwargs: Any) -> str:
+    """Render an OmniAgent-compatible specialized-tool prompt from YAML."""
+    try:
+        template = prompt_value("specialized_tools", key)
+    except KeyError:
+        template = fallback
+    return template.format(**kwargs).strip()
+
+
+def build_audio_global_caption_prompt() -> str:
+    """Return the exact OmniAgent audio_global_caption request text."""
+    try:
+        return prompt_value("specialized_tools", "audio_global_caption_prompt")
+    except KeyError:
+        return (
+            "Provide a high-level summary of the audio. Focus on the main topics, "
+            "key events, and the overall atmosphere, "
+        )
+
+
+def audio_global_caption(
+    video_path: str,
+    audio_path: str | None = None,
+) -> str:
+    """Thin adapter for OmniAgent's audio-only global caption tool."""
+    media_path = audio_path
+    if not media_path:
+        raise ValueError("audio_global_caption requires the preprocessed audio_path")
+    return call_gemini_perception(
+        video_path=None,
+        audio_path=media_path,
+        prompt=build_audio_global_caption_prompt(),
+        force_audio=True,
+    )
+
+
+def audio_qa(
+    video_path: str,
+    question: str,
+    audio_path: str | None = None,
+) -> str:
+    """Thin adapter for OmniAgent's audio-only free-form QA tool."""
+    if not audio_path:
+        raise ValueError("audio_qa requires the preprocessed audio_path")
+    prompt = _specialized_prompt(
+        "audio_qa_prompt_template",
+        "You will be given one audio.\n\n"
+        "Your tasks are:\n"
+        "1. Carefully listen to the audio and understand what is being said and what sounds are present.\n"
+        "2. Reason step by step if necessary.\n"
+        "3. Answer the user's question as precisely as possible, using only what can be inferred from the audio.\n\n"
+        "User question:\n{question}\n",
+        question=question,
+    )
+    return call_gemini_perception(
+        video_path=None,
+        audio_path=audio_path,
+        prompt=prompt,
+        force_audio=True,
+    )
+
+
+def video_global_qa(
+    video_path: str,
+    question: str,
+    audio_path: str | None = None,
+) -> str:
+    """Thin adapter for OmniAgent's visual-only whole-video QA tool."""
+    prompt = _specialized_prompt(
+        "video_global_qa_prompt_template",
+        "You will be shown a video.\n\n"
+        "Your tasks are:\n"
+        "1. Carefully inspect what is happening in the video.\n"
+        "2. Reason step by step if necessary.\n"
+        "3. Answer the user's question as precisely as possible, always staying consistent with what is visible in the video.\n\n"
+        "User question:\n{question}\n",
+        question=question,
+    )
+    return call_gemini_perception(
+        video_path=video_path,
+        audio_path=None,
+        prompt=prompt,
     )
 
 
@@ -950,6 +1045,143 @@ def omni_clip_perception(
                 os.remove(clip_path)
             except OSError:
                 pass
+
+
+def video_clip_qa(
+    video_path: str,
+    time_range: Any,
+    question: str,
+    audio_path: str | None = None,
+) -> str | dict[str, Any]:
+    """Thin adapter for OmniAgent's visual-only, 5-fps clip QA tool."""
+    coerced_range = _coerce_time_range(time_range)
+    if isinstance(coerced_range, dict):
+        return coerced_range
+    original_start, original_end = coerced_range
+
+    cache_dir = Path(os.environ.get("DSPY_AVQA_CLIP_CACHE_DIR", "Cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="video_clip_qa_", suffix=".mp4", dir=cache_dir, delete=False
+        ) as clip_file:
+            clip_path = clip_file.name
+        start, end = cut_video_clip(
+            video_path,
+            clip_path,
+            original_start,
+            original_end,
+            preserve_audio=False,
+        )
+        prompt = _specialized_prompt(
+            "video_clip_qa_prompt_template",
+            "You will be shown a video.\n"
+            "Treat them as a short video: reason about how objects and people change over time across the frames, not just each image in isolation.\n\n"
+            "Your tasks:\n"
+            "1. Understand the main actions and changes that occur during this clip.\n"
+            "2. Reason step by step if needed.\n"
+            "3. Answer the user's question as precisely as possible, always staying consistent with what is visually supported in the frames.\n\n"
+            "You are analyzing a short VIDEO CLIP taken from a longer video.\n"
+            "It corresponds to the time range roughly from {start:.2f} to {end:.2f} seconds in the original video.\n"
+            "The frames are in temporal order and show how the scene evolves across this clip.\n"
+            "Assume the frames have ALREADY been correctly aligned with this time range; do not claim that they are from an earlier or later part of the video.\n"
+            "Answer ONLY about what happens within this clip. If the requested event is not visible here, say that it is not visible in this clip.\n\n"
+            "User question:\n{question}\n",
+            start=start,
+            end=end,
+            question=question,
+        )
+        return call_gemini_perception(
+            video_path=clip_path,
+            audio_path=None,
+            prompt=prompt,
+            video_fps=5.0,
+        )
+    finally:
+        if clip_path and os.path.exists(clip_path):
+            try:
+                os.remove(clip_path)
+            except OSError:
+                pass
+
+
+def video_metadata(
+    video_path: str,
+    audio_path: str | None = None,
+) -> dict[str, Any]:
+    """Return the same planner-visible metadata fields as OmniAgent."""
+    try:
+        import cv2
+    except ImportError:
+        cv2 = None
+
+    abs_path = os.path.abspath(video_path)
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(f"Video file not found: {abs_path}")
+    if cv2 is None:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_frames,avg_frame_rate,width,height,duration:format=duration",
+                "-of",
+                "json",
+                abs_path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams") or []
+        if not streams:
+            raise RuntimeError(f"Could not read video stream metadata: {abs_path}")
+        stream = streams[0]
+        rate = str(stream.get("avg_frame_rate") or "0/1")
+        numerator, denominator = rate.split("/", 1)
+        fps = float(numerator) / float(denominator)
+        duration = float(
+            stream.get("duration") or (payload.get("format") or {}).get("duration") or 0
+        )
+        frame_count = int(stream.get("nb_frames") or round(duration * fps))
+        if frame_count <= 0 or fps <= 0.0:
+            raise RuntimeError(
+                f"Video has invalid metadata (frame_count={frame_count}, fps={fps})."
+            )
+        return {
+            "duration_seconds": math.floor(frame_count / fps),
+            "frame_count": frame_count,
+            "fps": fps,
+            "width": int(stream.get("width") or 0),
+            "height": int(stream.get("height") or 0),
+        }
+
+    cap = cv2.VideoCapture(abs_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video file: {abs_path}")
+    try:
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        fps = float(cap.get(cv2.CAP_PROP_FPS)) or 0.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
+    finally:
+        cap.release()
+    if frame_count <= 0 or fps <= 0.0:
+        raise RuntimeError(
+            f"Video has invalid metadata (frame_count={frame_count}, fps={fps})."
+        )
+    return {
+        "duration_seconds": math.floor(frame_count / fps),
+        "frame_count": frame_count,
+        "fps": fps,
+        "width": width,
+        "height": height,
+    }
 
 
 def temporal_ground_video(

@@ -46,9 +46,20 @@ def _install_program_import_stubs() -> None:
     tools = types.ModuleType("dspy_avqa.tools")
     tools.ask_caption = lambda *args, **kwargs: ""
     tools.ask_perception = lambda *args, **kwargs: ""
+    tools.audio_global_caption = lambda *args, **kwargs: ""
+    tools.audio_qa = lambda *args, **kwargs: ""
+    tools.video_global_qa = lambda *args, **kwargs: ""
+    tools.video_clip_qa = lambda *args, **kwargs: ""
+    tools.video_metadata = lambda *args, **kwargs: {}
     tools.omni_clip_caption = lambda *args, **kwargs: ""
     tools.omni_clip_perception = lambda *args, **kwargs: ""
     tools.build_caption_prompt = lambda instruction=None: str(instruction or "").strip()
+    tools.build_audio_global_caption_prompt = lambda: "audio caption prompt "
+    tools.invalid_tool_input = lambda message: {
+        "error": message,
+        "retryable": True,
+        "_dspy_avqa_budget_exempt": True,
+    }
     tools.captioner_system_prompt = lambda: ""
     tools.is_budget_exempt_observation = (
         lambda observation: isinstance(observation, dict)

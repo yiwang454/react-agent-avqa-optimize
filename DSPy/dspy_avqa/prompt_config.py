@@ -17,15 +17,45 @@ _PROMPTS: dict[str, Any] = {}
 _PROMPT_OVERRIDES: ContextVar[dict[tuple[str, ...], str]] = ContextVar("DSPY_AVQA_PROMPT_OVERRIDES", default={})
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge prompt mappings; lists and scalar values replace the base."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_prompt_yaml(yaml_path: Path, stack: tuple[Path, ...] = ()) -> dict[str, Any]:
+    resolved = yaml_path.expanduser().resolve()
+    if resolved in stack:
+        chain = " -> ".join(str(path) for path in (*stack, resolved))
+        raise ValueError(f"Prompt YAML extends cycle: {chain}")
+    with resolved.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"Prompt config must be a YAML mapping: {resolved}")
+
+    parent_value = config.pop("extends", None)
+    if parent_value is None:
+        return config
+    if not isinstance(parent_value, str) or not parent_value.strip():
+        raise ValueError(f"Prompt config extends must be a non-empty path: {resolved}")
+    parent_path = Path(parent_value).expanduser()
+    if not parent_path.is_absolute():
+        parent_path = resolved.parent / parent_path
+    parent = _load_prompt_yaml(parent_path, (*stack, resolved))
+    return _deep_merge(parent, config)
+
+
 def load_prompt_config(path: Path | str | None = None) -> dict[str, Any]:
     """Load prompt configuration from YAML and make it active."""
     global _PROMPT_YAML_PATH, _PROMPTS
 
-    yaml_path = Path(path) if path is not None else DEFAULT_PROMPT_YAML
-    with yaml_path.open("r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
-    if not isinstance(config, dict):
-        raise ValueError(f"Prompt config must be a YAML mapping: {yaml_path}")
+    yaml_path = (Path(path) if path is not None else DEFAULT_PROMPT_YAML).expanduser().resolve()
+    config = _load_prompt_yaml(yaml_path)
 
     _PROMPT_YAML_PATH = yaml_path
     _PROMPTS = config
