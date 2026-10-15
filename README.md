@@ -17,17 +17,16 @@ the first planner model request for that question, ends after its final answer,
 and removes failed request attempts and their retry backoff. It is independent
 of the benchmark worker count and is not full-benchmark wall time divided by the
 number of questions. `—` means that latency is unavailable or intentionally
-not reported for that historical row; all Full OmniAgent latency cells are
-therefore intentionally blank.
+not reported for that historical row.
 
 ### DailyOmni
 
 | No. | Experiment | Output | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | D | Gemini 2.5 Flash Direct (paper baseline) | [JSONL](artifacts/results/daily_omni/direct_gemini_2_5_flash/output_test.jsonl) | Gemini default thinking | none (direct video QA) | 77.03% (922/1197) | 5.048k | 0.004k | 0.002k | 0.000 | $0.00154 | — |
-| O | Full OmniAgent (o3) | [JSONL.gz](artifacts/results/daily_omni/omniagent_replication/output_test.jsonl.gz) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.53% (928/1197) | 49.661k | 6.140k | 1.322k | 7.27 | $0.07142 | — |
+| O | Full OmniAgent (o3) | [JSONL.gz](artifacts/results/daily_omni/omniagent_replication/output_test.jsonl.gz) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.53% (928/1197) | 49.661k | 6.140k | 1.322k | 7.27 | $0.07142 | 118.32 s |
 | 10 | o3 + Omni Clip Caption | [JSONL](artifacts/results/daily_omni/experiment_10_omni_clip_caption/output_test.jsonl) | medium | `ask_caption`, `ask_perception`, `omni_clip_caption` | 78.11% (935/1197) | 14.2k | 0.94k | 0.78k | 1.59 | $0.0207 | — |
-| 11 | o3 Basic Tools | [JSONL](artifacts/results/daily_omni/experiment_11_basic_tools/output_test.jsonl) | medium | `ask_caption`, `ask_perception` | **78.86% (944/1197)** | 13.0k | 0.91k | 0.76k | 1.55 | $0.0191 | — |
+| 11 | o3 Basic Tools | [JSONL](artifacts/results/daily_omni/experiment_11_basic_tools/output_test.jsonl) | medium | `ask_caption`, `ask_perception` | **78.86% (944/1197)** | 13.0k | 0.91k | 0.76k | 1.55 | $0.0191 | 14.90 s |
 | 12 | o3 + Omni Clip Perception | [JSONL.gz](artifacts/results/daily_omni/experiment_12_omni_clip_perception/output_test.jsonl.gz) | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.03% (946/1197) | 13.3k | 0.92k | 0.78k | 1.58 | $0.0205 | — |
 <!-- | 11b | o3 Basic Tools (High Reasoning) | — | high | `ask_caption`, `ask_perception` | 79.53% (952/1197) | 15.1k | 1.74k | 0.81k | 1.63 | $0.0277 | — | -->
 
@@ -43,7 +42,7 @@ unique output IDs, 1,197 parsed answers, complete inference-only metadata, and
 | No. | Experiment | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | D | Gemini 2.5 Flash Direct OmniLLM | Gemini default thinking | none (direct video QA) | 79.35% (1376/1734) | 11.457k | 0.143k | 0.006k | 0.000 | $0.00437 | — |
-| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.16% (1338/1734) | 33.898k | 3.266k | 1.006k | 6.382 | $0.08312 | — |
+| O | Full OmniAgent (o3) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | 77.16% (1338/1734) | 33.898k | 3.266k | 1.006k | 6.382 | $0.08312 | 107.76 s |
 | 11 | o3 Basic Tools | medium | `ask_caption`, `ask_perception` | **80.57% (1397/1734)** | 16.814k | 0.567k | 0.865k | 1.777 | $0.02047 | 27.55 s‡ |
 | 12′ | o3 + Omni Clip Perception (approximation) | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 79.76% (1383/1734) | 17.943k | 0.683k | 0.881k | 1.824 | $0.02239 | 20.44 s§ |
 | 13 | o3 + Both Omni Clip Tools | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 79.24% (1374/1734) | 17.159k | 0.748k | 0.895k | 1.943 | $0.02337 | — |
@@ -63,7 +62,7 @@ throughput.
 | No. | Experiment | Output | Reasoning effort | Available tools | Accuracy | Input tok. | Output thinking tok. | Output non-thinking tok. | Tool calls | Cost | Latency |
 | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | D | Gemini 2.5 Flash Direct OmniLLM | [JSONL](artifacts/results/worldsense/direct_gemini_2_5_flash/output_test.jsonl) | Gemini default thinking | none (direct video QA) | 56.43% (1790/3172) | 22.517k | 0.289k | 0.014k | 0.000 | $0.00874 | — |
-| O | Full OmniAgent (o3), 320-question repair merged | [JSONL (merged)](/mnt/ceph_rbd/data/avqa_project/WorldSense/OmniAgent_worldsense_repair320_compressed_audio/consolidated/output_test.jsonl) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | **59.30% (1881/3172)** | 69.986k | 4.177k | 1.381k | 7.358 | $0.11414 | — |
+| O | Full OmniAgent (o3), 320-question repair merged | [JSONL (merged)](/mnt/ceph_rbd/data/avqa_project/WorldSense/OmniAgent_worldsense_repair320_compressed_audio/consolidated/output_test.jsonl) | high | `Audio_EventList`, `Audio_EventLocation`, `audio_ASR`, `audio_global_caption`, `audio_qa`, `video_clip_qa`, `video_global_qa`, `video_metadata` | **59.30% (1881/3172)** | 69.986k | 4.177k | 1.381k | 7.358 | $0.11414 | 143.64 s |
 | 11 | o3 Basic Tools | [JSONL.gz](artifacts/results/worldsense/experiment_11_basic_tools/output_test.jsonl.gz) | medium | `ask_caption`, `ask_perception` | 58.39% (1852/3172) | 39.017k | 0.947k | 1.072k | 1.986 | $0.03139 | 31.29 s |
 | 12′ | o3 + Omni Clip Perception (approximation) | [JSONL](/mnt/ceph_rbd/data/avqa_project/WorldSense/worldsense_dspy_free_react_o3_gemini25flash_omni_clip_perception_exp12prime_approximation_whole_video_timestamp3_maxturns6/output_test.jsonl) | medium | `ask_caption`, `ask_perception`, `omni_clip_perception` | 57.79% (1833/3172) | 42.631k | 1.176k | 1.108k | 2.011 | $0.03507 | 27.70 s§ |
 | 13 | o3 + Both Omni Clip Tools | [JSONL.gz](artifacts/results/worldsense/experiment_13_both_omni_clip_tools/output_test.jsonl.gz) | medium | `ask_caption`, `ask_perception`, `omni_clip_caption`, `omni_clip_perception` | 57.88% (1836/3172) | 41.603k | 1.177k | 1.113k | 2.087 | $0.03533 | — |
