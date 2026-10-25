@@ -768,6 +768,8 @@ def run_one(
                 video_id=payload.get("video_id"),
                 question_id=payload.get("question_id"),
                 video_description=payload.get("video_description"),
+                specialized_video_path=payload.get("specialized_video_path"),
+                specialized_audio_path=payload.get("specialized_audio_path"),
                 max_turns=max_turns,
             )
         payload["latency"] = latency_tracker.summary(complete=True)

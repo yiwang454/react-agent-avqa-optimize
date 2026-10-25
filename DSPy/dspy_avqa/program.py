@@ -772,6 +772,8 @@ class AVQADSPyReActProgram(dspy.Module):
         video_id: str | None = None,
         question_id: str | None = None,
         video_description: str | None = None,
+        specialized_video_path: str | None = None,
+        specialized_audio_path: str | None = None,
         max_turns: int | None = None,
     ) -> dspy.Prediction:
         max_iters = max_turns or self.context.max_turns
@@ -921,10 +923,22 @@ class AVQADSPyReActProgram(dspy.Module):
                 if tool_name == "video_metadata"
                 else selected_perception_model()
             )
+            specialized_tool = tool_name in {
+                "audio_global_caption",
+                "audio_qa",
+                "video_global_qa",
+                "video_clip_qa",
+            }
+            tool_video_path = (
+                (specialized_video_path or video_path) if specialized_tool else video_path
+            )
+            tool_audio_path = (
+                (specialized_audio_path or audio_path) if specialized_tool else audio_path
+            )
             call_tool_kwargs: dict[str, Any] = {
                 "tool_name": tool_name,
-                "video_path": video_path,
-                "audio_path": audio_path,
+                "video_path": tool_video_path,
+                "audio_path": tool_audio_path,
                 "tool_query": tool_query,
                 "question_id": question_id,
                 "caption_call_index": caption_call_index,
@@ -964,8 +978,8 @@ class AVQADSPyReActProgram(dspy.Module):
                     "perception_backend": perception_backend,
                     "tool_args": _tool_args(
                         tool_name,
-                        video_path,
-                        audio_path,
+                        tool_video_path,
+                        tool_audio_path,
                         tool_query,
                         time_range=tool_time_range,
                     ),

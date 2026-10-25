@@ -105,6 +105,8 @@ def build_input_state(cut: dict[str, Any], audio_caption_dir: Path | None) -> di
         "audio_path": audio_path,
         "video_id": custom.get("video_id"),
         "video_description": audio_caption,
+        "specialized_video_path": custom.get("specialized_video_path"),
+        "specialized_audio_path": custom.get("specialized_audio_path"),
     }
 
 
