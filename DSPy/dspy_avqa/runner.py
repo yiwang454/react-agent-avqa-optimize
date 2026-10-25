@@ -886,6 +886,19 @@ def run_batch() -> None:
             },
             "effective": {
                 "planner": planner_effective_config(context),
+                "expected_o3_wire_request_fields": (
+                    {
+                        "model": "o3",
+                        "reasoning_effort": context.planner_reasoning_effort,
+                        "seed": context.planner_seed,
+                        "max_completion_tokens": context.planner_max_tokens,
+                        "temperature": "omitted by LiteLLM o-series transport",
+                        "top_p": "omitted by LiteLLM o-series transport",
+                        "top_k": "omitted by LiteLLM o-series transport",
+                    }
+                    if context.planner_provider == "elm_gpt" and context.planner_model == "o3"
+                    else None
+                ),
                 "allowed_tools": context.allowed_tools,
                 "caption_placement": context.caption_placement,
                 "caption_cache_scope": context.caption_cache_scope,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import subprocess
 from typing import Any
 
 import yaml
@@ -19,6 +20,42 @@ _REASONER_SAMPLING_KEYS = {
     "seed",
 }
 _SENSITIVE_KEY_PARTS = ("api_key", "token", "password", "secret", "credential")
+
+
+def git_provenance(start_path: Path | None = None) -> dict[str, Any]:
+    """Return the current Git revision without making config persistence fragile."""
+    cwd = (start_path or Path(__file__)).resolve()
+    if cwd.is_file():
+        cwd = cwd.parent
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    try:
+        repository_root = git("rev-parse", "--show-toplevel").stdout.strip()
+        commit = git("rev-parse", "HEAD").stdout.strip()
+        branch = git("branch", "--show-current").stdout.strip() or None
+        status = git("status", "--porcelain", "--untracked-files=normal").stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return {
+            "available": False,
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+
+    return {
+        "available": True,
+        "repository_root": repository_root,
+        "branch": branch,
+        "commit": commit,
+        "detached_head": branch is None,
+        "dirty": bool(status.strip()),
+    }
 
 
 def _mapping(value: Any, *, section: str, path: Path) -> dict[str, Any]:
@@ -185,6 +222,7 @@ def save_resolved_experiment_config(
 ) -> Path:
     """Save and optionally print the same redacted resolved experiment mapping."""
     resolved = redact_sensitive(payload)
+    resolved.setdefault("git", git_provenance())
     rendered = yaml.safe_dump(resolved, sort_keys=False, allow_unicode=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "resolved_experiment_config.yaml"
