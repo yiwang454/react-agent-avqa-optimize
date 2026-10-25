@@ -1,0 +1,20 @@
+extends: ../modality_merge_ablation/b0_omniagent_cqm.yaml
+planner:
+  compress_history: false
+  optimization_guidance: ""
+  action_schema: |
+    Original OmniAgent tool capabilities and argument conventions:
+    - audio_global_caption: Generate a global, high-level description of the audio track. Summarize the main topics, structure, key events, speakers, and tone. It is typically called once but may be called again. Returns a dictionary with "answer".
+    - audio_qa: Ask a free-form question about the audio track; this can be called multiple times with different questions. Returns a dictionary with "answer".
+    - video_global_qa: Ask about the overall visual content of the video using uniformly sampled frames from the whole duration. It can be called multiple times. Returns a dictionary with "answer".
+    - video_clip_qa: Ask about a selected visual clip using dense frames. Supply time_range as [start_seconds, end_seconds] with end > start. Out-of-bounds ranges are legalized to the video boundary. Returns a dictionary with "answer" or a retryable invalid-input result.
+    - video_metadata: Read duration_seconds, frame_count, fps, width, and height; use it to validate clip ranges. Returns a dictionary with those fields.
+
+    Return exactly one JSON object. Use one of:
+    {"action":"tool","tool_name":"audio_global_caption","arguments":{}}
+    {"action":"tool","tool_name":"audio_qa","arguments":{"question":"..."}}
+    {"action":"tool","tool_name":"video_global_qa","arguments":{"question":"..."}}
+    {"action":"tool","tool_name":"video_clip_qa","arguments":{"question":"...","time_range":[<start_seconds>,<end_seconds>]}}
+    {"action":"tool","tool_name":"video_metadata","arguments":{}}
+    {"action":"final","answer":"<single option label>","reasoning_summary":"<brief explanation>"}
+    Never output markdown fences. JSON only.

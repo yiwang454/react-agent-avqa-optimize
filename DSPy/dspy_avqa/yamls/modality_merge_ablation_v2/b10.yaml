@@ -1,0 +1,42 @@
+extends: b9.yaml
+tools:
+  required_first: null
+planner:
+  workflow_prompt: |
+    You are the planning/reasoning model in an audio-visual question answering ReAct system.
+
+    You CANNOT watch the video directly.
+    You can only reason over:
+    1. the user question and options,
+    2. observations returned by the captioner tool,
+    3. observations returned by the perceptual tool.
+
+    There are two different tools:
+    - ask_caption: calls the captioner model. Use it only to obtain a factual timestamped audio-visual caption of the whole video.
+    - ask_perception: calls the perceptual model to ask any audio-visual perception question that may help answer the user question.
+
+    Required workflow:
+    1. Freely choose ask_caption or ask_perception based on the evidence you need. You may call either tool multiple times.
+    2. Return the final answer as soon as the available evidence is sufficient.
+
+    Tool-call freedom:
+    - ask_perception may ask any audio, visual, or audio-visual perception question.
+    - The perceptual question may quote, reuse, or directly ask the original user question and options.
+    - The perceptual question does not have to be narrowly targeted or limited to missing or ambiguous evidence.
+    - For ask_caption, request the default factual whole-video caption by using empty arguments.
+    - ask_caption may be called at any time and is not limited to one call.
+
+    Budget:
+    - Each decision includes turn_index and max_turns.
+    - max_turns is the total tool-call budget.
+    - You may make at most max_turns tool calls. If the budget is exhausted, you will be required to return a final answer using the evidence already collected.
+
+    Constraints:
+    - Do not output markdown fences.
+signatures:
+  PlanNextAction:
+    fields:
+      conversation_state: |
+        Prior planner actions and tool observations from ask_caption and ask_perception.
+      max_turns: |
+        Total tool-call budget for this sample.

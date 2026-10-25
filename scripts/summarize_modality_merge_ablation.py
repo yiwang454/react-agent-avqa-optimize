@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -45,15 +47,19 @@ def main() -> None:
     live_cost = 0.0
     latency_total = 0.0
     latency_count = 0
+    per_question_calls: list[int] = []
     for row in rows:
         question = row.get("question_data") or {}
         metrics = question.get("metrics") or {}
+        if not metrics:
+            raise ValueError(f"Missing per-question metrics for {row.get('video_id')}")
         evaluation = metrics.get("evaluation") or {}
         correct += int(evaluation.get("correct") is True)
         parseable += int(evaluation.get("parseable") is True)
         invalid += int(_number(metrics, "tool_calls", "invalid_total"))
         budget_reached += int((metrics.get("budget") or {}).get("reached") is True)
         tool_counts.update((metrics.get("tool_calls") or {}).get("executed_by_tool") or {})
+        per_question_calls.append(int(_number(metrics, "tool_calls", "budgeted_total")))
         final_status[str((metrics.get("final_answer") or {}).get("status") or "missing")] += 1
         live_input += _number(metrics, "tokens", "live_total", "input_tokens")
         live_output += _number(metrics, "tokens", "live_total", "output_tokens")
@@ -65,6 +71,7 @@ def main() -> None:
             latency_count += 1
 
     count = len(rows)
+    sorted_calls = sorted(per_question_calls)
     summary = {
         "questions": count,
         "correct": correct,
@@ -78,6 +85,14 @@ def main() -> None:
         ),
         "latency_coverage": latency_count,
         "tool_calls": dict(sorted(tool_counts.items())),
+        "tool_call_distribution": {
+            "mean": sum(per_question_calls) / count if count else 0,
+            "median": median(per_question_calls) if count else 0,
+            "p95_nearest_rank": sorted_calls[math.ceil(0.95 * count) - 1] if count else 0,
+            "maximum": sorted_calls[-1] if count else 0,
+            "questions_over_6": sum(value > 6 for value in per_question_calls),
+            "fraction_over_6": sum(value > 6 for value in per_question_calls) / count if count else 0,
+        },
         "invalid_calls": invalid,
         "questions_reaching_budget": budget_reached,
         "final_answer_status": dict(sorted(final_status.items())),

@@ -1,0 +1,4 @@
+extends: ../daily_qa_prompt_v8_free_react_caption_in_task.yaml
+planner:
+  compress_history: false
+  optimization_guidance: ""

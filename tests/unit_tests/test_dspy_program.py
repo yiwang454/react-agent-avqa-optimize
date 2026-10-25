@@ -320,6 +320,48 @@ def _run_caption_then_perception(tmp_path, caption_placement: str):
     return result, planner_inputs, long_caption
 
 
+def test_stage_b_routes_specialized_and_omni_media_and_renders_full_task_caption():
+    yaml_path = DSPY_PACKAGE_DIR / "yamls" / "modality_merge_ablation_v2" / "b4.yaml"
+    prompt_config.load_prompt_config(yaml_path)
+    context = _FakeRuntimeContext()
+    context.allowed_tools = (
+        "ask_caption", "audio_qa", "video_global_qa", "video_clip_qa", "video_metadata"
+    )
+    context.caption_placement = "task"
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    requests = []
+    media_calls = []
+    caption = "FULL CAPTION " * 100
+
+    def plan(*, task, conversation_state, turn_index, max_turns):
+        requests.append((task, conversation_state, turn_index, max_turns))
+        if turn_index == "1":
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        if turn_index == "2":
+            return '{"action":"tool","tool_name":"audio_qa","arguments":{"question":"sound?"}}', [], None
+        return '{"action":"final","answer":"A"}', [], None
+
+    def call_tool(**kwargs):
+        media_calls.append(kwargs)
+        return caption if kwargs["tool_name"] == "ask_caption" else {"answer": "sound"}
+
+    avqa_program._plan_next_action = plan
+    avqa_program._call_tool = call_tool
+    result = avqa_program.forward(
+        question="Question?", options_json='["A. yes", "B. no"]',
+        video_path="/media/original.mp4", audio_path="/media/original.wav",
+        specialized_video_path="/media/sepav/sample.mp4",
+        specialized_audio_path="/media/sepav/sample.wav",
+        question_id="sample", video_description=None, max_turns=30,
+    )
+    assert media_calls[0]["video_path"] == "/media/original.mp4"
+    assert media_calls[1]["video_path"] == "/media/sepav/sample.mp4"
+    assert media_calls[1]["audio_path"] == "/media/sepav/sample.wav"
+    assert caption.strip() in requests[1][0]
+    assert caption.strip() not in requests[1][1]
+    assert result["turn_trace"][1]["tool_args"]["video_path"] == "/media/sepav/sample.mp4"
+
+
 def test_cached_caption_preserves_v8_tool_flow_without_live_captioner(tmp_path, monkeypatch):
     prompt_yaml = tmp_path / "prompt.yaml"
     _write_planner_prompt_yaml(prompt_yaml, include_video_description=True)
@@ -509,6 +551,46 @@ def test_default_caption_placement_keeps_caption_in_conversation_state(tmp_path)
     assert long_caption not in planner_inputs[1]["task"]
     assert long_caption in planner_inputs[1]["conversation_state"]
     assert program.CAPTION_MOVED_TO_TASK_MARKER not in planner_inputs[1]["conversation_state"]
+
+
+def test_b5_flex_free_caption_stays_in_conversation_state():
+    prompt_config.load_prompt_config(
+        DSPY_PACKAGE_DIR / "yamls/modality_merge_ablation_v2/b5_flex.yaml"
+    )
+    context = _FakeRuntimeContext()
+    context.allowed_tools = (
+        "ask_caption",
+        "ask_perception",
+        "omni_clip_perception",
+        "video_metadata",
+    )
+    context.caption_placement = "conversation_state"
+    avqa_program = program.AVQADSPyReActProgram(context=context)
+    planner_inputs = []
+    caption = "full freely requested caption"
+
+    def plan(*, task, conversation_state, turn_index, max_turns):
+        planner_inputs.append((task, conversation_state))
+        if turn_index == "1":
+            return '{"action":"tool","tool_name":"ask_caption","arguments":{}}', [], None
+        return '{"action":"final","answer":"A"}', [], None
+
+    avqa_program._plan_next_action = plan
+    avqa_program._call_tool = lambda **kwargs: caption
+    result = avqa_program.forward(
+        question="Question?",
+        options_json='["A. yes", "B. no"]',
+        video_path="/media/original.mp4",
+        question_id="sample",
+        video_description=None,
+        max_turns=30,
+    )
+
+    assert "Coarse video/audio description: unknown" in planner_inputs[1][0]
+    assert caption not in planner_inputs[1][0]
+    assert caption in planner_inputs[1][1]
+    assert program.CAPTION_MOVED_TO_TASK_MARKER not in planner_inputs[1][1]
+    assert result["turn_trace"][0]["required_first_tool"] is None
 
 
 def test_task_caption_placement_moves_caption_into_later_task(tmp_path):

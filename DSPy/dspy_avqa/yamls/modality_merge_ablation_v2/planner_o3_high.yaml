@@ -1,0 +1,7 @@
+model:
+  provider: elm_gpt
+  name: o3
+sampling_params:
+  max_tokens: 32768
+  reasoning_effort: high
+  seed: 1234
