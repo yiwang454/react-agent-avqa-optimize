@@ -685,6 +685,7 @@ def video_global_qa(
         video_path=video_path,
         audio_path=None,
         prompt=prompt,
+        video_fps=2.0,
     )
 
 

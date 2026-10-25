@@ -697,33 +697,44 @@ class AVQADSPyReActProgram(dspy.Module):
                     caption_cache_source_backend=cached.source_backend,
                     caption_cache_source_token_usage=cached.source_token_usage,
                 )
-                return cached.response
+                return (
+                    {"answer": cached.response}
+                    if tool_name == "audio_global_caption"
+                    else cached.response
+                )
             if tool_name == "audio_global_caption":
-                return audio_global_caption(video_path=video_path, audio_path=audio_path)
+                return {
+                    "answer": audio_global_caption(video_path=video_path, audio_path=audio_path)
+                }
             return ask_caption(
                 video_path=video_path,
                 audio_path=audio_path,
                 caption_instruction=tool_query,
             )
         if tool_name == "audio_qa":
-            return audio_qa(
-                video_path=video_path,
-                audio_path=audio_path,
-                question=tool_query,
-            )
+            return {
+                "answer": audio_qa(
+                    video_path=video_path,
+                    audio_path=audio_path,
+                    question=tool_query,
+                )
+            }
         if tool_name == "video_global_qa":
-            return video_global_qa(
-                video_path=video_path,
-                audio_path=audio_path,
-                question=tool_query,
-            )
+            return {
+                "answer": video_global_qa(
+                    video_path=video_path,
+                    audio_path=audio_path,
+                    question=tool_query,
+                )
+            }
         if tool_name == "video_clip_qa":
-            return video_clip_qa(
+            result = video_clip_qa(
                 video_path=video_path,
                 audio_path=audio_path,
                 question=tool_query,
                 time_range=time_range,
             )
+            return {"answer": result} if isinstance(result, str) else result
         if tool_name == "video_metadata":
             return video_metadata(video_path=video_path, audio_path=audio_path)
         if tool_name == "omni_clip_caption":
