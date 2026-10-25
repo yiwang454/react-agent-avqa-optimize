@@ -6,6 +6,11 @@ result_examples/
 scripts/analysis_results/
 old_scripts
 scripts/experiment_records/
+Cache/
+
+# artifacts
+artifacts/
+exp10_vs_omniagent_tool_use.png
 
 # smoke test / temporary tests for development
 scripts/gemini_official_api.py

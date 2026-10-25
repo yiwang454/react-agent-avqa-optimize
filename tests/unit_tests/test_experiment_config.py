@@ -113,6 +113,34 @@ def test_resolved_config_is_serializable_redacted_and_optionally_printed(tmp_pat
     assert rendered in captured
 
 
+def test_resolved_config_records_git_provenance(tmp_path, monkeypatch):
+    expected = {
+        "available": True,
+        "repository_root": "/repo",
+        "branch": "feat/example",
+        "commit": "a" * 40,
+        "detached_head": False,
+        "dirty": True,
+    }
+    monkeypatch.setattr(experiment_config, "git_provenance", lambda: expected)
+
+    output_path = experiment_config.save_resolved_experiment_config(
+        tmp_path,
+        {"mode": "inference"},
+        print_config=False,
+    )
+
+    loaded = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert loaded["git"] == expected
+
+
+def test_git_provenance_degrades_gracefully_outside_repository(tmp_path):
+    provenance = experiment_config.git_provenance(tmp_path)
+
+    assert provenance["available"] is False
+    assert "error" in provenance
+
+
 def test_g0_gepa_yaml_preserves_static_budget_and_tracking():
     payload = yaml.safe_load((YAML_DIR / "gepa_g0_planner.yaml").read_text(encoding="utf-8"))
 
